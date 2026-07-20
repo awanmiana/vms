@@ -1,0 +1,15 @@
+{
+  "name": "vms-operator-console",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vendor-neutral VMS operator console — standalone prototype. See Development_plan.md for scope, status, and the controlling roadmap.",
+  "license": "MIT",
+  "author": "Zubair Awan",
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "test": "node test-all.js",
+    "start": "node backend/server.js"
+  }
+}
