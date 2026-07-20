@@ -4,7 +4,7 @@ This is the first Windows-friendly prototype for the CCTV operator workflow. It 
 
 ## Approved product direction (P0-01)
 
-The controlling [P0-01 architecture contract](Features%20Guide.md#p0-01-accepted-architecture-contract) defines the target product:
+The controlling [P0-01 architecture contract](Development_plan.md#p0-01-accepted-architecture-contract) defines the target product:
 
 - A self-contained standalone installation for small deployments, with optional self-hosted coordination and scale-out components for shared sites and control rooms.
 - No mandatory proprietary cloud, recurring vendor subscription, or forced telemetry.
@@ -16,10 +16,10 @@ The current runtime is only the **Standalone prototype**. Coordinated/scale-out 
 
 ## Approved product boundary (P0-02)
 
-The core is vendor-neutral. Reference Vendor is the first registered adapter identity and
-the first planned device implementation, but no real Reference Vendor operation is
-claimed yet. Adapter selection is explicit: a free-text vendor name or device type
-cannot silently select Reference Vendor, open interoperability, or another integration.
+The core is vendor-neutral. An identity-only reference adapter is registered to prove
+the boundary, but no real vendor operation is claimed yet. Adapter selection is
+explicit: a free-text vendor name or device type cannot silently select a vendor
+adapter, ONVIF, or another integration.
 
 Vendor/protocol code must remain behind the versioned adapter boundary. Missing or
 unverified operations report `unsupported`, `unknown`, or `unavailable` instead of
@@ -83,11 +83,15 @@ test client through P0-04 and the initial media-contract work. Selecting a nativ
 shell before data authority, persistence, codec, media-process, and capacity
 requirements are approved would lock in deployment assumptions too early.
 
-## Current modules
+## Current prototype modules
 
-1. Monitor workspace with a Live View resource tree, camera/group search, fixed-grid and draggable spatial-canvas modes, live group controls, PTZ placeholders, digital zoom, fullscreen controls, and a selected-camera drawer.
+The modules below describe code that is present for evaluation; they are not roadmap
+approval or production-readiness claims. Feature status lives only in
+[`Development_plan.md`](Development_plan.md).
+
+1. Monitor workspace with a camera-first layered canvas, over-grid resource tree and search, fixed-grid and draggable spatial-canvas modes, live group controls, PTZ placeholders, digital zoom, fullscreen controls, and a selected-camera drawer.
 2. Multiple persistent Live View workspace tabs. Each tab keeps its own open cameras, selection, grid division, and presentation state.
-3. Remote Playback with a resource section matching Live View, independent camera/group search, fixed-grid and draggable spatial-canvas modes, date-range controls, a timeline/scrubber, and multiple persistent playback tabs.
+3. Remote Playback using the same responsive layered workspace as Monitor, with independent camera/group search, a selected-camera playback drawer, fixed-grid and draggable spatial-canvas modes, date-range controls, a draggable requested-footage timeline/scrubber, and multiple persistent playback tabs.
 4. Device Manager for generic prototype NVR, DVR, hybrid DVR, and direct IP-camera records; displayed vendor names are metadata, not compatibility claims.
 5. Editable Camera Catalog for camera identity, tags, areas, recorder/channel mapping, and route metadata.
 6. Click-based Route Builder for selecting a camera and mapping previous, next, and nearby cameras.
@@ -168,18 +172,18 @@ The current stream-tier policy distinguishes `main`, `sub`, `thumb`, and `paused
 view work. That tier selection is separate from the later high/medium/low/idle
 device-activity priority model.
 
-Architecture planning files:
+## Planning and technical references
 
-- `Features Guide.md` (controlling approval-gated roadmap, P0-01 deployment contract, P0-02 vendor boundary, P0-03 failure contract, and preserved market feature research)
-- `docs/failure-behavior.md`
-- `docs/UI_REDESIGN_PLAN.md`
-- `docs/sqlite-schema.sql`
-- `docs/media-policy.md`
-- `docs/camera-tracking-architecture-spec.md`
-- `docs/camera-tracking-architecture-spec-v2.md`
-- `docs/compliance-query-architecture-spec.md`
-- `docs/shared-data-layer-architecture-spec.md`
-- `docs/sqlite-schema.sql` includes the target spatial-canvas tables, voice aliases, command log, breadcrumb spatial context, entity/location mapping, tag index, compliance history/logging, and WhatsApp query-ticket tables.
+[`Development_plan.md`](Development_plan.md) is the only development plan, feature
+catalog, development sequence, approval/status ledger, and verification checklist.
+Retained files under `docs/` document approved or currently implemented technical
+contracts; none defines a separate backlog or "next" item.
+
+Key references include:
+
+- `docs/failure-behavior.md` (normative detail for approved P0-03 behavior)
+- `docs/media-policy.md` (provisional prototype stream policy implemented by current backend code)
+- `docs/sqlite-schema.sql` (exploratory target schema, not a P0-04 persistence decision)
 
 Backend foundation files:
 
@@ -191,7 +195,7 @@ Backend foundation files:
 - `backend/check.js`
 - `backend/api-routes.js`
 - `backend/server.js`
-- `backend/device-adapters/` (vendor-neutral contract/registry plus the identity-only Reference Vendor shell)
+- `backend/device-adapters/` (vendor-neutral contract/registry plus an identity-only reference shell)
 - `backend/device-integration.js` (normalized integration-service boundary; no real vendor I/O yet)
 - `shared/resilience/` (versioned P0-03 availability, command-safety, health, recovery, and resource-policy contracts)
 - `backend/resilience/` (injectable backend facade over the shared pure policies; not a collector, queue, coordinator, or retry worker)
@@ -221,47 +225,27 @@ Run the complete dependency-free regression suite with:
 node test-all.js
 ```
 
-Focused frontend checks include:
+Individual test files are implementation details of that suite. Verification evidence
+and dates belong beside the applicable item in `Development_plan.md`, not in a second
+README checklist.
 
-```powershell
-node test-device-model.js
-node test-workspaces.js
-node backend\test-spatial-policy.js
-```
-
-## Native transition
+## Native-shell boundary
 
 Backend implementation and testing should continue now while this web shell acts
 as the client and interaction harness.
 
-Before true native or operating-system-detached workspaces, the backend needs:
+True native or operating-system-detached workspaces depend on approved data authority,
+stable inventory/layout/playback/resource-lease contracts, central resource admission,
+measured workstation/codec profiles, and a verified real-media path. Those dependencies
+are mapped to C0, P0-04 through P0-13, P1, P3, and P5 in the controlling guide.
 
-1. P0-04-approved authoritative data ownership and persistence.
-2. Stable APIs or IPC contracts for inventory, layouts, playback requests, and
-   camera-session leases.
-3. A central resource broker for decoder, GPU, connection, and bandwidth budgets.
-4. Approved workstation and codec profiles under P0-05 through P0-13.
-5. One verified real-media path that proves the process and failure boundaries.
+After the required gates pass, a native stack can be evaluated against measured
+requirements. The current frontend remains useful as the operator interaction and
+backend test harness.
 
-After those decisions, Electron, Tauri, Qt, or another native stack can be
-evaluated using measured requirements. The present frontend work remains useful
-because it defines the operator behavior and can be hosted by a later desktop
-shell if approved.
+## Development plan
 
-## Prototype gaps awaiting roadmap approval
-
-The list below is historical planning context, not authorization to implement. Each item must follow the controlling roadmap's discussion and approval gate.
-
-1. Discuss and approve P0-04, then replace the temporary JSON inventory store with the selected production persistence architecture.
-2. Add secure device/NVR credential vaulting so operators never store NVR passwords directly.
-3. Add open interoperability discovery and real channel/profile import.
-4. Add RTSP preview using a native media bridge.
-5. Add floorplan/background image import for the map canvas.
-6. Add entity/location camera mapping plus compliance overlays on camera views.
-7. Add strict `YYYY-MM-DD`, `HH:MM:SS`, and `YYYY-MM-DD HH:MM:SS` validation to operator-facing forms.
-8. Add compliance log creation, including reviewed cameras, locations, footage time range, and manager response.
-9. Add WhatsApp query-ticket ingestion and ticket-driven playback staging.
-10. Connect playback panes to real NVR/DVR playback streams and evidence export.
-11. Add WhatsApp Business/API handoff or one-click clipboard copy for report text.
-12. Replace prototype user access with authenticated accounts and encrypted credential handling.
-13. Move layout sharing and camera-session admission to an authoritative backend before enabling external detached windows or multiple native processes.
+The complete current build-once consolidation track, product phases, project-specific
+tracking/compliance features, UI carryover, acceptance checks, and the next controlling
+gate are maintained in [`Development_plan.md`](Development_plan.md). This README
+intentionally does not duplicate that backlog.

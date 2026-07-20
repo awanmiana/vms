@@ -3467,3 +3467,595 @@ body:not(.monitor-mode) select {
 body:not(.monitor-mode) .app-status-bar {
   border-top: 1px solid var(--app-glass-border);
 }
+
+/* --- Shared camera-first operational canvas -----------------------------
+   Live and Playback use the same internal stack: camera stage at the back,
+   timeline and panels above it, then launchers/search/tabs and popovers. */
+
+html,
+body {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell {
+  grid-template-columns: 148px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: 100%;
+  min-width: 0;
+  height: 100dvh;
+  min-height: 0;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.workspace {
+  min-width: 0;
+  min-height: 0;
+}
+
+body.video-workspace-mode .app-shell {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+body.video-workspace-mode .workspace {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+  background: #0b0d12;
+}
+
+body.video-workspace-mode .topbar {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  z-index: 52;
+  display: block;
+  width: clamp(240px, 38vw, 520px);
+  min-height: 0;
+  margin: 0;
+  transform: translateX(-50%);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body.video-workspace-mode .topbar > div:first-child,
+body.video-workspace-mode .top-search > span,
+body.video-workspace-mode .topbar-actions {
+  display: none !important;
+}
+
+body.video-workspace-mode .top-search {
+  width: 100%;
+  max-width: none;
+}
+
+body.video-workspace-mode .top-search input {
+  height: 38px;
+  border: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--input) 54%, transparent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(16px) saturate(135%);
+  -webkit-backdrop-filter: blur(16px) saturate(135%);
+}
+
+body.video-workspace-mode .app-status-bar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 148px;
+  z-index: 54;
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  border: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
+  border-right: 0;
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--panel) 56%, transparent);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(16px) saturate(135%);
+  -webkit-backdrop-filter: blur(16px) saturate(135%);
+}
+
+body.video-workspace-mode .app-shell.sidebar-collapsed .app-status-bar {
+  left: 64px;
+}
+
+.video-workspace-view {
+  --video-overlay-gutter: 12px;
+  --video-overlay-top: 114px;
+  --video-status-inset: 40px;
+  --video-panel-width: clamp(236px, 23vw, 312px);
+  --video-panel-bottom: var(--video-status-inset);
+  isolation: isolate;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #0b0d12;
+}
+
+.playback-workspace-view {
+  --video-panel-bottom: 170px;
+}
+
+.video-workspace-view.active {
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 0 !important;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-items: stretch;
+  overflow: hidden !important;
+}
+
+.video-workspace-view.active:not(.workspace-floating) {
+  position: relative;
+}
+
+.video-workspace-view.workspace-floating {
+  min-width: 0 !important;
+  min-height: 0 !important;
+}
+
+.video-workspace-view.workspace-floating .video-workspace-panel {
+  border-radius: 8px;
+}
+
+body.video-workspace-mode #operatorView > .video-workspace-panel,
+body.video-workspace-mode #playbackView > .video-workspace-panel,
+.video-workspace-view > .video-workspace-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #0b0d12;
+  box-shadow: none;
+}
+
+.video-workspace-panel > .live-canvas-wrap,
+.video-workspace-panel > .playback-canvas-wrap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.video-workspace-panel #spatialCanvas,
+.video-workspace-panel #playbackSpatialCanvas,
+.video-workspace-panel .simple-live-grid,
+.video-workspace-panel .playback-panel .simple-live-grid,
+.video-workspace-panel .playback-tile-grid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+}
+
+.video-workspace-panel .simple-live-grid {
+  gap: 2px;
+  align-content: stretch;
+  overflow: hidden;
+  padding: 0;
+}
+
+.video-workspace-panel .simple-video-tile {
+  min-width: 0;
+  min-height: 0;
+}
+
+.video-workspace-view > .workspace-tabbar,
+.video-workspace-panel > .workspace-tabbar {
+  position: absolute;
+  top: var(--video-overlay-gutter);
+  right: var(--video-overlay-gutter);
+  left: var(--video-overlay-gutter);
+  z-index: 50;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 52%, transparent);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+}
+
+#operatorView > .video-overlay-panel,
+#playbackView > .video-overlay-panel {
+  display: none;
+}
+
+body.video-workspace-mode #operatorView > .video-overlay-panel.is-overlay-open,
+body.video-workspace-mode #playbackView > .video-overlay-panel.is-overlay-open,
+#operatorView > .video-overlay-panel.is-overlay-open,
+#playbackView > .video-overlay-panel.is-overlay-open {
+  position: absolute;
+  top: var(--video-overlay-top);
+  bottom: var(--video-panel-bottom);
+  z-index: 40;
+  display: grid;
+  width: var(--video-panel-width);
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 54%, transparent);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+}
+
+.video-workspace-view > .video-resource-panel.is-overlay-open {
+  left: var(--video-overlay-gutter);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.video-workspace-view > .video-inspector-panel.is-overlay-open {
+  right: var(--video-overlay-gutter);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.video-workspace-view .resource-tabs,
+.video-workspace-view .resource-search,
+.video-workspace-view .tree-footer,
+.video-workspace-view .drawer-header,
+.video-workspace-view .drawer-body {
+  background: transparent;
+}
+
+.video-workspace-view .resource-pane,
+.video-workspace-view .camera-list,
+.video-workspace-view .drawer-body {
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+}
+
+.video-workspace-view .camera-list {
+  height: auto;
+  overflow: auto;
+}
+
+.video-workspace-view .grid-floating-toolbar {
+  right: calc(var(--video-panel-width) + 24px);
+  bottom: var(--video-status-inset);
+  z-index: 48;
+  max-width: calc(100% - 24px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(20, 22, 27, 0.78);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(14px) saturate(135%);
+  -webkit-backdrop-filter: blur(14px) saturate(135%);
+}
+
+.playback-workspace-view .grid-floating-toolbar {
+  bottom: 174px;
+}
+
+.video-workspace-view .grid-tool-popover {
+  z-index: 64;
+}
+
+.panel-toggle-btn {
+  width: auto;
+  min-width: 44px;
+  padding: 0 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.panel-toggle-btn.active {
+  background: color-mix(in srgb, var(--accent) 34%, rgba(255, 255, 255, 0.08));
+  color: #ffffff;
+}
+
+.playback-workspace-view .pb-scrubber {
+  position: absolute;
+  right: var(--video-overlay-gutter);
+  bottom: var(--video-status-inset);
+  left: var(--video-overlay-gutter);
+  z-index: 44;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  max-height: 122px;
+  overflow: visible;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(20, 22, 27, 0.84);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+  padding: 8px 10px 10px;
+  backdrop-filter: blur(16px) saturate(135%);
+  -webkit-backdrop-filter: blur(16px) saturate(135%);
+}
+
+.playback-workspace-view .pb-transport {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  row-gap: 6px;
+}
+
+.playback-workspace-view .pb-range-control {
+  position: relative;
+  min-width: 0;
+}
+
+.playback-workspace-view .pb-range-btn {
+  max-width: min(330px, 34vw);
+  min-height: 30px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playback-workspace-view .pb-range-icon {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: 13px;
+}
+
+.playback-workspace-view .pb-range-popover {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 9px);
+  left: 0;
+  z-index: 66;
+  width: min(360px, calc(100vw - 32px));
+  min-width: 240px;
+  max-height: min(430px, calc(100vh - 150px));
+  overflow: auto;
+}
+
+.pb-footage-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #c7cad1;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.pb-footage-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pb-footage-legend i {
+  display: inline-block;
+  width: 13px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.pb-footage-legend i.available {
+  background: color-mix(in srgb, var(--accent) 70%, #ffffff 5%);
+}
+
+.pb-footage-legend i.missing {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #1c1f26;
+}
+
+.playback-workspace-view .pb-track-wrap {
+  display: flex;
+  min-width: 0;
+}
+
+.playback-workspace-view .pb-track {
+  min-width: 0;
+}
+
+.playback-workspace-view .pb-track:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.playback-workspace-view .pb-track-available {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent) 38%, transparent) 0 10px,
+      color-mix(in srgb, var(--accent) 25%, transparent) 10px 20px
+    );
+}
+
+.video-workspace-view:fullscreen,
+.video-workspace-view:-webkit-full-screen {
+  --video-status-inset: 12px;
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  background: #0b0d12;
+}
+
+.playback-workspace-view:fullscreen,
+.playback-workspace-view:-webkit-full-screen {
+  --video-panel-bottom: 142px;
+}
+
+.playback-workspace-view:fullscreen .grid-floating-toolbar,
+.playback-workspace-view:-webkit-full-screen .grid-floating-toolbar {
+  bottom: 146px;
+}
+
+@media (max-width: 980px) {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .brand-copy,
+  .nav-label,
+  #themeLabel {
+    display: none;
+  }
+
+  .nav-item,
+  .theme-toggle,
+  .sidebar-menu-button {
+    justify-content: center;
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  body.video-workspace-mode .app-status-bar,
+  body.video-workspace-mode .app-shell.sidebar-collapsed .app-status-bar {
+    left: 64px;
+  }
+
+  .video-workspace-view {
+    --video-panel-width: min(246px, calc(50% - 18px));
+  }
+
+  .workspace-resource-meter {
+    display: none;
+  }
+
+  .workspace-tab {
+    min-width: 104px;
+  }
+
+  .workspace-tab-actions {
+    gap: 3px;
+  }
+
+  .workspace-tab-actions button {
+    padding: 0 6px;
+  }
+
+  .video-workspace-view .grid-floating-toolbar {
+    right: var(--video-overlay-gutter);
+  }
+
+  .pb-footage-legend {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .brand-mark {
+    width: 36px;
+    height: 36px;
+  }
+
+  body.video-workspace-mode .app-status-bar,
+  body.video-workspace-mode .app-shell.sidebar-collapsed .app-status-bar {
+    left: 54px;
+  }
+
+  .video-workspace-view {
+    --video-overlay-gutter: 8px;
+    --video-overlay-top: 106px;
+    --video-panel-width: min(220px, calc(50% - 12px));
+  }
+
+  body.video-workspace-mode .topbar {
+    top: 58px;
+    width: min(420px, calc(100% - 24px));
+  }
+
+  .video-workspace-view > .workspace-tabbar,
+  .video-workspace-panel > .workspace-tabbar {
+    min-height: 38px;
+    padding-top: 3px;
+  }
+
+  .workspace-tab-actions [data-workspace-command="layer"] {
+    display: none;
+  }
+
+  .pb-filter-chip {
+    display: none;
+  }
+
+  .playback-workspace-view .pb-range-btn {
+    max-width: 190px;
+  }
+
+  .playback-workspace-view .pb-scrubber {
+    max-height: 134px;
+  }
+}
+
+@media (max-height: 640px) {
+  .video-workspace-view {
+    --video-overlay-top: 100px;
+  }
+
+  body.video-workspace-mode .topbar {
+    top: 56px;
+  }
+
+  .video-workspace-view > .workspace-tabbar,
+  .video-workspace-panel > .workspace-tabbar {
+    top: 8px;
+  }
+
+  .playback-workspace-view {
+    --video-panel-bottom: 156px;
+  }
+
+  .playback-workspace-view .grid-floating-toolbar {
+    bottom: 158px;
+  }
+
+  .playback-workspace-view .pb-scrubber {
+    gap: 5px;
+    max-height: 110px;
+    padding: 6px 8px 8px;
+  }
+
+  .pb-track {
+    height: 28px;
+  }
+}

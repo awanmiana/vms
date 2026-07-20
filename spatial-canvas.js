@@ -96,6 +96,7 @@
       this._lastPointer = null;
       this._pointerStart = null;
       this._panSettledTimer = null;
+      this._resizeObserver = null;
       this._isSettled = true;
       this._lastSettleAt = performance.now();
 
@@ -244,6 +245,12 @@
       this.canvas.addEventListener("wheel", this._onWheel, { passive: false });
       this.canvas.addEventListener("dblclick", this._onDblClick);
       window.addEventListener("resize", this._onResize);
+
+      const ResizeObserverCtor = global.ResizeObserver;
+      if (typeof ResizeObserverCtor === "function") {
+        this._resizeObserver = new ResizeObserverCtor(this._onResize);
+        this._resizeObserver.observe(this.canvas.parentElement || this.canvas);
+      }
     }
 
     _unbindEvents() {
@@ -253,6 +260,8 @@
       this.canvas.removeEventListener("wheel", this._onWheel);
       this.canvas.removeEventListener("dblclick", this._onDblClick);
       window.removeEventListener("resize", this._onResize);
+      this._resizeObserver?.disconnect();
+      this._resizeObserver = null;
     }
 
     _handleClick(event) {
@@ -283,8 +292,8 @@
     }
 
     _resizeToContainer() {
-      const parent = this.canvas.parentElement;
-      const rect = parent.getBoundingClientRect();
+      const container = this.canvas.parentElement || this.canvas;
+      const rect = container.getBoundingClientRect();
       this.canvas.width = Math.max(1, Math.floor(rect.width));
       this.canvas.height = Math.max(1, Math.floor(rect.height));
     }

@@ -1,6 +1,8 @@
 # Media Policy: Bandwidth, Streams, and Lockout Prevention
 
-The app must choose stream quality from screen role and device limits, not from fixed camera settings.
+> **Document role:** Prototype policy reference, not a second roadmap. Feature scope, order, status, production limits, and verification checks live in [`../Development_plan.md`](../Development_plan.md), especially C0-05, P0-05 through P0-13, P3-03, and P12-03.
+
+The current prototype chooses stream quality from screen role and configured device limits rather than fixed camera settings. The tiers and bitrate ranges below are provisional until supported workstation, codec, adapter, and measured capacity profiles are approved.
 
 ## Activity Priority Is Separate
 
@@ -62,14 +64,6 @@ Tracking mode should:
 - Downgrade unrelated tiles to `thumb` or `paused`.
 - Restore the previous layout when tracking ends.
 
-## Build Order
+## Roadmap Dependencies
 
-This is dependency order, not implementation authorization:
-
-1. Approve production persistence and schema ownership.
-2. Maintain the media policy decision engine.
-3. Maintain the device concurrency guard.
-4. Add one-camera live preview only through an approved adapter/protocol bridge.
-5. Import stream profiles only after the applicable standard/vendor evidence gate.
-6. Add recorder playback through its separately approved adapter operation.
-7. Add tracking pre-warm after live-stream behavior is verified.
+Production persistence remains P0-04 work; shared policy consolidation is C0-05; real live media and stream-profile import require P0-14/P2-14/P3 approval; recorder playback remains P5 work; tracking pre-warm depends on an approved and verified live-stream path. These are dependencies, not an independent implementation order.

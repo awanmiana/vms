@@ -4,6 +4,7 @@ const { spawnSync } = require("child_process");
 const tests = [
   "test-device-model.js",
   "test-workspaces.js",
+  "test-operational-ui.js",
   "backend/test-device-onboarding.js",
   "backend/test-api-server.js",
   "backend/test-schema-loader.js",

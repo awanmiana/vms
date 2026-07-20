@@ -1,6 +1,18 @@
-# VMS Development Master Checklist and Approval Plan
+# VMS Development Plan
 
-> **Status:** This is the controlling development roadmap. The research guide is preserved in full below it as discovery/reference material. A vendor claim in the research section is not automatically an approved requirement.
+> **Status:** This is the repository's single controlling development plan, complete feature catalog, development sequence, approval ledger, implementation-status record, and verification checklist. README files describe how the current prototype works; retained files under `docs/` are approved or implemented technical contracts and do not maintain a second backlog or build order.
+>
+> **Reference coverage:** A structural and item-by-item audit against the supplied original 623-line vendor-research guide on 2026-07-19 confirmed that all 143 original P0-P12 roadmap items and their statuses are represented here. The copied research appendix was excluded after its capability families were mapped to the roadmap.
+
+## Document Ownership and Third-Party Naming
+
+- This file alone answers **what is approved, what is next, what is built, and what has been verified**.
+- A technical specification may define how an approved item should behave, but it cannot change priority or status. If a specification conflicts with this file, this file controls.
+- Existing prototype code is recorded separately from roadmap status. Code that predates approval does not make its corresponding feature `Approved`, `Built`, or `Verified`.
+- The external reference guide is discovery material, not a second roadmap and not evidence that a third-party capability is supported.
+- The public roadmap uses capability-based wording. Exact third-party product or service names belong only in dated evidence records, adapter manifests, compatibility matrices, procurement records, or integration specifications where identification is necessary.
+- Standards and protocols such as ONVIF, RTSP, H.264, H.265, and SQLite may be named when they identify the exact technical contract under evaluation. Naming a standard or third party does not imply affiliation, endorsement, certification, or compatibility.
+- Vendor prose, product catalogs, part numbers, commercial terms, regional claims, and hardware figures must not be copied into this roadmap. Any such claim must be independently verified under P0-14 and P12-11 before it affects product scope.
 
 ## Approval Contract
 
@@ -11,7 +23,7 @@
 5. **Built** is checked only after implementation is complete. **Verified** is checked only after the agreed tests and acceptance criteria pass.
 6. An item may instead be recorded as **Changed**, **Deferred**, **Rejected**, or **Out of scope**. Deferred or rejected work must not be implemented.
 7. Benefits, capacity limits, commercial rules, regional availability, and safety/privacy claims are gates or acceptance criteria. They are not silently converted into product features.
-8. Any capability depending on Reference Vendor or another vendor requires confirmation of the exact product, mode, version, device/firmware, API or SDK, license, tenant, target country, and support terms before approval.
+8. Any capability depending on a vendor-specific product or managed service requires confirmation of the exact product, mode, version, device/firmware, API or SDK, license, tenant, target country, and support terms before approval.
 9. Existing project behavior will be reviewed against the relevant item; it will not be assumed correct merely because it already exists.
 
 ### Status Legend
@@ -33,8 +45,98 @@ For a Policy, Commercial, or Benefit item, **Built** means the agreed policy, co
 | Item | Discussion date | Decision | Agreed scope | Acceptance criteria / evidence | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | P0-01 | 2026-07-15 | Approved, built, and verified | Open-source hybrid VMS; permission-ready Administrator-first design; recorder-owned footage; standalone plus optional self-hosted coordination/scale-out; large distributed deployments; priority-based device activity | Accepted Architecture Contract, documentation consistency audit, Administrator-only prototype migration, and full regression suite | P0-01 is complete; later gates remain unapproved |
-| P0-02 | 2026-07-15 | Approved, built, and verified | Independent vendor-neutral VMS core with Reference Vendor as the first explicit adapter identity | Versioned async adapter contract, exact registry, Reference Vendor identity shell, explicit port validation, arbitrary-adapter/no-fallback tests, documentation audit, and full regression suite | Real vendor/protocol operations remain unapproved |
+| P0-02 | 2026-07-15 | Approved, built, and verified | Independent vendor-neutral VMS core with one identity-only reference adapter | Versioned async adapter contract, exact registry, identity-only reference shell, explicit port validation, arbitrary-adapter/no-fallback tests, documentation audit, and full regression suite | Real vendor/protocol operations remain unapproved |
 | P0-03 | 2026-07-17 | Approved, built, and verified | Standards-compatible modular failure behavior for an optional VMS data/interaction layer; autonomous source devices and recorder-owned footage; honest degraded/read-only/unknown states; non-replayable physical commands; replaceable resilience policies | Normative failure-behavior contract, standards-correction audit, shared versioned policy modules, injectable backend facade, current-prototype honesty fixes, focused policy/integration tests, browser verification, and full regression suite | Concrete collectors, queues, databases, authentication, media bridges, access controllers, clusters, and VMS-owned recording remain later gates |
+| C0 | 2026-07-19 | Build order approved; documentation consolidation built and verified; code consolidation pending | Build each shared domain rule, service primitive, and operational UI component once before adding another screen | C0 checklist below, duplicate-authority audit, reference-coverage audit, document-role cleanup, and full regression suite | C0 changes architecture, not unapproved product scope or the P0-04 persistence decision |
+
+## Immediate Track C0 - Build Once, Use Everywhere
+
+> The owner approved this consolidation order on 2026-07-19. C0 removes duplicate implementations and contradictory contracts before feature delivery resumes. It may refactor current adapters and prototype UI, but it must not select production persistence, add a real media bridge, or implement another unapproved product feature.
+
+- [x] Discussed | [x] Approved | [x] Built | [x] Verified - **C0-01 [Architecture] One development authority.** Keep every feature, delivery sequence, approval status, carryover item, and verification check in this file. README files remain operational descriptions; technical documents remain reference specifications without their own build orders.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-02 [Architecture] Canonical inventory contracts and reconciliation.** Create one versioned device/camera/group model, one legacy upgrader, one stable ID policy, one device-channel reconciliation function, and one system-device-group builder. UI, API, services, JSON storage, and future SQL mappings must consume those contracts rather than reinterpret them.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-03 [Architecture] Transactional current persistence boundary.** Move atomic replace, rollback, declared-table schema, and typed persistence errors behind the current store adapter. Routes must not reach into adapter internals. This refactor must remain technology-neutral and must not pre-approve SQLite or any central database under P0-04.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-04 [Architecture] One operation and resilience vocabulary.** Centralize operation IDs; explicitly map adapter, policy, command, persistence, and HTTP outcomes; convert legacy health observations at their boundary; and make command/device execution consume the shared resilience policy service.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-05 [Architecture] Shared policy and utility primitives.** Use one browser/Node media policy, one stream-profile source, and shared configuration, validation, time, identifier, error, stable-sort, and policy-registry primitives where semantics are truly identical.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-06 [Architecture] Repository and composition boundary.** Define repository interfaces for the canonical domain, implement the current file-store adapter, inject repositories/services at one composition root, and remove parallel service construction.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-07 [NFR] Shared test infrastructure.** Move to one test runner style with reusable memory database, HTTP server, app loader, and domain factories; keep `node test-all.js` as the complete compatibility entry point.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **C0-08 [Architecture/Feature] One operational workspace component family.** Replace separate Live and Playback trees, rows, grids, toolbar handlers, popovers, fullscreen logic, workspace defaults, and legacy CSS overrides with two independently stateful instances of one configurable component family. Playback-only controls remain mode extensions.
+
+### C0 Verification Checklist
+
+- [x] The external reference and this guide contain the same 143 original P0-P12 items and the same pre-consolidation status.
+- [x] The copied research prose, product catalog, part numbers, vendor-derived hardware/capacity tables, commercial claims, and regional claims are not embedded in the controlling roadmap.
+- [x] Every repository document declares a single role: controlling roadmap, current-use README, normative approved contract, or non-authorizing reference specification.
+- [x] No repository document outside this file maintains an independent build order, backlog, Definition of Done, or feature-status checklist.
+- [ ] One inventory contract version and upgrader are consumed across browser, API, service, storage, and tests.
+- [ ] Device channel reduction, detachment, IDs, aliases, and automatic groups have one tested result across every layer.
+- [ ] Persistence replacement and rollback are adapter-owned, declared tables reject drift, and routes do not access store internals.
+- [ ] Operation identifiers are registered once and every cross-domain outcome conversion is explicit and tested.
+- [ ] Media tiers, bitrates, capacity guards, timestamps, IDs, validation, and coded errors each have one appropriate authority.
+- [ ] Services depend on repositories and one composition root; no production path uses a throw-only or parallel authority.
+- [ ] Test helpers replace repeated harnesses and fixtures while `node test-all.js` remains green.
+- [ ] Live and Playback render through the same operational component/controller family with mode-specific slots and independent state.
+- [ ] Browser-level resize, stacking, floating, fullscreen, accessibility, listener-lifecycle, and Playback timeline/segment tests pass.
+
+## Current Prototype Checkpoint - 2026-07-19
+
+This checkpoint records code that exists for evaluation. It does **not** check the P2, P3, or P5 roadmap boxes, because the corresponding production scope, real integrations, and full acceptance criteria remain unapproved.
+
+### Shared Operational UI Scaffold
+
+- [x] The camera stage/grid is the full background surface in Monitor and Playback.
+- [x] Workspace tabs, camera/group browser, per-workspace search, selected-camera inspector, and shared toolbars layer over the grid; the primary application rail remains outside the workspace stack.
+- [x] Playback keeps start/end date-time inputs, transport, day navigation, speed control, a requested-range footage bar, and a draggable playhead as a bottom mode extension.
+- [x] Fixed grids and spatial canvases follow their containers in docked, floating, restored, and narrow-window source-level regression checks.
+- [x] Live and Playback can be independently floated and ordered front/back without allowing either workspace to cover the primary rail.
+- [ ] Common UI is rendered by one component/controller family rather than parallel Live and Playback implementations.
+- [ ] A real-browser viewport matrix verifies resize, page-scroll, stacking, fullscreen, float recovery, and hidden-to-visible canvas behavior.
+- [ ] Monitor snapshot and recent-event behavior is functional and capability-gated.
+- [ ] Playback receives fresh recorder-backed availability segments and distinguishes available, missing, unknown, overlapping, and multi-source footage.
+- [ ] Real live/playback media, evidence export, secure credentials, authenticated access, and authoritative production persistence pass their controlling gates.
+
+### Approved Operational Workspace UI Decision
+
+The following bounded UI direction is approved for the shared scaffold and C0-08. It does not approve real media, evidence, device, or persistence behavior:
+
+1. Mount one Live instance and one Playback instance of the same configurable workspace component family. Do not move one literal DOM panel between routes; both workspaces may be visible or floating at once.
+2. Within each workspace, layer back-to-front: camera stage/grid; Playback timeline/range extension when applicable; resource browser and selected-camera inspector; shared grid toolbar and workspace tabs; per-workspace search; popovers, menus, and tooltips.
+3. The camera stage always fills the usable workspace. Opening an overlay must not reflow or shrink the grid. Overlay panels scroll internally; operational pages do not scroll.
+4. Live mode supplies digital zoom, PTZ, snapshot, stream settings, and recent-event extensions. Playback supplies start/end date-time selection, transport, speed/day navigation, availability segments, draggable playhead, and evidence actions.
+5. Each instance owns independent query, selection, panel state, grid division, maximized camera, tabs, canvas runtime, and playback range. Shared inventory and resource admission remain common services.
+6. Sizing is container-driven with recoverable dock/float/fullscreen transitions. Narrow layouts overlay controls rather than forcing a fixed-width canvas beyond the viewport.
+7. Requested time is never labeled as recorded or available footage. Availability, gaps, and source identity require fresh evidence from the selected recorder or recording service.
+
+### Operational Workspace Acceptance Checks
+
+- [ ] At representative desktop and restored-window sizes, document scroll remains absent, stage bounds equal workspace bounds, overlays remain inside the workspace, and the application rail never intersects a workspace.
+- [ ] Computed stacking order is stage < Playback timeline < panels < toolbar/tabs/search < popovers, with the active floating workspace above the other.
+- [ ] Fixed divisions and both spatial canvases exactly track container size after resize, rail collapse, dock/float, fullscreen, maximize/restore, and hidden-to-visible transitions.
+- [ ] Opening the resource browser or inspector does not change stage bounds; both panels remain keyboard reachable and internally scrollable.
+- [ ] Live query, selection, panels, grid, and maximize state never mutate Playback state, and the reverse is also true while both are visible.
+- [ ] Shared camera-session limits include all active/inactive, docked/floating, and front/back workspaces without double-counting one camera inside one workspace.
+- [ ] Playback validates start before end, handles invalid/empty/time-zone cases, supports pointer and keyboard scrubbing, and exposes accessible playhead value text.
+- [ ] Availability tests cover continuous/event segments, gaps, overlaps, duplicate sources, source outage, partial-camera results, and unknown state.
+- [ ] One handler is registered per action, observers/listeners are cleaned up, inactive work is bounded, and lifecycle tests detect duplicate dispatch.
+- [ ] Keyboard focus, screen-reader labels, non-color status cues, reduced motion, loading, empty, unsupported, stale, read-only, and partial-error states are verified.
+
+## Next Decision and Delivery Lanes
+
+There is one controlling order with parallel work only where it does not pre-empt an unapproved product decision:
+
+1. **Next code task:** C0-02 canonical inventory contracts and reconciliation, followed by C0-03 through C0-08 in their listed order.
+2. **Next product decision:** P0-04 authoritative data and persistence. C0 may clean the current adapter but may not select the production technology or authority model.
+3. **Frontend prototype lane:** after C0-08 and a separately recorded prototype authorization, the historical screen sequence is Devices, Events/Incidents, Reports/Compliance/Tickets, then Settings/Map/Access polish. A prototype screen does not check its P-phase feature boxes.
+
+| Frontend slice | Current state | Owning roadmap items |
+| :--- | :--- | :--- |
+| Application shell | Prototype scaffold present | P3-14 / C0-08 |
+| Monitor | Layered scaffold present; snapshot/recent events and real media remain incomplete | P3-01 through P3-17 |
+| Playback | Layered scaffold and requested-range timeline present; real availability/media/evidence remain incomplete | P5-01 through P5-10 |
+| Devices | Existing prototype inventory screen; redesign and real onboarding/integration remain unapproved | P2-01 through P2-14 |
+| Events/Incidents | Existing prototype elements; production event/alarm lifecycle remains unapproved | P5-08/P5-09 / P6-01 through P6-13 |
+| Reports/Compliance/Tickets | Existing report/compliance stubs and services; dedicated workflow remains unapproved | P1-11/P1-12 / P5-10 / P6-11 through P6-13 |
+| Settings/Map/Access | Prototype surfaces only; production capability, map, identity, and access scope remain unapproved | P0-05 through P0-17 / P1 / P7 / P8 |
 
 ## Phase 0 - Product Direction, Evidence, and Capacity Gates
 
@@ -48,8 +150,8 @@ For a Policy, Commercial, or Benefit item, **Built** means the agreed policy, co
 | :--- | :--- | :--- | :--- |
 | P0-01A | First users | Accepted | Release one starts with one **Administrator** role having all available privileges. Features must be designed around stable capabilities/permission boundaries so later role separation does not require rewriting them. The role editor and feature-to-role assignment will be built after the initial feature set; strong role-based permissions remain a later requirement under P1-02/P1-03. |
 | P0-01B | Site pattern and scale | Accepted | The intended architecture supports many local and remote control rooms, sites, and operators, with an eventual scale direction of hundreds of thousands of registered cameras and thousands of NVRs/DVRs. The software must not impose artificial commercial limits. Measurable release profiles and horizontal-scaling boundaries will be defined and tested later; "any number" is not an untested capacity guarantee. |
-| P0-01C | Primary topology | Accepted | **Hybrid** means self-contained standalone local operation plus optional self-hosted coordinated and scale-out operation for shared multi-site/control-room use. It does not imply a required Reference Vendor/proprietary cloud subscription. Exact service placement, synchronization, and failure behavior remain later gates. |
-| P0-01D | Cost and licensing | Accepted | The product is intended to be open source and must not require a Reference Vendor premium plan, mandatory proprietary cloud, recurring vendor subscription, or forced telemetry. The Reference Vendor guide is a feature-discovery checklist, not a dependency or licensing plan. The repository's specific open-source license remains a later owner decision. |
+| P0-01C | Primary topology | Accepted | **Hybrid** means self-contained standalone local operation plus optional self-hosted coordinated and scale-out operation for shared multi-site/control-room use. It does not imply a required proprietary cloud subscription. Exact service placement, synchronization, and failure behavior remain later gates. |
+| P0-01D | Cost and licensing | Accepted | The product is intended to be open source and must not require a premium vendor plan, mandatory proprietary cloud, recurring vendor subscription, or forced telemetry. The source research is a feature-discovery input, not a dependency or licensing plan. The repository's specific open-source license remains a later owner decision. |
 | P0-01E | Video-recording ownership | Accepted | The VMS will not normally ingest every camera continuously into its own central archive. NVRs, DVRs, devices, or user-selected storage remain authoritative for recordings. The VMS opens live streams when needed and requests recorded footage for playback/review or download on demand through supported device links/protocols. Downloaded evidence scope is handled separately under P5-08/P5-09. |
 | P0-01F | Enterprise architecture | Accepted at product-direction level | Optional self-hosted coordination stores shared VMS metadata, not continuous footage. Workers/site agents, load balancing, background processing, capacity-aware optimization, device activity priorities, and an optimization report may be added as scale requires. Exact database, service, high-availability, backup, auditing, and monitoring designs remain later gates. |
 | P0-01G | Data control | Accepted | The deployer controls where VMS metadata, logs, settings, credentials, and downloaded evidence are stored. The core has no forced cloud, telemetry, or country-specific hosting assumption. Country-specific legal deployment remains the deployer's responsibility. |
@@ -125,15 +227,15 @@ The following statements are normative for future development:
 - [x] JavaScript syntax checks and the complete dependency-free VMS regression suite pass.
 - [x] Product code for unapproved database, coordinator, HA, RBAC enforcement, device-priority scheduling, capacity optimization, or media bridges was not added.
 
-- [x] Discussed | [x] Approved | [x] Built | [x] Verified - **P0-02 [Architecture] Product boundary.** The project owner approved an independent, vendor-neutral core with Reference Vendor as the first adapter implementation. The versioned boundary, exact registry, identity-only Reference Vendor shell, normalized outcome safeguards, neutral port handling, documentation, and tests are implemented and verified. Real vendor/open-standard/RTSP/SDK/cloud operations remain unapproved.
+- [x] Discussed | [x] Approved | [x] Built | [x] Verified - **P0-02 [Architecture] Product boundary.** The project owner approved an independent, vendor-neutral core with one identity-only reference adapter. The versioned boundary, exact registry, identity-only shell, normalized outcome safeguards, neutral port handling, documentation, and tests are implemented and verified. Real vendor-specific, ONVIF, RTSP, SDK, and cloud operations remain unapproved until their individual evidence gates pass.
 
 ### P0-02 Accepted Vendor-Boundary Contract
 
-- The product is an independent, vendor-neutral VMS. Reference Vendor is the first prioritized adapter and reference integration, not the product identity, an exclusive dependency, or a claim of current device compatibility.
+- The product is an independent, vendor-neutral VMS. Its first registered integration is an identity-only reference adapter, not the product identity, an exclusive dependency, or a claim of current device compatibility.
 - The core owns normalized sites, devices, cameras/channels, groups, users/capability identifiers, jobs, events, health records, playback requests, evidence records, errors, UI workflows, persistence contracts, media policy, and auditing concepts.
 - Optional adapters own vendor/protocol identity, authentication/session details, device/model/firmware interpretation, discovery, channel/profile translation, status/events/errors, and approved device operations.
-- Adapter selection must use an explicit adapter identifier. Free-text vendor labels and generic device types must not select an adapter. There is no implicit Reference Vendor, open interoperability, or other fallback.
-- Reference Vendor is registered first as an **identity-only adapter shell**. Until later evidence and implementation gates are approved, its discovery, health, firmware, events, PTZ, live, playback, download, and configuration operations remain **unknown/not verified**.
+- Adapter selection must use an explicit adapter identifier. Free-text vendor labels and generic device types must not select an adapter. There is no implicit vendor-adapter, ONVIF, or other fallback.
+- The first registered adapter is an **identity-only reference shell**. Until later evidence and implementation gates are approved, its discovery, health, firmware, events, PTZ, live, playback, download, and configuration operations remain **unknown/not verified**.
 - Adapter outcomes must distinguish succeeded, failed, unsupported, unknown, and unavailable. Missing/unverified adapter support must not be recorded as a false offline device or failed physical command.
 - Other vendors can later implement the same versioned adapter contract without edits to core dispatch logic. Each real integration still requires its own evidence, security, protocol, device/firmware, licensing, and feature approval.
 - The project may use documented open standards and properly authorized vendor APIs/SDKs after verification. It must not call undocumented/private cloud endpoints, bypass activation/authentication/licensing/security controls, redistribute protected vendor code/assets without permission, or claim affiliation/certification/complete compatibility without evidence.
@@ -145,27 +247,27 @@ The following statements are normative for future development:
 | Versioned adapter manifest and operation contract | Production domain/schema migration and persisted adapter assignment (P0-04/P1-04) |
 | Exact registry with explicit adapter IDs and collision checks | Dynamic per-device capability negotiation and feature flags (P1-07) |
 | Async normalized operation outcomes | Worker/service/event topology (P1-05) |
-| Reference Vendor identity-only shell | vendor/open-standard discovery, authentication and channel import (P0-14/P2-03/P2-05/P2-14) |
+| Identity-only reference adapter shell | ONVIF or vendor-specific discovery, authentication, and channel import (P0-14/P2-03/P2-05/P2-14) |
 | Unknown/unsupported/unavailable safeguards | Live media, PTZ, diagnostics, playback and downloads (P3/P4/P5) |
 | Arbitrary second-adapter and no-fallback tests | Model/firmware compatibility and vendor support claims (P0-14/P12-02) |
 | Explicit device port validation in the common core | Adapter-specific port suggestions and onboarding UX (P2-01/P2-11) |
 
-#### Trademark and Licensing Boundary
+#### Third-Party Naming and Licensing Boundary
 
-Reference Vendor and related product names are trademarks of their respective owners. This independent project is not affiliated with or endorsed by Reference Vendor. The repository currently records an open-source intention but has no selected `LICENSE`; license selection and third-party/SDK redistribution review remain later owner decisions under P0-17.
+All third-party names and marks belong to their respective owners. This independent project makes no affiliation, endorsement, certification, or compatibility claim without documented evidence. Exact names are recorded only when required to identify an approved adapter, standard, source, entitlement, or compatibility result. The repository records an open-source intention but has no selected `LICENSE`; license selection and third-party/SDK redistribution review remain later owner decisions under P0-17.
 
 #### P0-02 Verification Checklist - 2026-07-15
 
 - [x] Adapter selection requires an explicit adapter ID; free-text vendor and device type are ignored by dispatch.
-- [x] Reference Vendor is the first and only default registered adapter identity and declares no verified operations.
-- [x] Missing or unknown adapter IDs never fall back to Reference Vendor, open interoperability, or another adapter.
+- [x] The identity-only reference shell is the first and only default registered adapter and declares no verified operations.
+- [x] Missing or unknown adapter IDs never fall back to a vendor adapter, ONVIF, or another protocol.
 - [x] Version/ID/alias/operation validation rejects malformed or colliding adapters.
 - [x] Operation results distinguish succeeded, failed, unsupported, unknown, and unavailable.
 - [x] Unregistered or unverified operations do not create false offline health records or failed physical-command records.
 - [x] An arbitrary second test adapter executes asynchronously without changes to core dispatch logic.
 - [x] The shared UI/API/service layer requires and preserves an explicit device port instead of injecting port 8000.
 - [x] Common device-management wording is vendor-neutral and existing vendor values are treated as metadata/demo fixtures.
-- [x] Documentation makes no real Reference Vendor compatibility, private API, cloud, certification, or endorsement claim.
+- [x] Documentation makes no real vendor compatibility, private API, cloud, certification, or endorsement claim.
 - [x] JavaScript syntax checks and the complete dependency-free VMS regression suite pass.
 - [x] No real vendor network call, SDK, credential flow, protocol bridge, discovery, live stream, playback, download, PTZ, or firmware implementation was added under P0-02.
 
@@ -232,20 +334,20 @@ Reference Vendor and related product names are trademarks of their respective ow
 - [x] README and backend documentation describe implemented policy boundaries without claiming deferred services.
 - [x] JavaScript syntax checks, focused P0-03 policy/integration tests, the complete dependency-free VMS regression suite, and local browser verification pass.
 
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-04 [Architecture] Authoritative data and persistence.** Select local SQLite, central database, cloud service, or synchronized edge/server ownership; define migrations, conflict resolution, ordered duplicate-safe offline reconciliation, backup, restore, and export.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-05 [NFR] Supported workstation and codec profile.** Approve operating systems, CPU/RAM/GPU baselines, hardware acceleration, H.264/H.264+/H.265/H.265+ behavior, resolution/frame-rate assumptions, and graceful degradation when decode capacity is approached. Validate the guide's old Windows 7/macOS hardware figures before using them.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-06 [NFR] Local device and media capacity profile.** Decide whether to target the guide ceilings of 256 encoders, 16 storage servers, 16 stream-media servers, 1,024 cameras, 256 groups, 64 legacy or 256 current channels per group, and 64 decoders.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-07 [NFR] Local operator and display capacity profile.** Decide whether to target 64 standard or 48 wide-screen windows, four local auxiliary displays, 16-channel synchronized playback, 50 active users plus one super user, and 256 E-maps.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-08 [NFR] Local access and security capacity profile.** Decide whether to target ten organization levels, 10,000 legacy or 3,200 current persons, five cards per person legacy or 16,000 total current cards, 128 access groups, 255 authorization templates, and 2,048 zones. Resolve the legacy/current anomalies before implementation.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-09 [NFR] Enterprise video capacity profile.** Decide whether to target 2,048 directly managed devices, 10,000 cameras or 100,000 through remote-site management, and 10,000 fisheye interfaces.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-10 [NFR] Enterprise endpoint and security capacity profile.** Decide whether to target 5,000 intercom terminals, 2,048 signage endpoints, 32 visitor kiosks, 1,500 patrol docks, 5,000 alarm inputs, 3,000 outputs, 30 radar arrays, 256 security areas, 2,048 zones, 32 DS-5600 face readers, and 3,000 ANPR channels.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-11 [NFR] Enterprise analytics and event capacity profile.** Decide whether the 300 people-counting, 300 queue, 70 heat-map, and 20 thermal figures are sizing recommendations; decide whether to target 10,000 active rules and 1,000 attachment-free alarm events per second.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-12 [NFR/Policy] Enterprise identity and biometric capacity profile.** Decide whether to target one million face portraits, 100 stored face matches per second, 50,000 access profiles, 1,024 doors, 32 schedules, and 32 card layouts; approve biometric and access-data governance before testing those limits.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-04 [Architecture] Authoritative data and persistence.** Select an embedded local relational store, central database, cloud service, or synchronized edge/server ownership; define migrations, conflict resolution, ordered duplicate-safe offline reconciliation, backup, restore, and export. SQLite remains one candidate, not a decision.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-05 [NFR] Supported workstation and codec profile.** Approve operating-system families, CPU/RAM/GPU baselines, hardware acceleration, H.264/H.265 behavior, any vendor-specific codec extensions, resolution/frame-rate assumptions, and graceful degradation as decode capacity is approached. Establish profiles through current measurements rather than copied legacy hardware tables.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-06 [NFR] Local device and media capacity profile.** Define and measure supported local encoder, storage service, media service, camera, group, per-group channel, decoder, and concurrent-media limits for named deployment profiles.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-07 [NFR] Local operator and display capacity profile.** Define and measure standard/wide-screen layouts, auxiliary displays, synchronized-playback channels, active users, and map capacity for each supported workstation profile.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-08 [NFR] Local access and security capacity profile.** Define and measure organization depth, person and credential counts, access groups, authorization templates, and security zones after the governing data and privacy rules are approved.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-09 [NFR] Enterprise video capacity profile.** Define independently tested limits for directly managed devices, cameras, remote-site cameras, specialized camera interfaces, concurrent operators, and active media work.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-10 [NFR] Enterprise endpoint and security capacity profile.** Define independently tested limits for intercom, signage, visitor, patrol, alarm I/O, radar, security-area/zone, face-reader, and vehicle-recognition endpoints without inheriting a vendor product ceiling.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-11 [NFR] Enterprise analytics and event capacity profile.** Define independently tested analytics-channel, active-rule, attachment, and alarm-event throughput profiles, including overload behavior and honest degradation.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-12 [NFR/Policy] Enterprise identity and biometric capacity profile.** Define independently tested portrait, match-throughput, access-profile, door, schedule, and card-layout limits only after biometric and access-data governance is approved.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-13 [Architecture/Commercial] Separate four kinds of limits.** Model technical maximums, purchased entitlements, configured tenant/site quotas, and independently validated deployment profiles as different values.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-14 [Integration] Vendor evidence gate.** For every device adapter, cloud-managed service, enterprise VMS, remote support portal, third-party map provider, ARC, CVR, SAN, or third-party database capability, record the supported API/SDK/protocol, version, rate limits, device firmware, license, and source verification date.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-15 [Policy/Commercial] Countries, service regions, and data residency.** Confirm target countries and cloud regions in writing. Revalidate the guide's US/Canada linkage restriction, listed African free-only markets, Japan/Taiwan free-only claim, and Europe/Latin America availability. Pakistan/South Asia is unresolved in the source guide.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-15 [Policy/Commercial] Countries, service regions, and data residency.** Confirm target countries and service regions in writing; verify data residency, cross-border transfer, telecommunications, export, subscription, and feature-availability constraints for each approved dependency. Do not repeat source-guide regional claims without dated evidence.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-16 [Policy] Security, privacy, and safety baseline.** Approve handling for video, audio, credentials, faces/biometrics, GPS, ANPR, attendance, temperature/mask data, X-ray imagery, remote unlock/barrier actions, broadcasting, firmware, password reset, retention, deletion, legal hold, and cross-border transfer.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-17 [Commercial] Licensing and entitlement scope.** Decide whether the product needs license enforcement or only deployment documentation for VSS, ACS, intercom, visitor, attendance, mustering, RSM, mobile, signage, Smart Wall, ANPR, face/body, BI, evidence, AR, temperature/mask, security inspection, support, and bundles.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-17 [Commercial] Licensing and entitlement scope.** Decide whether the product needs license enforcement or only deployment documentation for video, access control, intercom, visitor, attendance, mustering, remote-site, mobile, signage, video-wall, vehicle-recognition, face/body, analytics/reporting, evidence, augmented-reality, temperature/mask, security-inspection, support, and bundle capabilities.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P0-18 [Benefit/NFR] Measurable product outcomes.** Convert claims such as one unified interface, less empty-footage review, low latency, data sovereignty, no customer-managed central server, no VPN/public IP, lower capital cost, predictable operating cost, proactive support, and no-recurring-fee local operation into measurable, topology-specific acceptance criteria.
 
 ## Phase 1 - Core Platform Foundation
@@ -257,9 +359,11 @@ Reference Vendor and related product names are trademarks of their respective ow
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-05 [Architecture] API, adapter, event-bus, and background-job boundaries.** Keep device protocols, UI, persistence, alarms, schedules, analytics, and vendor services independently testable.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-06 [Feature/Policy] Immutable audit history.** Record logins, configuration changes, live/export access, credential and biometric use, remote commands, acknowledgements, vendor calls, entitlement changes, and before/after values with trusted timestamps.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-07 [Architecture] Configuration, capability negotiation, and feature flags.** Unsupported features must be visibly unavailable; risky/vendor capabilities need scoped flags and rollback controls.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-08 [NFR] Time, time zone, clock drift, and localization.** Define canonical timestamps, site-local display, daylight-saving behavior, device synchronization, and ordering of offline events.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-08 [NFR] Time, time zone, clock drift, and localization.** Define machine instants, site-local wall time, operator input/display formats, daylight-saving behavior, device synchronization, ambiguous/nonexistent local times, and ordering of offline events. Existing `YYYY-MM-DD`, `HH:MM:SS`, and `YYYY-MM-DD HH:MM:SS` text are prototype proposals, not an approved universal storage format.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-09 [NFR] Observability and diagnostics.** Define logs, metrics, traces, health states, correlation IDs, operator-facing errors, maintenance suppression, and redaction of secrets/personal data.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-10 [Feature] Safe configuration import, export, backup, and recovery.** Define validation, preview, atomic commit, version compatibility, partial failure, and rollback.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-11 [Feature/Architecture] Canonical entity, location, tag, and alias data.** Define stable entity/site and location/area identities, many-to-many camera coverage, searchable tags, typed aliases, merge/history behavior, snapshots, cross-site visibility, and API/storage mappings without requiring one physical central database.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P1-12 [Architecture] Unified command envelope and executor.** Route UI clicks, gestures, keyboard actions, deterministic voice parsing, and any later assistant through one validated command contract with capability checks, target resolution, confirmation, result mapping, and audit boundaries.
 
 ## Phase 2 - Device, Channel, and Site Onboarding
 
@@ -276,12 +380,12 @@ Reference Vendor and related product names are trademarks of their respective ow
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P2-11 [Feature/Integration] Network configuration.** Define IP, ports, DNS, DDNS, proxy, NAT/P2P, certificates, connectivity tests, configuration validation, and authorization boundaries.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P2-12 [Integration/Policy] Remote support actions.** Separately approve log retrieval, password reset, configuration change, reboot, and batch firmware update with site authorization, preflight checks, step-up authentication, progress, failure recovery, and rollback.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P2-13 [Feature] Device health and lifecycle.** Define online/offline/degraded/unsupported states, storage and stream health, exceptions, firmware inventory, maintenance windows, notification, acknowledgement, and clear/recovery behavior.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P2-14 [Integration] Interoperability.** Decide open interoperability or other standard protocols and any explicit Reference Vendor/Alternate Vendor adapters; document supported models/firmware and behavior when proprietary features are unavailable.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P2-14 [Integration] Interoperability.** Decide ONVIF profiles and any other approved standards plus explicit vendor adapters; document supported profiles, models, firmware, authentication, conformance evidence, and behavior when proprietary features are unavailable.
 
 ## Phase 3 - Live Monitoring, Display, and Operator Response
 
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-01 [Feature] Live-view workspace and custom layouts.** Define drag/drop, saved/personal/shared layouts, camera/group/site navigation, empty/error states, and standard/wide-screen window divisions.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-02 [Feature/NFR] Multi-display operation.** Define up to four local auxiliary displays and/or three auxiliary browser displays, focus, pop-out recovery, bandwidth/decode budgets, and persisted placement.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-02 [Feature/NFR] Multi-display operation.** Define the supported local and browser auxiliary-display profile, focus, pop-out recovery, bandwidth/decode budgets, and persisted placement through measured workstation testing.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-03 [Feature/NFR] Stream selection and decode governor.** Choose main/sub/adaptive streams, latency targets, reconnect policy, hardware acceleration, resource limits, and operator warnings before overload.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-04 [Feature] Live diagnostics.** Show bitrate, frame rate, resolution, codec, latency, packet loss, and stream state where supported; display an explicit unavailable state for P2P/cloud paths that do not provide telemetry.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-05 [Feature] Instant playback from live view.** Define look-back duration, storage source, permissions, transition back to live, and missing-footage behavior.
@@ -291,8 +395,12 @@ Reference Vendor and related product names are trademarks of their respective ow
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-09 [Feature/Integration/Policy] Auxiliary device controls.** Separately approve strobe, hazardous-gas routine, and de-icing heater actions, including capability checks, interlocks, confirmation, timeout, feedback, and audit.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-10 [Feature/Integration/Policy] Live audio, intercom talk, and operator announcements.** Define half/full duplex, device selection, echo/feedback behavior, authorization, recording/consent, emergency priority, and audit.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-11 [Feature/Integration/Policy] Scheduled and event-driven mass broadcast.** Define speaker groups, content approval, schedules, priority/preemption, failed endpoints, cancellation, and safety controls.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-12 [Feature/Integration] Smart Wall and physical decoder outputs.** Define video-wall layouts, decoder/output routing, auxiliary GPU rendering, alarm-feed takeover, restoration, and hardware resource validation.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-12 [Feature/Integration] Video walls and physical decoder outputs.** Define video-wall layouts, decoder/output routing, auxiliary GPU rendering, alarm-feed takeover, restoration, and hardware resource validation.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-13 [Feature/Integration] Digital signage.** Define display/touchscreen inventory, playlists, schedules, publishing, preview, offline cache, emergency override, and endpoint limits.
+- [x] Discussed | [x] Approved | [ ] Built | [ ] Verified - **P3-14 [Feature/Architecture] Shared layered Live and Playback workspace UI.** Use two independently stateful instances of one responsive component family. The camera grid fills the workspace background; resource browser, camera/group search, selected-camera information/control, tabs, and toolbars layer over it; the application rail remains outside. Playback adds its range, timeline, transport, availability, and evidence controls without forking shared components.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-15 [Feature] Spatial site navigation and viewport media policy.** Define premises/floor canvases, camera position/facing/field of view, pan/zoom, visible/focus/peripheral/offscreen behavior, pre-warm limits, map pins versus video tiles, persistence, and performance acceptance.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-16 [Feature] Operator-led tracking sessions and breadcrumbs.** Define case type, subject descriptor, priority, active/paused/resolved state, concurrent cases, camera/time breadcrumbs, notes, resume, escalation, incident linkage, permissions, retention, and audit.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P3-17 [Feature/Integration/Policy] Manual route graph and camera-candidate hints.** Let operators record directional transitions and show a small ranked candidate set using site geometry and approved history. Any re-identification or predictive hint remains optional, confidence-labeled, human-reviewed, privacy-gated, and never an automatic source of truth.
 
 ## Phase 4 - Recording, Storage, Retention, and Recovery
 
@@ -309,34 +417,38 @@ Reference Vendor and related product names are trademarks of their respective ow
 
 ## Phase 5 - Playback, Search, and Digital Evidence
 
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-01 [Feature/NFR] Synchronized remote playback.** Define up to 16 channels, audio sync, scrubbing, speed, frame-step, buffering, drift tolerance, and partial-camera failure.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-02 [Feature] Timeline and recording-source selection.** Merge continuous/event segments and local/NVR/server/cloud sources without hiding gaps or duplicates.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-01 [Feature/NFR] Synchronized remote playback.** Define the validated concurrent-channel profile, audio sync, scrubbing, speed, frame-step, buffering, drift tolerance, and partial-camera failure.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-02 [Feature] Playback range, footage timeline, and recording-source selection.** Keep start/end date-time selection and draggable navigation; merge continuous/event segments and local/recorder/server/cloud sources while distinguishing requested, available, missing, unknown, overlapping, and duplicate footage instead of hiding gaps or presenting requested time as recorded.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-03 [Feature] Standard, alarm-input, and event search.** Define filters, site/camera/time scoping, pagination, saved searches, result previews, and permissions.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-04 [Feature/Integration] ATM, POS, and VCA retrieval.** Define source adapters, transaction/rule indexing, time correlation, data redaction, retention, and failure states.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-05 [Feature/Integration] Human and vehicle event filtering.** Define metadata source, confidence threshold, false-positive behavior, unsupported-camera state, and measurable time saved versus manual review.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-06 [Feature/Integration/Policy] Face, body, and ANPR search.** Define authorized purpose, indexes, query fields, confidence, list matching, audit, retention, and manual fallback.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-07 [Integration/Policy] semantic-search voice, text, and target-class search.** Confirm actual API/service availability, language support, accuracy/latency targets, explainability, privacy, entitlement, and non-AI fallback.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-07 [Feature/Integration/Policy] Natural-language and metadata search.** Define voice, text, and target-class search requirements; confirm actual API/service availability, supported languages, measurable accuracy/latency, explainability, privacy, entitlement, and deterministic non-AI fallback.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-08 [Feature/Policy] Incident and evidence management.** Define secure archive, case association, tag generation, bookmarks, notes, file locking, legal hold, access review, and retention.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-09 [Feature/Policy] Evidence export and chain of custody.** Define clip/snapshot formats, watermark/hash/signature, transcoding, redaction, player packaging, authorization, export audit, and integrity verification.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P5-10 [Feature] Reverse time/location search and playback staging.** Search a site, entity, location, area, tag, and time range; resolve all covering cameras; open them in synchronized Playback; promote a found moment into an operator tracking session; and preserve query-to-playback evidence without assuming footage exists.
 
 ## Phase 6 - Events, Alarms, Verification, and Automation
 
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-01 [Feature] Security areas, partitions, and zones.** Define hierarchy, arming states, bypass, ownership, schedules, permissions, and device synchronization.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-02 [Integration] Alarm inputs and outputs.** Define normalization, debounce, restore/tamper states, output duration, feedback, device loss, and safe manual control.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-03 [Feature/NFR] Event and alarm rule engine.** Define triggers, conditions, schedules, suppression, correlation, priorities, dependencies, simulation, versioning, and the approved scale up to 10,000 rules.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-04 [NFR] Alarm ingestion and storage pipeline.** Define attachment behavior, backpressure, ordering, deduplication, persistence, recovery, and whether to validate 1,000 attachment-free events per second.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-03 [Feature/NFR] Event and alarm rule engine.** Define triggers, conditions, schedules, suppression, correlation, priorities, dependencies, simulation, versioning, and an independently measured active-rule profile.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-04 [NFR] Alarm ingestion and storage pipeline.** Define attachment behavior, backpressure, ordering, deduplication, persistence, recovery, and an independently measured event-throughput profile.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-05 [Feature/Policy] Automated linkage.** Separately approve camera pop-up/recording, PTZ, door, barrier, alarm output, strobe, speaker, signage, notification, and external dispatch actions with loop prevention and fail-safe defaults.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-06 [Feature] Alarm verification workspace.** Define related live/recorded video, audio, map, access/ANPR context, operator checklist, acknowledgement, escalation, resolution, and evidence capture.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-07 [Feature/NFR] Alarm lifecycle and notifications.** Define new/acknowledged/escalated/cleared states, assignment, deduplication, maintenance suppression, delivery channels, retry, SLA/SLO, and audit.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-08 [Integration] Health events and linkage.** Normalize device/storage/stream/firmware exceptions, notify and clear reliably, and enforce country/entitlement restrictions on automated actions.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-09 [Integration/Policy] Standard ARC receiver.** Confirm protocol/API, panel mapping, heartbeat, acknowledgement, duplicate/event ordering, authorization, tenancy, and audit.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-10 [Integration/Policy] Premium ARC, video verification, and dispatch.** Define evidence packet, operator confirmation, dispatch contract, failure/escalation, jurisdiction, and strict fail-closed behavior.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-11 [Feature/Policy] Compliance types, events, review logs, and overlays.** Define preset/freeform type governance, entity/location association, extracted versus operator-confirmed records, historical camera/location snapshots, manager responses, top-occurrence overlays, reporting windows, permissions, privacy, retention, and audit.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-12 [Feature/Integration/Policy] External-message ingestion and query tickets.** Through an approved connector, convert designated messages into traceable tickets with raw-source reference, entity/location, requested range, subject, confidence, status, authorization, correction, deduplication, retention, and outage behavior. No private endpoint or direct multi-process database writer is permitted.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P6-13 [Feature] Ticket-driven playback, tracking, and resolution.** Resolve mapped cameras, stage the requested range in Playback, link an operator tracking session and breadcrumbs, record findings and manager response, then resolve or escalate the ticket without losing provenance.
 
 ## Phase 7 - Maps, Remote Sites, AR, and Mobile Operations
 
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-01 [Feature] E-Maps.** Define image/floor-plan upload, camera/door/alarm placement, layers, status, navigation, permissions, versioning, and the approved 256-map capacity.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-01 [Feature] E-Maps.** Define image/floor-plan upload, camera/door/alarm placement, layers, status, navigation, permissions, versioning, and an independently measured map-capacity profile.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-02 [Feature/Integration] GIS site and camera mapping.** Define map provider, exact/approximate GPS, clustering, live status, privacy, offline behavior, rate limits, and map-license terms.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-03 [Feature/Integration/NFR] Remote Site Management.** Define site federation, delegated administration, event/video routing, health, time zones, entitlement, isolation, and approved scale from two sites toward the stated 1,024-site/100,000-camera profile.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-03 [Feature/Integration/NFR] Remote Site Management.** Define site federation, delegated administration, event/video routing, health, time zones, entitlement, isolation, partitioning, and independently measured site/camera scale profiles.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-04 [Integration] P2P/cloud-connected cameras.** Define authorization, connection state, privacy, entitlement, reconnect, limited telemetry, bandwidth, and local fallback without assuming a public API.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-05 [Feature/Integration] AR high-point scenes.** Define scene calibration, adjacent camera/gate tags, visual overlays, interactions, permissions, per-scene entitlement, and fallback when calibration is invalid.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P7-06 [Feature/Integration/Policy] Mobile recorder and vehicle mapping.** Define GPS update rate, history, privacy, device status, playback correlation, geofences, and loss-of-signal behavior.
@@ -361,7 +473,7 @@ Reference Vendor and related product names are trademarks of their respective ow
 ## Phase 9 - Analytics, Reporting, and Specialized Sensors
 
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-01 [Feature/Integration/Policy] Face recognition.** Define enrollment/comparison purpose, groups, thresholds, watchlists, false-match handling, human confirmation, demographic fields, audit, retention, and legal approval.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-02 [NFR/Policy] Face database and match pipeline.** Define storage/partitioning, encryption, deletion, quality controls, and whether to validate one million portraits and 100 stored matches per second.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-02 [NFR/Policy] Face database and match pipeline.** Define storage/partitioning, encryption, deletion, quality controls, and independently measured portrait-capacity and match-throughput profiles.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-03 [Feature/Integration/Policy] Body-attribute matching.** Define supported attributes, prohibited inference, confidence, human review, retention, audit, and measurable bias/accuracy criteria.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-04 [Feature/Integration] People counting.** Define zones/lines, occupancy, reset/reconciliation, accuracy, privacy, reporting, and device/server analytics ownership.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P9-05 [Feature/Integration] Queue analytics.** Define queue zones, waiting-time thresholds, alerts, aggregation, accuracy, privacy, and operational reporting.
@@ -373,7 +485,7 @@ Reference Vendor and related product names are trademarks of their respective ow
 
 ## Phase 10 - Cloud and Integrator-Service Capabilities
 
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P10-01 [Integration] Cloud multi-site and multi-user tenancy.** Confirm cloud-managed team mode versus enterprise VMS Connect responsibilities, supported tenant type, device import, roles, site isolation, quotas, audit, and API availability.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P10-01 [Integration] Optional cloud-managed multi-site and multi-user tenancy.** Compare self-hosted coordination with any approved cloud-managed service; define provider responsibilities, tenant type, device import, roles, site isolation, quotas, audit, API availability, and exit behavior.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P10-02 [Benefit/NFR] No-VPN/no-public-IP connectivity.** Prove the approved path behind real NAT, DNS, proxy, firewall, bandwidth-loss, reconnect, and throttling conditions; document all edge, WAN, and vendor-cloud dependencies.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P10-03 [Integration] Proactive technician health monitoring.** Define authorization, polling/events, SLOs, deduplication, maintenance suppression, notification, remote diagnostics, recovery clearing, and tenant isolation.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P10-04 [Integration/Policy] Remote-support site authorization.** Treat active, scoped customer authorization as a hard prerequisite for remote support; define grant, expiry, revocation, sharing, audit, and fail-closed behavior.
@@ -387,10 +499,10 @@ Reference Vendor and related product names are trademarks of their respective ow
 
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-01 [Commercial/Feature] Entitlement engine.** If in scope, model activation, base/add-on prerequisites, quantities, tenant/site assignment, grace, expiry, renewal, downgrade, overage, audit, and offline behavior.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-02 [Commercial] Metering units.** Decide how camera, P2P camera, body-camera, thermal channel, speaker, door, indoor station, remote site, mobile unit, decoder output, ANPR channel, face/body channel, face channel, and AR scene entitlements are represented.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-03 [Commercial] Free tier and proof of concept.** Vendor-verify the stated 32 video channels and ten doors; define activation, limits, expiry/change behavior, data access, and migration to/from paid service without making the tier an architecture dependency.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-03 [Commercial] Free tier and proof of concept.** If a third-party offering is in scope, verify its current proof-of-concept entitlement; define activation, limits, expiry/change behavior, data access, and migration to/from paid service without making the tier an architecture dependency.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-04 [Commercial] Monthly/yearly subscriptions and renewal.** Define billing responsibility, activation delay, renewal, tax/currency, grace, failed payment, downgrade, cancellation, refunds, support, and data access after expiry.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-05 [Commercial] SUP and maintenance.** Decide whether one-/three-year support and feature-update periods are tracked in-product or only documented; vendor-verify included support periods and renewal rules.
-- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-06 [Commercial] Bundles and SKU catalog.** Treat promotional VSS/ACS bundles and part numbers as versioned procurement data, not product functionality; define source, owner, refresh, region, and effective dates if retained.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-05 [Commercial] Support and maintenance terms.** Decide whether support and feature-update periods are tracked in-product or only documented; verify included periods and renewal rules for each selected supplier.
+- [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-06 [Commercial] Bundles and procurement catalog.** Treat video/access-control bundles and part numbers as versioned procurement data, not product functionality; define source, owner, refresh, region, and effective dates if retained.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-07 [Feature/Integration] Product specification selector.** Decide whether commercial product selection belongs in this VMS; if approved, define catalog source, compatibility rules, versioning, and vendor ownership.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-08 [Feature/Integration] Project registration, quotations, and pricing.** Decide whether these integrator-business workflows belong in scope; if approved, define customer/project records, approvals, currencies/tax, revisions, export, API, and audit.
 - [ ] Discussed | [ ] Approved | [ ] Built | [ ] Verified - **P11-09 [Feature/Integration] Warranty and RMA tracking.** Decide whether it belongs in scope; if approved, define serial/device linkage, entitlement lookup, case status, logistics, attachments, notifications, API, and data ownership.
@@ -411,215 +523,23 @@ Reference Vendor and related product names are trademarks of their respective ow
 
 ---
 
-## Preserved Research and Vendor Reference
+## Source Coverage and Evidence Record
 
-# **Technical Specifications and Architectural Analysis of Video Monitoring Platforms**
+The 2026-07-19 comparison with the supplied original 623-line research guide found:
 
-The execution of unified physical security relies heavily on the capabilities of the underlying software management platforms. These platforms act as central nodes that process high-bandwidth video streams, manage complex access credentials, log telemetry, and run edge-intelligent analytics. A typical portfolio may include localized utility clients, enterprise central management platforms, cloud-native Software-as-a-Service (SaaS) portals, and specialized integrator tools. This analysis provides a general technical evaluation of their features, system limits, licensing frameworks, and operational configurations.
+- all 143 original P0-P12 feature and gate IDs present, with zero missing IDs and zero status differences;
+- seven deliberately revised titles—P3-12, P5-02, P5-07, P10-01, P10-04, P11-05, and P11-06—using vendor-neutral or clearer capability wording without removing their scope;
+- ten project-specific additions—P1-11, P1-12, P3-14 through P3-17, P5-10, and P6-11 through P6-13—plus the eight-item C0 consolidation track;
+- source capability coverage across platform foundation and limits (P0-P2/P12), live operation (P3), recording/storage (P4), playback/evidence (P5), alarms (P6), maps/mobile (P7), access/intercom (P8), analytics (P9), optional cloud/integrator services (P10), and commercial tooling (P11);
+- no vendor name retained in the controlling roadmap; exact names remain outside the repository unless a later evidence record or adapter specification requires identification.
 
-## **Baseline Platform Architecture: desktop VMS client Series**
+The external guide remains outside the repository as discovery material. Its copied prose, product names, hardware tables, capacity figures, SKUs, prices/entitlements, regional claims, and bibliography are deliberately not reproduced here. Before a third-party or standards-based integration is approved, P0-14 requires a claim-level evidence record containing:
 
-The desktop VMS client series client software is designed as a localized utility for configuring and managing Reference Vendor hardware. Operating on a distributed architecture utilizing a local SQLite database, the system acts as a decentralized software controller. It unifies video surveillance, access control, video intercom, security alarm partitions, storage configurations, and auxiliary decoding modules on a single workstation client.
+- evidence ID and capability;
+- exact product/service/standard and public-safe label;
+- version, mode, API/SDK/protocol/profile, device model, and firmware;
+- license/entitlement, tenant, country/region, and support terms;
+- primary source, source version/publication date, review date, reviewer, and confidence;
+- expiry/revalidation date and the roadmap item that depends on the claim.
 
-### **Technical Specifications and Local System Demands**
-
-Because desktop VMS client uses local decoding, its performance depends directly on the host computer's processor, memory, and graphics hardware. The software handles video stream decoding using H.264, H.264+, H.265, and H.265+ formats.  
-The system's hardware requirements and corresponding decoding limits vary depending on the host machine's configuration:
-
-| System Tier | Operating System | CPU Specification | RAM | Graphics Processing Unit | Maximum Simultaneous Live View Channels (H.264 / H.265 @ 1080p, 30fps) |
-| :---- | :---- | :---- | :---- | :---- | :---- |
-| **Minimum** | Windows 7 (64-bit) | Intel Core i5-4590 @ 3.30 GHz | 8 GB | NVIDIA GeForce GTX 970 | 11 Channels / 8 Channels |
-| **Recommended** | Windows 7 (64-bit) | Intel Xeon E3-1226 V3 @ 3.30 GHz | 8 GB | Intel HD Graphics P4600 | 12 Channels / 8 Channels |
-| **High Performance** | Windows 7 (64-bit) | Intel Core i7-6700K @ 4.00 GHz | 16 GB | NVIDIA GeForce GTX 1070 | 21 Channels / 15 Channels |
-| **macOS Entry** | macOS Baseline | Intel Core i5 @ 2.00 GHz | 8 GB | Intel Iris Graphics 540 | 12 Channels / 8 Channels |
-| **macOS Pro** | macOS High-Tier | Intel Core i7 @ 2.00 GHz | 4 GB | AMD Radeon HD 6490M | 8 Channels / 6 Channels |
-
-The system's capacity limits define its suitability for small-to-medium deployments:
-
-| Architecture Element | Maximum Parameter Capacity |
-| :---- | :---- |
-| **Connectable Encoding Devices** | 256 physical units |
-| **Connectable Storage Servers** | 16 server endpoints |
-| **Connectable Stream Media Servers** | 16 server endpoints |
-| **Maximum Camera Channels** | 1,024 channels across all groups |
-| **Configurable Camera Groups** | 256 distinct groups |
-| **Max Channels per Group** | 64 channels (Legacy) / 256 channels (Current) |
-| **Connectable Decoding Devices** | 64 physical decoders |
-| **Standard Screen Window Division** | 64-window logical matrix |
-| **Wide Screen Window Division** | 48-window logical matrix |
-| **Auxiliary Screen Support** | 4 auxiliary displays for concurrent live view |
-| **Concurrent Active User Accounts** | 50 users plus 1 super user |
-| **E-Map Support Limit** | 256 independent graphic layouts |
-| **Access Control Organizations** | 10 hierarchical levels |
-| **Access Control Person Database** | 10,000 profile records (Legacy) / 3,200 (Current) |
-| **Credential Capacity** | 5 cards per person (Legacy) / 16,000 total cards (Current) |
-| **Access Groups & Templates** | 128 access groups / 255 authorization templates |
-| **Security Control Panel Zones** | 2,048 programmable security zones |
-
-### **Core Toolsets and Operational Functionalities**
-
-The desktop VMS client series includes toolsets for managing, routing, and checking security event footage on-site:
-
-* **Live Monitoring Engine:** Features custom video configurations and instant playback. It displays real-time stream parameters, including bitrate, frame rate, and resolution, to assist with bandwidth diagnostics (excluding devices added via P2P Cloud). It supports live viewing in fisheye mode for compatible cameras, offering dewarping layouts like Panorama, PTZ, Half Sphere, AR Half Sphere, and Cylinder views.  
-* **Target Tracking and Alarm Verification:** Integrates Master-Slave target tracking to coordinate panoramic cameras with PTZ configurations. Operators can manually activate strobe lights, hazardous gas detection routines, target tracking parameters, and de-icing heaters for extreme weather environments. Operators can also transmit live audio alerts or scheduled mass broadcasts to networked IP speakers directly from the client interface.  
-* **Archival and Recording Parameters:** Supports multi-stream target configurations, allowing synchronous recording of both main streams and sub-streams. It schedules recordings based on continuous, event-driven, or command-triggered parameters. For large storage systems, it supports CVR and SAN configurations to allocate hard disk space and automate retention loops.  
-* **Playback and Retrieval Tools:** Offers synchronous remote playback of up to 16 channels, complete with audio sync. Operators can filter search results using standard, alarm-input, event, ATM transaction, VCA rules, or POS database indices. The software can also filter recorded footage to display only human or vehicle detection events, saving operators from reviewing hours of empty video.  
-* **Access Control and Intercom Integration:** Manages doors, readers, and user credentials within a single interface. It supports multiple authorization modes, including card reader PINs, fingerprints, face profiles, and iris parameters. Advanced features include multi-door interlocking, anti-passback, first-person-in validation, and custom Wiegand protocol mapping. It also integrates video intercom door stations, supporting direct call-routing, remote door releases, and automated event linkage.
-
-## **Enterprise Central Management: enterprise VMS platform**
-
-For larger projects, enterprise VMS platform serves as an integrated, modular central management system (CMS). The platform uses a lightweight, web-accessible database structure designed for deep integration across video, access control, vehicle tracking, thermal monitoring, digital signage, and analytics systems.
-
-### **Physical Scalability Limits and Operational Profiles**
-
-enterprise VMS platform is engineered to run on enterprise-grade hardware, such as Intel Xeon processors, large DDR4 memory arrays, and hardware SAS RAID controllers. It coordinates multiple distinct subsystems to protect assets and ensure business continuity.  
-The system's database handles high-speed data logging, transaction routing, and alarm processing:
-
-| Database Parameter | Maximum Operational Limit |
-| :---- | :---- |
-| **Directly Managed Devices** | 2,048 network devices |
-| **Max Managed Cameras** | 10,000 camera channels (Up to 100,000 when using Remote Site Management) |
-| **Fisheye Camera Deployments** | 10,000 camera interfaces |
-| **Video Intercom Terminals** | 5,000 indoor/outdoor station terminals |
-| **Digital Signage Displays** | 2,048 signage endpoints |
-| **Visitor Self-Service Terminals** | 32 physical units |
-| **Security Patrol Docking Stations** | 1,500 docking terminals |
-| **Alarm Inputs & Alarm Outputs** | 5,000 hardware inputs / 3,000 outputs |
-| **Security Radars & PTZ Radar Units** | 30 active radar arrays |
-| **Security Control Areas (Partitions)** | 256 software areas / 2,048 programmable zones |
-| **Turnstile-Integrated Face Readers** | 32 units (DS-5600 Series) |
-| **ANPR Camera Deployments** | 3,000 localized vehicle reading channels |
-| **Recommended Intelligence Units** | 300 People Counting / 300 Queue / 70 Heat Map / 20 Thermal cameras |
-| **Event and Alarm Rules** | 10,000 concurrent active rule profiles |
-| **Alarm Storage Processing** | 1,000 events per second (without attachments) |
-| **Face Comparison Database** | 1,000,000 portrait records across all groups |
-| **Face Match Events Storage** | 100 matches per second (written to recording server) |
-| **Active Access Profiles & Doors** | 50,000 access files / 1,024 physical access points |
-| **Access Schedules & Card Templates** | 32 scheduling matrixes / 32 dynamic card layouts |
-
-### **Licensing Structure, Baseline Packages, and Add-on Modules**
-
-enterprise VMS platform uses a modular licensing framework where organizations only purchase the specific baseline software packages and add-on expansion modules their deployment requires. Base software licenses include a Software Upgrade Program (SUP) subscription, which grants access to technical support and new feature releases. The baseline SUP period is 36 months for systems purchased after April 2021\.  
-The table below lists the primary enterprise license modules, order-specific part numbers, prerequisites, and capabilities:
-
-| Module Identifier / Part Number | License Category | Platform Prerequisite | Operational Capabilities and Features |
-| :---- | :---- | :---- | :---- |
-| **Enterprise-VSS-Base/0Ch** | VSS Base | None | Base license with 0 camera channels; includes third-party map integration, virtual machine support, and a support plan. |
-| **Enterprise-VSS-Base/16Ch** (400101054) | VSS Base | None | Base license with 16 camera channels; includes alarm mapping, evidence tools, and 3-year SUP. |
-| **Enterprise-VSS-Base/64Ch** (400101076) | VSS Base | None | Base license with 64 camera channels; includes main/auxiliary storage and 3-year SUP. |
-| **Enterprise-VSS-Base/300Ch** (400101077) | VSS Base | None | Base license with 300 camera channels; includes health monitoring and 3-year SUP. |
-| **Enterprise-VSS-1Ch** (400101055) | VSS Add-on | VSS Base | Adds 1 camera channel (standard IP camera or recorder interface). |
-| **Enterprise-HPC-1Camera** | VSS Add-on | VSS Base | Integrates 1 remote camera imported through an authorized peer connection. |
-| **Enterprise-BWC-1Ch** | Mobile Add-on | VSS Base | Integrates 1 body-worn camera channel with GPS and telemetry logging. |
-| **Enterprise-VSS-1Ch/Thermal\&Report** | Special Add-on | VSS Base | Integrates 1 thermal imaging channel with temperature tracking and anomaly reports. |
-| **Enterprise-IPSpeaker-1Unit** | Audio Add-on | VSS Base | Integrates 1 network IP speaker unit for live announcements and scheduled broadcasting. |
-| **Enterprise-ThirdPartyVSS-1Ch** (401000631) | 3rd Party Add-on | VSS Base | Integrates 1 third-party Alternate Vendor IP camera using standard integration protocols. |
-| **Enterprise-ACS-Base/2Door** (401000018) | ACS Base | None | Base license supporting 2 physical doors and core access control management. |
-| **Enterprise-ACS-Base/16Door** (401000040) | ACS Base | None | Base license supporting 16 physical doors and core access control management. |
-| **Enterprise-ACS-1Door** | ACS Add-on | ACS Base | Adds 1 access point door or 1 door station reader to the system. |
-| **Enterprise-VideoIntercom-Module** (401000171) | Intercom Base | VSS or ACS Base | Manages 2 door stations, 2 video camera channels, and 10 indoor stations. |
-| **Enterprise-IndoorStation-1Unit** (401000172) | Intercom Add-on | Intercom Base | Adds 1 additional indoor intercom unit to the system. |
-| **Enterprise-Visitor-Module** (401000131) | Special Module | ACS Base | Enables visitor registration, badge printing, and access credential tracking. |
-| **Enterprise-Attendance-Module** (401000023) | Special Module | ACS Base | Enables shift scheduling, compliance tracking, and third-party database sync. |
-| **Enterprise-Mustering-Module** (401000373) | Special Module | ACS Base | Enables automated emergency fire lock-release routing and muster checklists. |
-| **Enterprise-RSM-Base/2Site** (401000003) | RSM Base | None | Core interface managing 2 remote server sites; expandable up to 1024 sites. |
-| **Enterprise-RSM-1Site** (401000004) | RSM Add-on | RSM Base | Adds 1 remote server site to the master Central Management System interface. |
-| **Enterprise-MS-Base** (401000428) | Mobile Base | None | Base license supporting 10 mobile units, GIS maps, and route tracking. |
-| **Enterprise-MS-1Unit** | Mobile Add-on | Mobile Base | Adds 1 mobile recorder or vehicular DVR unit to the fleet management map. |
-| **Enterprise-MS-Route\&Driver-Module** | Mobile Add-on | Mobile Base | Enables route planning, vehicle speed alerts, and driver behavior analysis. |
-| **Enterprise-MS-PassengerCounting-Module** | Mobile Add-on | Mobile Base | Enables passenger counting using overhead stereo analysis cameras. |
-| **Enterprise-DigitalSignage-Base** (401000461) | Signage Base | None | Base license managing up to 30 display monitors or interactive touch screens. |
-| **Enterprise-SmartWall-Module** | Display Module | VSS Base | Enables layout management for multiple video walls and physical decoders. |
-| **Enterprise-SmartWall-1Output** (401000347) | Display Add-on | Smart Wall | Adds 1 hardware decoding output link to the multi-screen system. |
-| **Enterprise-SmartWall-Module Base** (401000085) | Display Add-on | Smart Wall | Allocates auxiliary graphics card resources to render alarm feeds directly. |
-| **Enterprise-ANPR-Module** | LPR Module | VSS Base | Activates central parking, payment calculations, and vehicle searches. |
-| **Enterprise-ANPR-1Ch** (401000056) | LPR Add-on | ANPR Module | Integrates 1 license plate recognition channel and list matching rules. |
-| **Enterprise-FacialReco-Module** | Face Module | VSS Base | Enables central matching, attribute sorting, and demographic data analytics. |
-| **Enterprise-Facial\&Body-1Ch** | Face Add-on | Face Module | Adds 1 camera channel for face comparison and body attribute matching. |
-| **Enterprise-FacialReco-1Ch** (401000057) | Face Add-on | Face Module | Integrates 1 facial recognition channel for intelligent camera or server feeds. |
-| **Enterprise-BI Report** (401000038) | BI Module | VSS Base | Enables retail heat mapping, crowd flow analyses, and queue reports. |
-| **Enterprise-DEM/Module** | Evidence Module | VSS Base | Enables secure incident archiving, tag generation, and file locking. |
-| **Enterprise-AR-Module** (401000581) | AR Module | VSS Base | Enables high-point map overlays and visual tag interactions. |
-| **Enterprise-AR-1Scene** (401000582) | AR Add-on | AR Module | Integrates 1 high-point camera scene with adjacent camera and gate tags. |
-| **Enterprise-Temp\&Mask-Module** (401000269) | Heat Module | VSS or ACS Base | Logs skin-surface temperatures, registers mask violations, and tracks trends. |
-| **Enterprise-SecurityInspection-Module** (401000384) | Special Module | VSS Base | Unifies item counts, X-ray scanner imagery, and metal detector telemetry. |
-| *Enterprise-SUP-Package/1Y* (401000563) | Maintenance | Existing License | Extends access to technical support and new software features for 1 year. |
-| **Enterprise-SUP-Package/3Y** (401000564) | Maintenance | Existing License | Extends access to technical support and new software features for 3 years. |
-| **Enterprise-Unified-Bundle** | Promotional Base | None | Unified software bundle activating 32 VSS channels and 4 ACS doors. |
-| **Enterprise-VSS16ACS8-Bundle** | Promotional Base | None | Unified software bundle activating 16 VSS channels and 8 ACS doors. |
-| **Enterprise-VSS32ACS16-Bundle** | Promotional Base | None | Unified software bundle activating 32 VSS channels and 16 ACS doors. |
-
-## **Cloud-Native Solutions: cloud-managed team mode and enterprise VMS Connect**
-
-The shift toward serverless security deployment has led to the adoption of cloud-native platforms, eliminating the need to maintain on-premises server infrastructure. Reference Vendor provides this capability through cloud-managed team mode and the enterprise VMS Connect video security as a service (VSaaS) platform.
-
-### **VSaaS Architecture and Interactive Toolsets**
-
-cloud-managed team mode is designed for multi-site and multi-user environments such as franchise retail networks, commercial offices, and regional operations. The cloud architecture enables centralized management without local VPN configurations or public IP mapping.  
-The toolsets integrated within the Team Mode interface include:
-
-* **Geographical Information System (GIS) Mapping:** Automatically maps distributed physical endpoints to absolute GPS coordinates, displaying global site and camera locations on an interactive overlay.  
-* **Auxiliary Multi-Screen Monitoring:** Allows operators to open up to three auxiliary web browser displays to view high-density camera layouts simultaneously.  
-* **semantic video search Intelligent Video Retrieval:** An AI-powered search tool that indexes metadata on the cloud, allowing operators to locate specific events using voice descriptions, text search, or target classification (human or vehicle).  
-* **Unified Access Control Systems:** Enables physical doors to be unlocked remotely via the mobile app using face profiles, Bluetooth, dynamic QR codes, PINs, or NFC credentials. The system supports offline operations, maintaining credential databases on local edge readers and caching audit trails until the connection is restored.  
-* **GPS Mobile Attendance Tracking:** Employees can clock in and out remotely via the mobile application, matching read requests with GPS geofences. It links attendance logs with access control permissions and adjacent video feeds to verify check-ins.  
-* **Vehicular Access Management:** Automates gate barriers by connecting with ANPR edge cameras. Operators can adjust vehicle allowlists and blocklists, program remote barrier actions, and issue temporary passes directly from the cloud portal.  
-* **Unified Voice & Alert Broadcasting:** Integrates intercom and alarm audio, supporting direct door-to-app two-way calling, mass alert broadcasts, and event-driven voice warnings to deter trespassers.
-
-### **Paid Subscription Benefits and Cloud Storage Policies**
-
-The cloud subscription model allows enterprises to scale their systems on an operational expense (OpEx) basis, paying only for the active services they require. This model avoids the initial capital expenditure of on-premises storage servers and dedicated server rooms.  
-Subscription features include:
-
-* **No Local Server Requirements:** Eliminates costs related to localized streaming servers, video storage servers, cooling, and network maintenance.  
-* **Proactive Status Monitoring:** Third-party technicians can remotely monitor system health and perform configurations through the platform.  
-* **Free Deployment Tiers:** The system is free to configure for up to 32 video channels and 10 access control doors, allowing organizations to run proof-of-concept tests before committing to enterprise subscriptions.  
-* **Flexible Licensing Structure:** Businesses can opt for monthly or yearly billing cycles, matching operations to seasonal demand or temporary project timelines.  
-* **Encrypted Cloud Storage Solutions:** Replaces or complements on-site recording by saving event-triggered video or continuous loops directly to secured, encrypted cloud databases. Standard subscriptions include 7-day or 30-day loop recording options.
-
-## **Managed Integrator Services**
-
-A managed integrator portal can serve system integrators, distributors, and service providers by combining diagnostic utilities, network tools, project quotation management, and warranty tracking within a unified interface.
-
-### **Service Distribution Model and Paid Value-Added Add-ons**
-
-Such portals may use a freemium model. Installers can manage customer locations, perform network configuration audits, and upgrade firmware on a local network, while remote maintenance and monitoring may require subscription licenses.  
-The table below details the split between free foundational capabilities and paid, value-added services:
-
-| Operational Module | Functional Classification | Specific Toolsets, Features, and Capabilities |
-| :---- | :---- | :---- |
-| **Site Authorization Management** | Free Baseline | Create new physical customer sites, apply for site authorizations, and share site access with third-party technicians. |
-| **Device Configuration Tools** | Free Baseline | Add devices via LAN autodetect, import profiles, adjust DDNS, and modify network configurations remotely. |
-| **Remote Support Diagnostics** | Free Baseline | Reset device passwords (onsite or offsite), retrieve system logs remotely, and push batch firmware upgrades to LAN devices. |
-| **Alarm Receiving Center (ARC)** | Free Baseline | Connect customer alarm control panels with standards-based security receivers. |
-| **Commercial Operations Tools** | Free Baseline | Access product spec selectors, coordinate project registrations, calculate pricing models, and track RMA logistics. |
-| **Health Monitoring Service** | Paid Subscription | Automates system health checks, tracks real-time status, identifies exceptions, and triggers automated linkage rules. |
-| **Cloud Storage Service** | Paid Subscription | Activates direct-to-cloud backups for video feeds, supporting standard IP cameras, solar-powered units, and NVRs. |
-| **Cloud Attendance Service** | Paid Subscription | Deploys cloud-hosted personnel shift tracking, vacation approvals, and attendance reports without local software installations. |
-| **Premium ARC Gateways** | Paid Subscription | Enables advanced ARC configurations, matching video verification streams with automated dispatch protocols. |
-| **Cellular IoT Data Service** | Paid Subscription | Activates and manages global 4G data cards used in remote solar-powered cameras or vehicular tracking units. |
-| **Temperature Screening Service** | Paid Subscription | Enables advanced skin-temperature trend reports, mask screening metadata audits, and integration with local access policies. |
-| **Employee Sub-Account Add-On** | Paid Subscription | Enables granular role-based permissions and activity tracking for secondary technician accounts. |
-
-### **Global Regulatory and Regional Availability Framework**
-
-Due to differences in telecommunications infrastructure, regional data privacy laws, and localized distributor agreements, subscription-based features are subject to strict regional availability limitations:
-
-* **United States and Canada:** Installers can purchase and configure Health Monitoring, Cloud Storage, and VSaaS modules. However, due to local regulatory constraints, the configuration of automated Linkage Rules within the Health Monitoring Service is restricted.  
-* **Africa:** Integrators can access and use the platform's free features, including site management, firmware updates, and basic device configurations. However, paid value-added services are not supported across multiple countries, including Angola, Benin, Botswana, Burkina Faso, Burundi, Cameroon, Cape Verde, Central African Republic, Chad, Comoros, Congo, Cote D'Ivoire, Djibouti, Equatorial Guinea, Eritrea, Ethiopia, Gabon, Gambia, Guinea, Guinea-Bissau, Liberia, Madagascar, Malawi, Mali, Mayotte, Mozambique, Namibia, Niger, Nigeria, Rwanda, Senegal, Seychelles, Sierra Leone, Somalia, Tanzania, Togo, Uganda, Zambia, and Zimbabwe.  
-* **Asia (Japan and Taiwan):** Support is limited strictly to the platform's free feature set, with paid cloud services and premium subscriptions unavailable.  
-* **Europe and Latin America:** Serves as the standard deployment model for cloud integrations. Integrators have unrestricted access to purchase, configure, and renew all value-added cloud subscriptions, health monitoring tools, and cellular data plans.
-
-## **Analytical Synthesis and Deployment Recommendations**
-
-Deploying an optimal security software architecture requires aligning physical scale, integration complexity, and financial models with the capabilities of the chosen platform:
-
-* **Deploying Local Utility Software (desktop VMS client):** This architecture is best suited for small, single-site properties where security operations remain within a local network. It is ideal for budgets that prioritize avoiding recurring licensing fees and where on-site workstations can handle the software's decoding demands. However, as device counts approach database limits, performance can degrade, making this model less suitable for larger, expanding systems.  
-* **Deploying On-Premises Central Management (enterprise VMS platform):** Recommended for complex, high-density environments such as industrial plants, transportation hubs, corporate campuses, and hospitals. This model is ideal for organisations that require deep integration between video feeds, access control doors, vehicle barriers, thermal monitors, and local video walls. While it requires significant initial capital expenditure for dedicated server hardware and licensing, it ensures data sovereignty, low-latency processing, and high-performance operation on-site.  
-* **Deploying Cloud-Native VSaaS (cloud-managed team mode & enterprise VMS Connect):** Well-suited for geographically distributed, multi-location businesses such as retail chains, property management groups, and temporary construction projects. By moving core management systems to the cloud, it avoids the costs of on-site IT rooms, server maintenance, and complex VPN configurations. This model allows organizations to transition from capital-heavy hardware deployments to predictable, flexible monthly or yearly operational subscription fees.
-
-#### **Works cited**
-
-The original vendor-specific source list was removed for public distribution. Any
-future compatibility claims must be backed by independently reviewed, redistributable
-documentation and recorded in the project evidence log.
+Feature ideas and factual systems are restated independently in this roadmap; source wording is not a product requirement. This editorial cleanup reduces avoidable third-party naming and copied-expression risk, but it is not legal clearance for a product name, integration claim, license, or distribution package.

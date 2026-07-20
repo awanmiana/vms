@@ -64,6 +64,8 @@ const requiredHelpers = [
   "canAdmitCamera",
   "enforceGlobalCameraLimit",
   "nextWorkspaceId",
+  "defaultWorkspaceFloatRect",
+  "constrainWorkspaceFloatRect",
   "refreshCameraIndexes"
 ];
 requiredHelpers.forEach((name) => {
@@ -299,6 +301,27 @@ run("rapid workspace ID allocation stays unique even when Date.now is unchanged"
   }
   assert.strictEqual(new Set(ids).size, ids.length);
   assert(ids.every((id) => id.startsWith("live-")));
+});
+
+run("floating workspaces stay inside a restored viewport and clear of the menu", () => {
+  context.window.innerWidth = 640;
+  context.window.innerHeight = 480;
+  context.document.querySelector = (selector) => (
+    selector === ".sidebar"
+      ? { getBoundingClientRect: () => ({ right: 64 }) }
+      : null
+  );
+
+  const rect = api.constrainWorkspaceFloatRect("playback", {
+    x: 8,
+    y: -40,
+    width: 1400,
+    height: 1000
+  });
+  assert(rect.x >= 72, "floating workspace must not cover the 64px navigation rail");
+  assert(rect.y >= 8);
+  assert(rect.x + rect.width <= 632, "floating workspace must stay within the viewport width");
+  assert(rect.y + rect.height <= 472, "floating workspace must stay within the viewport height");
 });
 
 if (process.exitCode) {

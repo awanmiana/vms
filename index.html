@@ -179,8 +179,8 @@
           </div>
         </section>
 
-        <section id="operatorView" class="operator-grid app-view">
-          <aside class="camera-browser resource-panel is-overlay-open">
+        <section id="operatorView" class="operator-grid app-view video-workspace-view live-workspace-view">
+          <aside class="camera-browser resource-panel video-overlay-panel video-resource-panel is-overlay-open">
             <div class="resource-tabs">
               <button class="resource-tab active" data-resource-tab="resource" type="button">Resource</button>
               <button class="resource-tab" data-resource-tab="autoswitch" type="button">Auto-Switch</button>
@@ -199,7 +199,7 @@
             </div>
           </aside>
 
-          <section class="live-panel">
+          <section class="live-panel video-workspace-panel">
             <div id="liveWorkspaceTabs" class="workspace-tabbar" data-workspace-kind="live"></div>
             <div class="live-canvas-wrap" id="liveCanvasWrap">
               <canvas id="spatialCanvas"></canvas>
@@ -220,6 +220,8 @@
                     <button id="gridDivisionCustomBtn" type="button">Set</button>
                   </div>
                 </div>
+                <button id="liveResourceToggleBtn" class="grid-tool-btn panel-toggle-btn" title="Show or hide cameras and groups" type="button">Cams</button>
+                <button id="liveInspectorToggleBtn" class="grid-tool-btn panel-toggle-btn" title="Show or hide selected camera information and controls" type="button">Info</button>
                 <button id="gridLayoutBtn" class="grid-tool-btn" title="Window division" type="button">&#9638;</button>
                 <button id="gridZoomOutBtn" class="grid-tool-btn" title="Digital zoom out" type="button">-</button>
                 <button id="gridZoomInBtn" class="grid-tool-btn" title="Digital zoom in" type="button">+</button>
@@ -257,7 +259,7 @@
               </div>
             </div>
           </section>
-          <aside class="monitor-drawer is-overlay-open" id="monitorDrawer">
+          <aside class="monitor-drawer video-overlay-panel video-inspector-panel is-overlay-open" id="monitorDrawer">
             <div class="drawer-header">
               <div>
                 <div class="drawer-kicker">Selected Camera</div>
@@ -568,8 +570,8 @@
           </section>
         </section>
 
-        <section id="playbackView" class="operator-grid app-view">
-          <aside class="camera-browser resource-panel">
+        <section id="playbackView" class="operator-grid app-view video-workspace-view playback-workspace-view">
+          <aside class="camera-browser resource-panel video-overlay-panel video-resource-panel is-overlay-open">
             <div class="resource-tabs">
               <button class="resource-tab active" data-pb-resource-tab="resource" type="button">Resource</button>
               <button class="resource-tab" data-pb-resource-tab="autoswitch" type="button">Auto-Switch</button>
@@ -588,36 +590,8 @@
             </div>
           </aside>
 
-          <section class="live-panel playback-panel" id="playbackPanel">
+          <section class="live-panel playback-panel video-workspace-panel" id="playbackPanel">
             <div id="playbackWorkspaceTabs" class="workspace-tabbar" data-workspace-kind="playback"></div>
-            <div class="section-header">
-              <h3>Remote Playback</h3>
-              <div class="pb-range-control">
-                <button id="pbRangeBtn" class="secondary pb-range-btn" type="button">
-                  <span class="nav-icon">&#128197;</span>
-                  <span id="pbRangeLabel">Time range</span>
-                </button>
-                <div class="grid-tool-popover pb-range-popover" id="pbRangePopover" hidden>
-                  <label>
-                    <span>Start</span>
-                    <div class="pb-range-inputs">
-                      <input id="pbRangeStartDate" type="date" />
-                      <input id="pbRangeStartTime" type="time" step="1" value="00:00:00" />
-                    </div>
-                  </label>
-                  <label>
-                    <span>End</span>
-                    <div class="pb-range-inputs">
-                      <input id="pbRangeEndDate" type="date" />
-                      <input id="pbRangeEndTime" type="time" step="1" value="23:59:59" />
-                    </div>
-                  </label>
-                  <div class="form-actions">
-                    <button id="pbRangeApplyBtn" type="button">Search</button>
-                  </div>
-                </div>
-              </div>
-            </div>
 
             <div class="live-canvas-wrap playback-canvas-wrap" id="playbackCanvasWrap">
               <canvas id="playbackSpatialCanvas"></canvas>
@@ -634,6 +608,8 @@
                     <button id="pbDivisionCustomBtn" type="button">Set</button>
                   </div>
                 </div>
+                <button id="playbackResourceToggleBtn" class="grid-tool-btn panel-toggle-btn" title="Show or hide cameras and groups" type="button">Cams</button>
+                <button id="playbackInspectorToggleBtn" class="grid-tool-btn panel-toggle-btn" title="Show or hide selected camera information and controls" type="button">Info</button>
                 <button id="pbLayoutBtn" class="grid-tool-btn" title="Window division" type="button">&#9638;</button>
                 <button id="pbCloseAllBtn" class="grid-tool-btn" title="Close all" type="button">&#10005;</button>
                 <button id="pbFullscreenBtn" class="grid-tool-btn" title="Fullscreen" type="button">&#9974;</button>
@@ -649,13 +625,42 @@
                 <button id="pbJumpEndBtn" class="grid-tool-btn" title="Jump to end of day" type="button">&#9197;</button>
                 <span id="pbCurrentTime" class="pb-time-pill">00:00:00</span>
                 <button id="pbSpeedBtn" class="secondary pb-speed-btn" type="button">1x</button>
+                <div class="pb-range-control">
+                  <button id="pbRangeBtn" class="secondary pb-range-btn" type="button">
+                    <span class="pb-range-icon" aria-hidden="true">&#128197;</span>
+                    <span id="pbRangeLabel">Time range</span>
+                  </button>
+                  <div class="grid-tool-popover pb-range-popover" id="pbRangePopover" hidden>
+                    <label>
+                      <span>Start</span>
+                      <div class="pb-range-inputs">
+                        <input id="pbRangeStartDate" type="date" />
+                        <input id="pbRangeStartTime" type="time" step="1" value="00:00:00" />
+                      </div>
+                    </label>
+                    <label>
+                      <span>End</span>
+                      <div class="pb-range-inputs">
+                        <input id="pbRangeEndDate" type="date" />
+                        <input id="pbRangeEndTime" type="time" step="1" value="23:59:59" />
+                      </div>
+                    </label>
+                    <div class="form-actions">
+                      <button id="pbRangeApplyBtn" type="button">Search footage</button>
+                    </div>
+                  </div>
+                </div>
                 <span class="pb-transport-spacer"></span>
+                <span class="pb-footage-legend" title="Prototype footage availability for the selected search window">
+                  <span><i class="available"></i>Available</span>
+                  <span><i class="missing"></i>Missing</span>
+                </span>
                 <label class="pb-filter-chip"><input id="pbFilterHuman" type="checkbox" /> Human</label>
                 <label class="pb-filter-chip"><input id="pbFilterVehicle" type="checkbox" /> Vehicle</label>
               </div>
 
               <div class="pb-track-wrap">
-                <div class="pb-track" id="pbTrack">
+                <div class="pb-track" id="pbTrack" role="slider" tabindex="0" aria-label="Playback timeline" aria-valuemin="0" aria-valuemax="86399" aria-valuenow="0">
                   <div class="pb-track-available" id="pbTrackAvailable"></div>
                   <div class="pb-ticks" id="pbTicks"></div>
                   <div class="pb-playhead" id="pbPlayhead"></div>
@@ -668,6 +673,16 @@
               </div>
             </div>
           </section>
+          <aside class="monitor-drawer video-overlay-panel video-inspector-panel is-overlay-open" id="playbackDrawer">
+            <div class="drawer-header">
+              <div>
+                <div class="drawer-kicker">Selected Camera</div>
+                <h3 id="playbackDrawerTitle">No camera selected</h3>
+              </div>
+              <span id="playbackDrawerStatus" class="status idle">idle</span>
+            </div>
+            <div id="playbackDrawerBody" class="drawer-body"></div>
+          </aside>
         </section>
 
         <section id="incidentsView" class="app-view incident-layout">

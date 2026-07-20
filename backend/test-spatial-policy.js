@@ -123,6 +123,102 @@ run("bandwidth cap: a cap larger than the candidate count keeps everyone active"
   assert.strictEqual(result.every((entry) => entry.withinBudget), true);
 });
 
+function createCanvasRuntime(ResizeObserverCtor) {
+  const windowListeners = new Map();
+  const runtimeWindow = {
+    addEventListener(type, listener) {
+      windowListeners.set(type, listener);
+    },
+    removeEventListener(type, listener) {
+      if (windowListeners.get(type) === listener) windowListeners.delete(type);
+    }
+  };
+  if (ResizeObserverCtor) runtimeWindow.ResizeObserver = ResizeObserverCtor;
+
+  const runtimeSandbox = {
+    window: runtimeWindow,
+    performance: { now: () => 0 },
+    requestAnimationFrame: () => 1,
+    cancelAnimationFrame: () => {},
+    setTimeout: () => 1,
+    clearTimeout: () => {}
+  };
+  vm.runInNewContext(source, runtimeSandbox);
+  return { runtimeWindow, windowListeners };
+}
+
+function createCanvasElement(container) {
+  const listeners = new Map();
+  return {
+    parentElement: container,
+    width: 0,
+    height: 0,
+    style: {},
+    getContext: () => ({}),
+    getBoundingClientRect: () => container.getBoundingClientRect(),
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    }
+  };
+}
+
+run("spatial canvas follows container resizes and disconnects its observer", () => {
+  let observerCallback;
+  let observedElement;
+  let disconnectCount = 0;
+  class FakeResizeObserver {
+    constructor(callback) {
+      observerCallback = callback;
+    }
+
+    observe(element) {
+      observedElement = element;
+    }
+
+    disconnect() {
+      disconnectCount += 1;
+    }
+  }
+
+  const dimensions = { width: 640.8, height: 360.9 };
+  const container = {
+    getBoundingClientRect: () => dimensions
+  };
+  const canvas = createCanvasElement(container);
+  const { runtimeWindow, windowListeners } = createCanvasRuntime(FakeResizeObserver);
+  const spatialCanvas = new runtimeWindow.SpatialCanvas(canvas);
+
+  assert.strictEqual(observedElement, container);
+  assert.strictEqual(canvas.width, 640);
+  assert.strictEqual(canvas.height, 360);
+
+  dimensions.width = 912.4;
+  dimensions.height = 514.7;
+  observerCallback();
+  assert.strictEqual(canvas.width, 912);
+  assert.strictEqual(canvas.height, 514);
+
+  spatialCanvas.destroy();
+  assert.strictEqual(disconnectCount, 1);
+  assert.strictEqual(windowListeners.has("resize"), false);
+});
+
+run("spatial canvas remains compatible when ResizeObserver is unavailable", () => {
+  const container = {
+    getBoundingClientRect: () => ({ width: 480, height: 270 })
+  };
+  const canvas = createCanvasElement(container);
+  const { runtimeWindow } = createCanvasRuntime();
+  const spatialCanvas = new runtimeWindow.SpatialCanvas(canvas);
+
+  assert.strictEqual(canvas.width, 480);
+  assert.strictEqual(canvas.height, 270);
+  spatialCanvas.destroy();
+});
+
 if (process.exitCode) {
   console.error("\nSpatial policy tests failed.");
 } else {

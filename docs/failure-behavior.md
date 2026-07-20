@@ -1,5 +1,7 @@
 # P0-03 Failure-Behavior Contract
 
+> **Document role:** Normative technical detail for the approved P0-03 contract. Approval status, implementation evidence, later feature order, and verification checks live only in [`../Development_plan.md`](../Development_plan.md). This document does not authorize any later-gate service.
+
 ## 1. Purpose and status
 
 ### A. Purpose
@@ -33,7 +35,7 @@ current prototype already contains:
 
 - a production background collector or site agent;
 - a coordinator, cluster, replicated database, queue, or failover service;
-- real Reference Vendor, open interoperability, cloud, access-control, or media operations;
+- real vendor-specific, ONVIF, cloud, access-control, or media operations;
 - durable alarm or audit reconciliation;
 - production authentication or offline authorization;
 - VMS-owned continuous recording.
@@ -512,7 +514,7 @@ thresholds, and recovery SLOs remain capacity and resilience-test decisions.
 ### A. Required separation
 
 P0-03 behavior must be represented through vendor-neutral, replaceable
-contracts. The core must not import concrete Reference Vendor, open interoperability, database, queue,
+contracts. The core must not import concrete vendor, ONVIF, database, queue,
 cloud, or operating-system service logic to decide failure meaning.
 
 The architecture should expose independently testable roles equivalent to:
@@ -567,7 +569,7 @@ This contract deliberately incorporates these corrections:
 6. Retry behavior uses shared contracts and per-scope budgets, not one global
    scheduler or independent nested retry storms.
 
-## 14. Deferred decisions and owning gates
+## 14. Roadmap cross-references
 
 P0-03 approves failure semantics, not the following implementations:
 
@@ -600,13 +602,13 @@ complete until the relevant later gate is approved and its behavior is tested.
 This contract uses the following standards and primary guidance without
 claiming they prescribe this product's complete architecture:
 
-- [open interoperability Profile G](https://www.interoperability.org/video/ovif-profile-g-for-edge-storage-and-retrieval/)
+- [ONVIF Profile G](https://www.onvif.org/video/ovif-profile-g-for-edge-storage-and-retrieval/)
   establishes capability-based edge recording, search, retrieval, and playback
   integration.
-- [open interoperability PACS Architecture and Design Considerations](https://www.interoperability.org/specs/wp/open interoperability-PACS-Architecture-and-Design-Considerations.pdf)
+- [ONVIF PACS Architecture and Design Considerations](https://www.onvif.org/specs/wp/ONVIF-PACS-Architecture-and-Design-Considerations.pdf)
   describes controller-side storage and intelligence for offline operation
   while avoiding a mandatory physical layout.
-- [open interoperability Access Control Service](https://www.interoperability.org/specs/srv/access/open interoperability-AccessControl-Service-Spec.pdf)
+- [ONVIF Access Control Service Specification](https://www.onvif.org/specs/srv/access/ONVIF-AccessControl-Service-Spec.pdf)
   defines external-authorization requests and timeout events; it does not
   establish one universal door fallback policy.
 - [CloudEvents](https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md)
@@ -622,4 +624,3 @@ claiming they prescribe this product's complete architecture:
 - [AWS retry guidance](https://docs.aws.amazon.com/wellarchitected/latest/framework/rel_mitigate_interaction_failure_limit_retries.html)
   documents capped exponential backoff, jitter, and retry limits to avoid retry
   storms.
-

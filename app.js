@@ -472,6 +472,8 @@ const els = {
   maxActiveStreamsInput: document.getElementById("maxActiveStreamsInput"),
   cameraList: document.getElementById("cameraList"),
   cameraCount: document.getElementById("cameraCount"),
+  liveView: document.getElementById("operatorView"),
+  liveResourcePanel: document.querySelector("#operatorView > .resource-panel"),
   livePanel: document.querySelector(".live-panel"),
   spatialCanvasEl: document.getElementById("spatialCanvas"),
   simpleLiveGrid: document.getElementById("simpleLiveGrid"),
@@ -492,11 +494,14 @@ const els = {
   ptzStatus: document.getElementById("ptzStatus"),
   gridDivisionCustomInput: document.getElementById("gridDivisionCustomInput"),
   gridDivisionCustomBtn: document.getElementById("gridDivisionCustomBtn"),
+  liveResourceToggleBtn: document.getElementById("liveResourceToggleBtn"),
+  liveInspectorToggleBtn: document.getElementById("liveInspectorToggleBtn"),
   streamSettingsPopover: document.getElementById("streamSettingsPopover"),
   maxActiveStreamsInputGrid: document.getElementById("maxActiveStreamsInputGrid"),
   monitorDrawerTitle: document.getElementById("monitorDrawerTitle"),
   monitorDrawerStatus: document.getElementById("monitorDrawerStatus"),
   monitorDrawerBody: document.getElementById("monitorDrawerBody"),
+  monitorDrawer: document.getElementById("monitorDrawer"),
   liveWorkspaceTabs: document.getElementById("liveWorkspaceTabs"),
   liveGroupList: document.getElementById("liveGroupList"),
   quickGroupNameInput: document.getElementById("quickGroupNameInput"),
@@ -562,6 +567,8 @@ const els = {
   pbResourceTabs: document.querySelectorAll("[data-pb-resource-tab]"),
   pbResourcePane: document.getElementById("pbResourcePane"),
   pbAutoSwitchPane: document.getElementById("pbAutoSwitchPane"),
+  playbackView: document.getElementById("playbackView"),
+  playbackResourcePanel: document.querySelector("#playbackView > .resource-panel"),
   playbackPanel: document.getElementById("playbackPanel"),
   playbackWorkspaceTabs: document.getElementById("playbackWorkspaceTabs"),
   playbackCanvasWrap: document.getElementById("playbackCanvasWrap"),
@@ -571,6 +578,8 @@ const els = {
   pbLayoutPopover: document.getElementById("pbLayoutPopover"),
   pbDivisionCustomInput: document.getElementById("pbDivisionCustomInput"),
   pbDivisionCustomBtn: document.getElementById("pbDivisionCustomBtn"),
+  playbackResourceToggleBtn: document.getElementById("playbackResourceToggleBtn"),
+  playbackInspectorToggleBtn: document.getElementById("playbackInspectorToggleBtn"),
   pbCloseAllBtn: document.getElementById("pbCloseAllBtn"),
   pbFullscreenBtn: document.getElementById("pbFullscreenBtn"),
   pbRangeBtn: document.getElementById("pbRangeBtn"),
@@ -598,6 +607,10 @@ const els = {
   pbPrevDayBtn: document.getElementById("pbPrevDayBtn"),
   pbNextDayBtn: document.getElementById("pbNextDayBtn"),
   pbDateLabel: document.getElementById("pbDateLabel"),
+  playbackDrawer: document.getElementById("playbackDrawer"),
+  playbackDrawerTitle: document.getElementById("playbackDrawerTitle"),
+  playbackDrawerStatus: document.getElementById("playbackDrawerStatus"),
+  playbackDrawerBody: document.getElementById("playbackDrawerBody"),
   incidentStatusFilter: document.getElementById("incidentStatusFilter"),
   incidentSearchInput: document.getElementById("incidentSearchInput"),
   incidentStats: document.getElementById("incidentStats"),
@@ -872,34 +885,42 @@ function toggleWorkspaceLayer(kind) {
 }
 
 function defaultWorkspaceFloatRect(kind) {
-  const viewportWidth = Math.max(760, Number(window.innerWidth) || 1280);
-  const viewportHeight = Math.max(560, Number(window.innerHeight) || 800);
-  const width = Math.min(1120, Math.max(620, Math.round(viewportWidth * 0.72)));
-  const height = Math.min(760, Math.max(420, Math.round(viewportHeight * 0.72)));
-  const availableX = Math.max(12, viewportWidth - width - 12);
-  const availableY = Math.max(58, viewportHeight - height - 12);
+  const viewportWidth = Math.max(1, Number(window.innerWidth) || 1280);
+  const viewportHeight = Math.max(1, Number(window.innerHeight) || 800);
+  const sidebarRight = Number(document.querySelector(".sidebar")?.getBoundingClientRect?.().right) || 0;
+  const minX = Math.max(8, Math.min(viewportWidth - 8, Math.round(sidebarRight) + 8));
+  const availableWidth = Math.max(1, viewportWidth - minX - 8);
+  const availableHeight = Math.max(1, viewportHeight - 16);
+  const width = Math.min(1120, availableWidth, Math.max(Math.min(620, availableWidth), Math.round(availableWidth * 0.78)));
+  const height = Math.min(760, availableHeight, Math.max(Math.min(420, availableHeight), Math.round(availableHeight * 0.76)));
+  const availableX = Math.max(minX, viewportWidth - width - 8);
+  const availableY = Math.max(8, viewportHeight - height - 8);
   return {
-    x: Math.min(availableX, kind === "live" ? 86 : 150),
-    y: Math.min(availableY, kind === "live" ? 72 : 96),
+    x: Math.max(minX, Math.min(availableX, minX + (kind === "live" ? 16 : 54))),
+    y: Math.min(availableY, kind === "live" ? 28 : 54),
     width,
     height
   };
 }
 
 function constrainWorkspaceFloatRect(kind, rect) {
-  const viewportWidth = Math.max(420, Number(window.innerWidth) || 1280);
-  const viewportHeight = Math.max(360, Number(window.innerHeight) || 800);
+  const viewportWidth = Math.max(1, Number(window.innerWidth) || 1280);
+  const viewportHeight = Math.max(1, Number(window.innerHeight) || 800);
+  const sidebarRight = Number(document.querySelector(".sidebar")?.getBoundingClientRect?.().right) || 0;
+  const minX = Math.max(8, Math.min(viewportWidth - 8, Math.round(sidebarRight) + 8));
+  const availableWidth = Math.max(1, viewportWidth - minX - 8);
+  const availableHeight = Math.max(1, viewportHeight - 16);
   const fallback = defaultWorkspaceFloatRect(kind);
   const width = Math.min(
-    Math.max(360, viewportWidth - 24),
-    Math.max(360, Number(rect?.width) || fallback.width)
+    availableWidth,
+    Math.max(Math.min(360, availableWidth), Number(rect?.width) || fallback.width)
   );
   const height = Math.min(
-    Math.max(280, viewportHeight - 24),
-    Math.max(280, Number(rect?.height) || fallback.height)
+    availableHeight,
+    Math.max(Math.min(280, availableHeight), Number(rect?.height) || fallback.height)
   );
   return {
-    x: Math.max(8, Math.min(viewportWidth - width - 8, Number(rect?.x) || fallback.x)),
+    x: Math.max(minX, Math.min(viewportWidth - width - 8, Number(rect?.x) || fallback.x)),
     y: Math.max(8, Math.min(viewportHeight - height - 8, Number(rect?.y) || fallback.y)),
     width,
     height
@@ -1902,7 +1923,19 @@ function cameraMatches(camera) {
 function setView(view, options = {}) {
   if (!validViews.has(view)) return;
   state.view = view;
+  const isVideoWorkspace = view === "operator" || view === "playback";
+  document.body.classList.toggle("video-workspace-mode", isVideoWorkspace);
   document.body.classList.toggle("monitor-mode", view === "operator");
+  document.body.classList.toggle("playback-mode", view === "playback");
+
+  if (els.cameraSearch) {
+    const isPlayback = view === "playback";
+    els.cameraSearch.value = isPlayback ? state.playbackQuery : state.query;
+    els.cameraSearch.placeholder = isPlayback
+      ? "search playback cameras, groups, areas, tags"
+      : "search live cameras, groups, areas, tags";
+    els.cameraSearch.setAttribute("aria-label", isPlayback ? "Search playback cameras" : "Search live cameras");
+  }
 
   const activeNavByView = {
     catalog: "devices",
@@ -2014,8 +2047,9 @@ function addToGrid(ids) {
 }
 
 function requestLiveFullscreen() {
-  if (!els.livePanel || document.fullscreenElement || !els.livePanel.requestFullscreen) return;
-  els.livePanel.requestFullscreen().catch(() => {});
+  const target = els.liveView || els.livePanel;
+  if (!target || document.fullscreenElement || !target.requestFullscreen) return;
+  target.requestFullscreen().catch(() => {});
 }
 
 function requestLiveSurfaceFullscreen() {
@@ -2441,6 +2475,31 @@ function queuePtzAction(action) {
   };
 }
 
+function cameraOverviewMarkup(camera) {
+  const device = cameraDevice(camera);
+  const tagsHtml = (camera.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") || "<span>untagged</span>";
+  return `
+    <section class="drawer-section camera-overview-section">
+      <div class="detail-row"><span>ID</span><strong>${escapeHtml(camera.id)}</strong></div>
+      <div class="detail-row"><span>Location</span><strong>${escapeHtml([camera.area, camera.floor].filter(Boolean).join(" / ") || "Unassigned")}</strong></div>
+      <div class="detail-row"><span>Device</span><strong>${escapeHtml(device?.name || camera.nvr || "Standalone")}</strong></div>
+      <div class="detail-row"><span>Channel</span><strong>${escapeHtml(camera.channel || "IP")}</strong></div>
+      <div class="detail-row"><span>Direction</span><strong>${escapeHtml(camera.direction || "Not set")}</strong></div>
+      <div class="tag-strip">${tagsHtml}</div>
+    </section>
+  `;
+}
+
+function relatedCameraButtonsMarkup(camera, dataAttribute) {
+  const related = (camera.related || [])
+    .map((id) => byId.get(id))
+    .filter(Boolean)
+    .slice(0, 6);
+  return related.length
+    ? related.map((item) => `<button ${dataAttribute}="${escapeHtml(item.id)}" type="button">${escapeHtml(item.name)}</button>`).join("")
+    : `<span class="detail-muted">No related cameras mapped yet.</span>`;
+}
+
 function renderMonitorDrawer() {
   if (!els.monitorDrawerBody) return;
   const camera = byId.get(state.selectedId);
@@ -2451,28 +2510,13 @@ function renderMonitorDrawer() {
     return;
   }
 
-  const device = cameraDevice(camera);
-  const related = (camera.related || [])
-    .map((id) => byId.get(id))
-    .filter(Boolean)
-    .slice(0, 6);
-  const tagsHtml = (camera.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") || "<span>untagged</span>";
-  const relatedHtml = related.length
-    ? related.map((item) => `<button data-drawer-open-camera="${escapeHtml(item.id)}" type="button">${escapeHtml(item.name)}</button>`).join("")
-    : `<span class="detail-muted">No related cameras mapped yet.</span>`;
+  const relatedHtml = relatedCameraButtonsMarkup(camera, "data-drawer-open-camera");
 
   els.monitorDrawerTitle.textContent = camera.name;
   els.monitorDrawerStatus.textContent = camera.status || "unknown";
   els.monitorDrawerStatus.className = `status ${camera.status || "idle"}`;
   els.monitorDrawerBody.innerHTML = `
-    <section class="drawer-section">
-      <div class="detail-row"><span>ID</span><strong>${escapeHtml(camera.id)}</strong></div>
-      <div class="detail-row"><span>Location</span><strong>${escapeHtml([camera.area, camera.floor].filter(Boolean).join(" / ") || "Unassigned")}</strong></div>
-      <div class="detail-row"><span>Device</span><strong>${escapeHtml(device?.name || camera.nvr || "Standalone")}</strong></div>
-      <div class="detail-row"><span>Channel</span><strong>${escapeHtml(camera.channel || "IP")}</strong></div>
-      <div class="detail-row"><span>Direction</span><strong>${escapeHtml(camera.direction || "Not set")}</strong></div>
-      <div class="tag-strip">${tagsHtml}</div>
-    </section>
+    ${cameraOverviewMarkup(camera)}
 
     <section class="drawer-section">
       <div class="drawer-section-title">Digital Zoom</div>
@@ -2520,6 +2564,66 @@ function renderMonitorDrawer() {
   });
   els.monitorDrawerBody.querySelectorAll("[data-ptz-action]").forEach((button) => {
     button.addEventListener("click", () => queuePtzAction(button.dataset.ptzAction));
+  });
+}
+
+function renderPlaybackDrawer() {
+  if (!els.playbackDrawerBody) return;
+  const camera = byId.get(state.playbackSelectedId);
+  if (!camera) {
+    els.playbackDrawerTitle.textContent = "No camera selected";
+    els.playbackDrawerStatus.textContent = "idle";
+    els.playbackDrawerStatus.className = "status idle";
+    els.playbackDrawerBody.innerHTML = `<div class="empty-state">Select a camera from the tree or playback stage.</div>`;
+    return;
+  }
+
+  const relatedHtml = relatedCameraButtonsMarkup(camera, "data-playback-drawer-open-camera");
+  els.playbackDrawerTitle.textContent = camera.name;
+  els.playbackDrawerStatus.textContent = camera.status || "unknown";
+  els.playbackDrawerStatus.className = `status ${camera.status || "idle"}`;
+  els.playbackDrawerBody.innerHTML = `
+    ${cameraOverviewMarkup(camera)}
+
+    <section class="drawer-section">
+      <div class="drawer-section-title">Playback</div>
+      <div class="detail-row"><span>Position</span><strong data-playback-current-time>${escapeHtml(formatDateTime(playbackCursorDate))}</strong></div>
+      <div class="detail-row"><span>Search range</span><strong data-playback-range>${escapeHtml(formatPlaybackRangeLabel())}</strong></div>
+      <div class="drawer-actions playback-drawer-transport">
+        <button data-playback-drawer-action="step-back" type="button" title="Step back 10 seconds">-10s</button>
+        <button data-playback-drawer-action="play" type="button">${playbackPlaying ? "Pause" : "Play"}</button>
+        <button data-playback-drawer-action="step-forward" type="button" title="Step forward 10 seconds">+10s</button>
+        <button data-playback-drawer-action="range" type="button">Date &amp; time</button>
+        <button data-playback-drawer-action="report" type="button">Report</button>
+      </div>
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-title">Nearby</div>
+      <div class="drawer-actions">${relatedHtml}</div>
+    </section>
+  `;
+
+  els.playbackDrawerBody.querySelectorAll("[data-playback-drawer-open-camera]").forEach((button) => {
+    button.addEventListener("click", () => addToPlaybackGrid(button.dataset.playbackDrawerOpenCamera));
+  });
+  els.playbackDrawerBody.querySelectorAll("[data-playback-drawer-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.playbackDrawerAction;
+      if (action === "step-back") {
+        stopPlaybackPlay();
+        stepPlayback(-10);
+      } else if (action === "play") {
+        togglePlaybackPlay();
+      } else if (action === "step-forward") {
+        stopPlaybackPlay();
+        stepPlayback(10);
+      } else if (action === "range") {
+        els.pbRangeBtn?.click();
+      } else if (action === "report") {
+        preparePlaybackReport(camera.id);
+      }
+    });
   });
 }
 
@@ -3482,6 +3586,7 @@ function renderPlaybackTileGrid() {
   if (maximizedPlaybackCameraId && !maximizedCamera) maximizedPlaybackCameraId = "";
   const slotCount = maximizedCamera ? 1 : Math.max(1, state.playbackGridDivision);
   const camerasToShow = maximizedCamera ? [maximizedCamera] : openCameras.slice(0, slotCount);
+  renderPlaybackDrawer();
 
   if (state.useDraggableCanvases && els.playbackSpatialCanvasEl) {
     els.playbackTileGrid.style.display = "none";
@@ -3492,6 +3597,7 @@ function renderPlaybackTileGrid() {
         persist();
         playbackSpatialCanvas?.focusCamera(camera.id, { center: false });
         renderPlaybackTree();
+        renderPlaybackDrawer();
       },
       onCameraDoubleClick: (camera) => {
         maximizedPlaybackCameraId = maximizedPlaybackCameraId === camera.id ? "" : camera.id;
@@ -3672,12 +3778,21 @@ function renderPlaybackScrubber() {
 
   const cursorPct = ((playbackCursorDate.getTime() - dayStart.getTime()) / 86400000) * 100;
   els.pbPlayhead.style.left = `${Math.min(100, Math.max(0, cursorPct))}%`;
+  const cursorSeconds = Math.min(86399, Math.max(0, Math.round((playbackCursorDate.getTime() - dayStart.getTime()) / 1000)));
+  els.pbTrack?.setAttribute("aria-valuenow", String(cursorSeconds));
+  els.pbTrack?.setAttribute("aria-valuetext", formatDateTime(playbackCursorDate));
 
   els.pbCurrentTime.textContent = formatTime(playbackCursorDate);
   els.pbDateLabel.textContent = `${padTimePart(playbackActiveDay.getMonth() + 1)}/${padTimePart(playbackActiveDay.getDate())}`;
   els.pbRangeLabel.textContent = formatPlaybackRangeLabel();
   els.pbSpeedBtn.textContent = `${playbackSpeeds[playbackSpeedIndex]}x`;
   els.pbPlayBtn.innerHTML = playbackPlaying ? "&#10074;&#10074;" : "&#9654;";
+  const drawerTime = els.playbackDrawerBody?.querySelector("[data-playback-current-time]");
+  const drawerRange = els.playbackDrawerBody?.querySelector("[data-playback-range]");
+  const drawerPlay = els.playbackDrawerBody?.querySelector('[data-playback-drawer-action="play"]');
+  if (drawerTime) drawerTime.textContent = formatDateTime(playbackCursorDate);
+  if (drawerRange) drawerRange.textContent = formatPlaybackRangeLabel();
+  if (drawerPlay) drawerPlay.textContent = playbackPlaying ? "Pause" : "Play";
 }
 
 function seekPlaybackToClientX(clientX) {
@@ -4216,6 +4331,8 @@ function render() {
   els.restoreLastCameraGridToggle.checked = state.restoreLastCameraGrid;
   syncStreamingControlState();
   setView(state.view);
+  if (els.treeSearchInput) els.treeSearchInput.value = state.query;
+  if (els.pbTreeSearchInput) els.pbTreeSearchInput.value = state.playbackQuery;
   renderWorkspaceTabs("live");
   renderWorkspaceTabs("playback");
   applyWorkspacePresentation();
@@ -4321,12 +4438,58 @@ if (isVmsTestMode) {
     canAdmitCamera,
     enforceGlobalCameraLimit,
     nextWorkspaceId,
+    defaultWorkspaceFloatRect,
+    constrainWorkspaceFloatRect,
     queuePtzAction,
     refreshCameraIndexes,
     setInventoryAuthorityState,
     syncDeviceChannels
   };
 } else {
+function syncOverlayToggle(button, panel) {
+  if (!button || !panel) return;
+  const isOpen = panel.classList.contains("is-overlay-open");
+  button.classList.toggle("active", isOpen);
+  button.setAttribute("aria-pressed", String(isOpen));
+}
+
+function setOverlayPanelOpen(button, panel, isOpen) {
+  if (!button || !panel) return;
+  panel.classList.toggle("is-overlay-open", isOpen);
+  syncOverlayToggle(button, panel);
+}
+
+function toggleOperationalPanel(kind, panelKind) {
+  const isPlayback = kind === "playback";
+  const resourcePanel = isPlayback ? els.playbackResourcePanel : els.liveResourcePanel;
+  const inspectorPanel = isPlayback ? els.playbackDrawer : els.monitorDrawer;
+  const resourceButton = isPlayback ? els.playbackResourceToggleBtn : els.liveResourceToggleBtn;
+  const inspectorButton = isPlayback ? els.playbackInspectorToggleBtn : els.liveInspectorToggleBtn;
+  const panel = panelKind === "resource" ? resourcePanel : inspectorPanel;
+  const button = panelKind === "resource" ? resourceButton : inspectorButton;
+  const willOpen = !panel?.classList.contains("is-overlay-open");
+  if (willOpen && window.matchMedia?.("(max-width: 900px)").matches) {
+    setOverlayPanelOpen(
+      panelKind === "resource" ? inspectorButton : resourceButton,
+      panelKind === "resource" ? inspectorPanel : resourcePanel,
+      false
+    );
+  }
+  setOverlayPanelOpen(button, panel, willOpen);
+}
+
+[
+  [els.liveResourceToggleBtn, els.liveResourcePanel],
+  [els.liveInspectorToggleBtn, els.monitorDrawer],
+  [els.playbackResourceToggleBtn, els.playbackResourcePanel],
+  [els.playbackInspectorToggleBtn, els.playbackDrawer]
+].forEach(([button, panel]) => syncOverlayToggle(button, panel));
+
+els.liveResourceToggleBtn?.addEventListener("click", () => toggleOperationalPanel("live", "resource"));
+els.liveInspectorToggleBtn?.addEventListener("click", () => toggleOperationalPanel("live", "inspector"));
+els.playbackResourceToggleBtn?.addEventListener("click", () => toggleOperationalPanel("playback", "resource"));
+els.playbackInspectorToggleBtn?.addEventListener("click", () => toggleOperationalPanel("playback", "inspector"));
+
 els.inventoryRetryBtn?.addEventListener("click", () => {
   void retryPendingInventorySave();
 });
@@ -4339,7 +4502,10 @@ function clearLiveGrid() {
   render();
 }
 
-els.statusClearBtn?.addEventListener("click", clearLiveGrid);
+els.statusClearBtn?.addEventListener("click", () => {
+  if (state.view === "playback") clearPlaybackGrid();
+  else clearLiveGrid();
+});
 
 // --- Live View: Resource/Auto-Switch tabs -------------------------------
 els.resourceTabs.forEach((tab) => {
@@ -4353,6 +4519,7 @@ els.resourceTabs.forEach((tab) => {
 
 els.treeSearchInput?.addEventListener("input", (event) => {
   state.query = event.target.value;
+  if (state.view === "operator" && els.cameraSearch) els.cameraSearch.value = state.query;
   renderCameraList();
 });
 
@@ -4478,6 +4645,7 @@ els.sidebarToggle.addEventListener("click", () => {
   const collapsed = !els.appShell.classList.contains("sidebar-collapsed");
   localStorage.setItem("sidebarCollapsed", String(collapsed));
   applySidebarState();
+  window.requestAnimationFrame(() => applyWorkspacePresentation());
 });
 
 els.navItems.forEach((item) => {
@@ -4489,8 +4657,15 @@ els.dashboardCards.forEach((item) => {
 });
 
 els.cameraSearch.addEventListener("input", (event) => {
-  state.query = event.target.value;
-  renderCameraList();
+  if (state.view === "playback") {
+    state.playbackQuery = event.target.value;
+    if (els.pbTreeSearchInput) els.pbTreeSearchInput.value = state.playbackQuery;
+    renderPlaybackTree();
+  } else {
+    state.query = event.target.value;
+    if (els.treeSearchInput) els.treeSearchInput.value = state.query;
+    renderCameraList();
+  }
 });
 
 els.mediaPolicyToggle.addEventListener("change", (event) => {
@@ -4595,6 +4770,7 @@ els.pbResourceTabs.forEach((tab) => {
 
 els.pbTreeSearchInput?.addEventListener("input", (event) => {
   state.playbackQuery = event.target.value;
+  if (state.view === "playback" && els.cameraSearch) els.cameraSearch.value = state.playbackQuery;
   renderPlaybackTree();
 });
 
@@ -4641,8 +4817,8 @@ els.pbCloseAllBtn?.addEventListener("click", clearPlaybackGrid);
 els.pbFullscreenBtn?.addEventListener("click", () => {
   if (document.fullscreenElement) {
     document.exitFullscreen();
-  } else if (els.playbackPanel?.requestFullscreen) {
-    els.playbackPanel.requestFullscreen().catch(() => {});
+  } else if (els.playbackView?.requestFullscreen) {
+    els.playbackView.requestFullscreen().catch(() => {});
   }
 });
 
@@ -4703,6 +4879,27 @@ els.pbTrack?.addEventListener("pointerup", (event) => {
   playbackScrubbing = false;
   els.pbTrack.releasePointerCapture(event.pointerId);
 });
+els.pbTrack?.addEventListener("pointercancel", (event) => {
+  playbackScrubbing = false;
+  if (els.pbTrack.hasPointerCapture?.(event.pointerId)) {
+    els.pbTrack.releasePointerCapture(event.pointerId);
+  }
+});
+els.pbTrack?.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  stopPlaybackPlay();
+  if (event.key === "ArrowLeft") stepPlayback(-10);
+  if (event.key === "ArrowRight") stepPlayback(10);
+  if (event.key === "Home") {
+    playbackCursorDate = startOfDay(playbackActiveDay);
+    renderPlaybackScrubber();
+  }
+  if (event.key === "End") {
+    playbackCursorDate = new Date(startOfDay(playbackActiveDay).getTime() + 86400000 - 1000);
+    renderPlaybackScrubber();
+  }
+});
 els.incidentStatusFilter.addEventListener("change", (event) => {
   state.incidentStatus = event.target.value;
   renderIncidents();
@@ -4720,6 +4917,43 @@ els.userForm.addEventListener("submit", saveUser);
 els.resetUserFormBtn.addEventListener("click", resetUserForm);
 
 window.history.replaceState({ view: state.view }, "", `#${state.view}`);
+let workspaceViewportResizeFrame = null;
+window.addEventListener("resize", () => {
+  if (workspaceViewportResizeFrame) window.cancelAnimationFrame(workspaceViewportResizeFrame);
+  workspaceViewportResizeFrame = window.requestAnimationFrame(() => {
+    workspaceViewportResizeFrame = null;
+    applyWorkspacePresentation();
+  });
+});
+
+if (typeof window.ResizeObserver === "function") {
+  let workspaceRectPersistTimer = null;
+  const workspaceRectObserver = new window.ResizeObserver((entries) => {
+    let changed = false;
+    entries.forEach((entry) => {
+      const kind = entry.target === els.liveView ? "live" : entry.target === els.playbackView ? "playback" : "";
+      const workspace = kind ? activeWorkspace(kind) : null;
+      if (!workspace?.floating) return;
+      const rect = entry.target.getBoundingClientRect();
+      workspace.floatRect = constrainWorkspaceFloatRect(kind, {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+      });
+      changed = true;
+    });
+    if (!changed) return;
+    if (workspaceRectPersistTimer) window.clearTimeout(workspaceRectPersistTimer);
+    workspaceRectPersistTimer = window.setTimeout(() => {
+      workspaceRectPersistTimer = null;
+      persist();
+    }, 250);
+  });
+  if (els.liveView) workspaceRectObserver.observe(els.liveView);
+  if (els.playbackView) workspaceRectObserver.observe(els.playbackView);
+}
+
 window.addEventListener("popstate", (event) => {
   const hashView = window.location.hash ? window.location.hash.slice(1) : "";
   const view = event.state?.view || hashView || "operator";
