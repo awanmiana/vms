@@ -70,3 +70,22 @@ if(Qt6_FOUND AND EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
 else()
     message(STATUS "Qt6 or GStreamer dev tree not found; skipping vms_shell (increment 2).")
 endif()
+
+# ---------------------------------------------------------------------------
+# Increment 3 — RTSP decode + render spike (GStreamer only; no Qt).
+# d3d11videosink creates its own window, so this needs no UI toolkit.
+# ---------------------------------------------------------------------------
+if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
+    add_executable(vms_spike src/spike/main_spike.cpp)
+    target_include_directories(vms_spike PRIVATE
+        "${GSTREAMER_ROOT}/include/gstreamer-1.0"
+        "${GSTREAMER_ROOT}/include/glib-2.0"
+        "${GSTREAMER_ROOT}/lib/glib-2.0/include"
+    )
+    target_link_directories(vms_spike PRIVATE "${GSTREAMER_ROOT}/lib")
+    target_link_libraries(vms_spike PRIVATE gstreamer-1.0 gobject-2.0 glib-2.0)
+    if(WIN32)
+        target_compile_definitions(vms_spike PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+endif()

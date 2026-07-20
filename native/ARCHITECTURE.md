@@ -71,6 +71,23 @@ software refuses to overload itself. (Matches P0-03H / P0-01L / P3-03.)
    per hardware tier (pass criteria in `../Development_plan.md` spike targets).
 4. Broker + SQLite + credential store; then the layered workspace + governor.
 
+## Decision: fully self-contained package (no user-installed dependencies)
+
+The end user installs **nothing** — no GStreamer, no Qt, no runtime. We **bundle** a pinned
+GStreamer version's DLLs + the specific plugins we use, plus the Qt runtime (via `windeployqt`),
+inside the application folder / installer. The app loads them from its own directory, so whatever
+is (or isn't) installed on the user's machine is irrelevant — there is no version-matching problem
+and no "wrapper" needed.
+
+Proven 2026-07-20: a `vms_shell` copy with bundled Qt + GStreamer ran with GStreamer and Qt fully
+removed from `PATH` (`PATH=%SystemRoot%\System32;%SystemRoot%`) and still reported both versions.
+
+Packaging notes / TODO for the real installer:
+- Build **Release** (the proof used a Debug build → debug Qt DLLs; Release is leaner and has no debug-CRT dependency).
+- **Trim** the bundled GStreamer plugin set to only what the pipeline uses (the proof copied all `bin` DLLs).
+- For D3D12 decode paths, bundle `dxcompiler.dll` / `dxil.dll` (windeployqt warned they were missing).
+- Wrap the assembled folder in an installer (WiX/MSI, Inno Setup, or NSIS) — a routine later step.
+
 ## Codec-licensing gate (flagged, not resolved)
 
 H.264/H.265 patent licensing for a distributed product is a P0-14/P0-17 gate. Preferring OS/GPU decoders
