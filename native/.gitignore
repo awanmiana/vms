@@ -1,0 +1,11 @@
+# Native build artifacts
+build/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.exp
+CMakeCache.txt
+CMakeFiles/
