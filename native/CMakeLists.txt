@@ -89,3 +89,23 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Increment 4 (spike half) — multi-tile grid decode/render measurement.
+# N streams -> per-tile hardware decode -> d3d11compositor -> one d3d11 window.
+# Measurement only (no governor policy); GStreamer d3d11 plugin required.
+# ---------------------------------------------------------------------------
+if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
+    add_executable(vms_grid src/grid/main_grid.cpp)
+    target_include_directories(vms_grid PRIVATE
+        "${GSTREAMER_ROOT}/include/gstreamer-1.0"
+        "${GSTREAMER_ROOT}/include/glib-2.0"
+        "${GSTREAMER_ROOT}/lib/glib-2.0/include"
+    )
+    target_link_directories(vms_grid PRIVATE "${GSTREAMER_ROOT}/lib")
+    target_link_libraries(vms_grid PRIVATE gstreamer-1.0 gobject-2.0 glib-2.0)
+    if(WIN32)
+        target_compile_definitions(vms_grid PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+endif()

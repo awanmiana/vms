@@ -18,7 +18,8 @@ increment 4 — multi-tile grid + first governor pass.**
 | 2 | `vms_shell` — Qt6 + GStreamer window (toolchain proof) | ✅ verified |
 | 3 | `vms_spike` — RTSP → HW decode → D3D11 render + stats | ✅ verified (live camera) |
 | — | Self-contained packaging (bundle Qt+GStreamer; user installs nothing) | ✅ proven (ran with cleaned PATH) |
-| 4 | Multi-tile grid + first governor pass | ⏳ next |
+| 4a | `vms_grid` — N streams → per-tile HW decode → `d3d11compositor` → one window; per-tile fps + composited rendered/dropped + process CPU/RAM | 🔨 built (dev box); measurement run pending |
+| 4b | First governor pass (priority/tier policy, decode caps, degrade/recover) | ⛔ gated — P3-03 (unapproved); needs scope + Approval Log entry first |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.
@@ -69,13 +70,34 @@ $env:QT_PLUGIN_PATH = "C:\Qt\6.11.1\msvc2022_64\plugins"
 $env:PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
 $env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
 .\build\vms_spike.exe "rtsp://<user>:<pass-with-%40>@192.168.0.254:554/Streaming/Channels/102" --seconds 30
+
+# 4a) Grid measurement (GStreamer on PATH). --count replicates one camera URL N times
+#     so you can ramp N and watch per-tile fps + composited dropped-frame count climb.
+$env:PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
+$env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
+.\build\vms_grid.exe "rtsp://<user>:<pass-with-%40>@192.168.0.254:554/Streaming/Channels/102" --count 9 --seconds 30
+# ...or pass several distinct URLs instead of --count for a true multi-camera grid.
 ```
 
 Verified result on the dev box (RTX 3050): hardware `d3d12h265dec`, ~25 fps, ~0 dropped frames.
 
-## Increment 4 — multi-tile grid + first governor pass (next)
+## Increment 4 — split at the governance gate
 
-Decode several cameras at once in a grid, read the machine profile from `vms_hwprobe`, and enforce
-"only decode what this machine can handle" (device priority + per-view tier; cap concurrent decodes;
-degrade/recover with hysteresis). This is where the adaptive-optimization vision becomes real code,
-and it must be shaped by the low-end machine's profile.
+Increment 4 divides into an unblocked measurement half and a gated policy half:
+
+**4a — grid measurement spike (`vms_grid`, built).** Decode N cameras into one composited D3D11
+window and report per-tile decode fps, the decoder each tile selected, composited rendered/dropped
+frames, and process CPU/RAM. This is measurement only — the same character as inc 1–3 — and applies
+no priority/tier/degrade policy. Its purpose is to find the smooth ceiling per hardware tier, which
+is the empirical input the governor design needs. Run it on both the dev box and the low-end laptop.
+
+**4b — first governor pass (gated).** "Only decode what this machine can handle" — device priority
+(high/med/low/idle) + per-view tier (main/sub/thumb/paused), concurrent-decode caps, and
+degrade/recover with hysteresis — is the actual product feature. It maps to **P3-03** in
+`../Development_plan.md` (`[ ] Discussed | [ ] Approved`) and leans on **P0-01L** (whose transitions
+"will be discussed before this feature is implemented") and **P0-05**. Per the Approval Contract,
+no governor product code starts until P3-03 is Discussed + Approved and logged. The `vms_grid`
+numbers are meant to inform exactly that discussion.
+
+**Outstanding data:** run `vms_hwprobe.exe` (and now `vms_grid.exe`) on the low-end **i5 4th-gen /
+8GB / no-GPU** machine. That profile is the constraint the governor must be shaped around.
