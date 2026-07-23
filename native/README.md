@@ -7,10 +7,12 @@ specification, not the product runtime.
 > ⚠️ Native C++ is authored here but compiled/run on your hardware. If a build surfaces
 > compiler/linker errors, paste them and they get fixed.
 
-## Current status (2026-07-22)
+## Current status (2026-07-23)
 
-Foundation validated. Increments 1–3 build and run; self-contained packaging is proven. **Next up:
-increment 4 — multi-tile grid + first governor pass.**
+Foundation validated. Increments 1–3 build and run; self-contained packaging is proven. Increment
+4a (`vms_grid`) is verified on a live camera (4× `d3d12h265dec` @ ~25 fps, ~0 ongoing drops, CPU ~0%)
+and now has a camera-free `--test-pattern` fan-out to measure the pure decode ceiling per machine.
+**Next up: run the fan-out ramp on both hardware tiers, then the gated governor pass (4b / P3-03).**
 
 | # | Component | Status |
 | :- | :- | :- |
@@ -18,7 +20,7 @@ increment 4 — multi-tile grid + first governor pass.**
 | 2 | `vms_shell` — Qt6 + GStreamer window (toolchain proof) | ✅ verified |
 | 3 | `vms_spike` — RTSP → HW decode → D3D11 render + stats | ✅ verified (live camera) |
 | — | Self-contained packaging (bundle Qt+GStreamer; user installs nothing) | ✅ proven (ran with cleaned PATH) |
-| 4a | `vms_grid` — N streams → per-tile HW decode → `d3d11compositor` → one window; per-tile fps + composited rendered/dropped + process CPU/RAM | 🔨 built (dev box); measurement run pending |
+| 4a | `vms_grid` — N streams → per-tile HW decode → `d3d11compositor` → one window; per-tile fps + composited rendered/dropped + process CPU/RAM; camera-free `--test-pattern` fan-out | ✅ verified on live camera (4-tile); fan-out ramp + low-end run pending |
 | 4b | First governor pass (priority/tier policy, decode caps, degrade/recover) | ⛔ gated — P3-03 (unapproved); needs scope + Approval Log entry first |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
@@ -77,6 +79,18 @@ $env:PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
 $env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
 .\build\vms_grid.exe "rtsp://<user>:<pass-with-%40>@192.168.0.254:554/Streaming/Channels/102" --count 9 --seconds 30
 # ...or pass several distinct URLs instead of --count for a true multi-camera grid.
+
+# 4a-tp) Camera-free fan-out to find the PURE decode+composite ceiling of a machine
+#     (no camera session cap, no single low-res sub-stream). Encodes one synthetic
+#     clip up front, then fans out N decode-only branches with the sink's sync OFF,
+#     so per-tile fps = max decode throughput and sum(fps)/25 ~= sustainable streams.
+$env:PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
+$env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
+.\build\vms_grid.exe --test-pattern --count 16 --codec h265 --srcw 1920 --srch 1080 --seconds 30
+# Ramp --count (16, 36, 64...) until aggregate fps stops rising / dropped climbs.
+# On machines with NO H.265 hardware decode (the low-end i5 tier), use --codec h264
+# to measure the QuickSync/DXVA H.264 ceiling instead. --srcw/--srch set the encoded
+# source resolution (1920x1080 ~ a main stream; 640x480 ~ a sub stream).
 ```
 
 Verified result on the dev box (RTX 3050): hardware `d3d12h265dec`, ~25 fps, ~0 dropped frames.

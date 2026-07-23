@@ -17,6 +17,17 @@
 //   --seconds N run time; 0 = until the window/console is closed (default 30)
 //   (or set VMS_RTSP_URL for a single source)
 //
+// Camera-free fan-out (to measure the PURE decode+composite ceiling of a
+// machine, without a camera's session cap or a single low-res sub-stream):
+//   vms_grid --test-pattern --count N [--codec h265|h264]
+//            [--srcw W] [--srch H] [--seconds N]
+//   Encodes one synthetic clip up front, then fans out N decode-only branches
+//   from it. The video sink runs with sync OFF, so each tile decodes as fast
+//   as the hardware allows: per-tile fps is the max decode throughput, and
+//   sum(fps)/25 estimates how many realtime 25 fps streams this box sustains.
+//   Use --codec h264 on machines with no H.265 hardware decode (e.g. the
+//   low-end i5 tier) to measure their QuickSync/DXVA H.264 ceiling instead.
+//
 // Credentials are supplied at run time only and are never stored or committed.
 
 #include <gst/gst.h>
@@ -38,7 +49,8 @@ namespace {
 
 struct Branch {
     int index = 0;
-    GstElement* decodebin = nullptr;  // uridecodebin for this tile
+    GstElement* source = nullptr;     // multifilesrc in --test-pattern mode (unused for RTSP)
+    GstElement* decodebin = nullptr;  // uridecodebin (RTSP) or decodebin (--test-pattern)
     GstElement* queue = nullptr;
     GstElement* upload = nullptr;
     GstPad* compPad = nullptr;
@@ -63,6 +75,106 @@ struct GridState {
     DWORD numProcs = 1;
 #endif
 };
+
+// Returns the first available element factory name from a null-terminated
+// list, or nullptr if none are registered.
+const char* PickFactory(const char* const* names) {
+    for (const char* const* p = names; *p; ++p) {
+        if (GstElementFactory* f = gst_element_factory_find(*p)) {
+            gst_object_unref(f);
+            return *p;
+        }
+    }
+    return nullptr;
+}
+
+// Encodes one synthetic clip so --test-pattern can fan out N decode-only
+// branches with no camera involved. A short H.264/H.265 elementary stream is
+// written to outPath (looped by multifilesrc at run time). Returns true on
+// success and reports which encoder was used. This runs ONCE, fully before
+// the grid starts, so its cost never pollutes the decode measurement.
+bool EncodePattern(const std::string& codec, int sw, int sh, int frames,
+                   const std::string& outPath, std::string& encoderUsed) {
+    const char* h265[] = {"x265enc", "qsvh265enc", "nvh265enc", nullptr};
+    const char* h264[] = {"x264enc", "qsvh264enc", "nvh264enc", nullptr};
+    const bool isH264 = (codec == "h264");
+    const char* parseName = isH264 ? "h264parse" : "h265parse";
+    const char* encName = PickFactory(isH264 ? h264 : h265);
+    if (!encName) {
+        std::cerr << "No " << codec << " encoder available (need x26"
+                  << (isH264 ? "4" : "5") << "enc or a hardware encoder) "
+                     "to build the test pattern.\n";
+        return false;
+    }
+    encoderUsed = encName;
+
+    GstElement* pipe  = gst_pipeline_new("encode");
+    GstElement* src   = gst_element_factory_make("videotestsrc", nullptr);
+    GstElement* conv  = gst_element_factory_make("videoconvert", nullptr);
+    GstElement* caps  = gst_element_factory_make("capsfilter", nullptr);
+    GstElement* enc   = gst_element_factory_make(encName, nullptr);
+    GstElement* parse = gst_element_factory_make(parseName, nullptr);
+    GstElement* sink  = gst_element_factory_make("filesink", nullptr);
+    if (!pipe || !src || !conv || !caps || !enc || !parse || !sink) {
+        std::cerr << "Failed to create encode elements.\n";
+        if (pipe) gst_object_unref(pipe);
+        return false;
+    }
+
+    g_object_set(src, "num-buffers", frames, "pattern", 0 /*smpte*/,
+                 "is-live", FALSE, nullptr);
+    GstCaps* c = gst_caps_new_simple(
+        "video/x-raw", "width", G_TYPE_INT, sw, "height", G_TYPE_INT, sh,
+        "framerate", GST_TYPE_FRACTION, 25, 1, nullptr);
+    g_object_set(caps, "caps", c, nullptr);
+    gst_caps_unref(c);
+    // Frequent IDRs so multifilesrc's loop wrap re-syncs the decoder quickly.
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(enc), "key-int-max"))
+        g_object_set(enc, "key-int-max", 25, nullptr);
+    // Repeat SPS/PPS with every IDR so a mid-stream (looped) start decodes.
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(parse), "config-interval"))
+        g_object_set(parse, "config-interval", -1, nullptr);
+    g_object_set(sink, "location", outPath.c_str(), nullptr);
+
+    gst_bin_add_many(GST_BIN(pipe), src, conv, caps, enc, parse, sink, nullptr);
+    // Force the parser to emit an Annex-B byte-stream (start codes) so the raw
+    // file re-typefinds on read; h264parse otherwise defaults to AVC/length-
+    // prefixed output, which multifilesrc->decodebin cannot detect.
+    GstCaps* bs = gst_caps_new_simple(
+        isH264 ? "video/x-h264" : "video/x-h265",
+        "stream-format", G_TYPE_STRING, "byte-stream",
+        "alignment", G_TYPE_STRING, "au", nullptr);
+    const gboolean tail = gst_element_link_filtered(parse, sink, bs);
+    gst_caps_unref(bs);
+    if (!gst_element_link_many(src, conv, caps, enc, parse, nullptr) || !tail) {
+        std::cerr << "Failed to link the encode pipeline.\n";
+        gst_object_unref(pipe);
+        return false;
+    }
+
+    gst_element_set_state(pipe, GST_STATE_PLAYING);
+    GstBus* bus = gst_element_get_bus(pipe);
+    GstMessage* msg = gst_bus_timed_pop_filtered(
+        bus, GST_CLOCK_TIME_NONE,
+        static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+    bool ok = false;
+    if (msg) {
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+            ok = true;
+        } else {
+            GError* err = nullptr; gchar* dbg = nullptr;
+            gst_message_parse_error(msg, &err, &dbg);
+            std::cerr << "Encode error: " << (err ? err->message : "?") << "\n";
+            if (dbg) std::cerr << "  debug: " << dbg << "\n";
+            g_clear_error(&err); g_free(dbg);
+        }
+        gst_message_unref(msg);
+    }
+    gst_object_unref(bus);
+    gst_element_set_state(pipe, GST_STATE_NULL);
+    gst_object_unref(pipe);
+    return ok;
+}
 
 // Lower the RTSP jitter buffer and prefer TCP (more reliable through NAT/GRE).
 void OnSourceSetup(GstElement* /*bin*/, GstElement* source, gpointer /*data*/) {
@@ -235,7 +347,8 @@ gboolean BusCb(GstBus* /*bus*/, GstMessage* msg, gpointer user_data) {
                 Branch* hit = nullptr;
                 for (auto* b : s->branches)
                     if (top == GST_OBJECT(b->decodebin) || top == GST_OBJECT(b->queue) ||
-                        top == GST_OBJECT(b->upload)) { hit = b; break; }
+                        top == GST_OBJECT(b->upload) ||
+                        (b->source && top == GST_OBJECT(b->source))) { hit = b; break; }
                 if (hit && !hit->failed) {
                     hit->failed = true;
                     hit->decoder = std::string("(failed: ") + (err ? err->message : "?") + ")";
@@ -281,28 +394,48 @@ int main(int argc, char* argv[]) {
     int count = 0;      // if >0, replicate the single URL this many times
     int seconds = 30;
     int outW = 1600, outH = 900;
+    bool testPattern = false;   // camera-free synthetic fan-out
+    std::string codec = "h265"; // test-pattern codec
+    int srcW = 1920, srcH = 1080;  // test-pattern source resolution
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--count" && i + 1 < argc)        count = std::atoi(argv[++i]);
         else if (a == "--seconds" && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (a == "--width" && i + 1 < argc)   outW = std::atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc)  outH = std::atoi(argv[++i]);
+        else if (a == "--test-pattern")            testPattern = true;
+        else if (a == "--codec" && i + 1 < argc)   codec = argv[++i];
+        else if (a == "--srcw" && i + 1 < argc)    srcW = std::atoi(argv[++i]);
+        else if (a == "--srch" && i + 1 < argc)    srcH = std::atoi(argv[++i]);
         else if (a.rfind("--", 0) != 0)            urls.push_back(a);
     }
-    if (urls.empty()) {
-        if (const char* e = std::getenv("VMS_RTSP_URL")) urls.emplace_back(e);
+
+    int n = 0;
+    std::string patternFile, encoderUsed;
+    if (testPattern) {
+        if (codec != "h264" && codec != "h265") {
+            std::cerr << "--codec must be h264 or h265\n";
+            return 2;
+        }
+        n = (count > 0) ? count : 4;
+    } else {
+        if (urls.empty()) {
+            if (const char* e = std::getenv("VMS_RTSP_URL")) urls.emplace_back(e);
+        }
+        if (urls.empty()) {
+            std::cerr << "Usage: vms_grid \"rtsp://u:p%40host:port/path\" [more urls...] "
+                         "[--count N] [--seconds N] [--width W] [--height H]\n"
+                         "       (or set VMS_RTSP_URL). Encode any '@' in the password as %40.\n"
+                         "   or: vms_grid --test-pattern --count N [--codec h265|h264] "
+                         "[--srcw W] [--srch H] [--seconds N]\n";
+            return 2;
+        }
+        if (count > 0) {
+            const std::string base = urls.front();
+            urls.assign(count, base);
+        }
+        n = static_cast<int>(urls.size());
     }
-    if (urls.empty()) {
-        std::cerr << "Usage: vms_grid \"rtsp://u:p%40host:port/path\" [more urls...] "
-                     "[--count N] [--seconds N] [--width W] [--height H]\n"
-                     "       (or set VMS_RTSP_URL). Encode any '@' in the password as %40.\n";
-        return 2;
-    }
-    if (count > 0) {
-        const std::string base = urls.front();
-        urls.assign(count, base);
-    }
-    const int n = static_cast<int>(urls.size());
 
     // Square-ish grid geometry.
     const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
@@ -312,6 +445,20 @@ int main(int argc, char* argv[]) {
     std::cout << "grid: " << n << " tiles in " << cols << "x" << rows
               << " (" << tileW << "x" << tileH << " each) on a " << outW << "x" << outH
               << " surface\n";
+
+    if (testPattern) {
+        patternFile = std::string(g_get_tmp_dir()) + "/vms_grid_pattern." + codec;
+        const int frames = (seconds > 0) ? (seconds + 3) * 25 : 250;
+        std::cout << "encoding " << codec << " test clip (" << srcW << "x" << srcH
+                  << ", " << frames << " frames) -> " << patternFile << " ...\n";
+        if (!EncodePattern(codec, srcW, srcH, frames, patternFile, encoderUsed)) {
+            std::cerr << "test-pattern encode failed; aborting.\n";
+            return 5;
+        }
+        std::cout << "encoded with " << encoderUsed << "; fanning out " << n
+                  << " decode-only branch(es). Sink sync is OFF, so per-tile fps is\n"
+                     "max decode throughput; sum(fps)/25 ~= sustainable 25 fps streams.\n";
+    }
 
     GridState s;
     s.loop = g_main_loop_new(nullptr, FALSE);
@@ -329,6 +476,9 @@ int main(int argc, char* argv[]) {
         return 3;
     }
     s.comp = comp;
+    // In test-pattern mode let decode run unthrottled (measure max throughput);
+    // for real RTSP keep the sink synced so fps reflects the true stream rate.
+    if (testPattern) g_object_set(sink, "sync", FALSE, nullptr);
     g_object_set(s.fpssink, "video-sink", sink, "text-overlay", FALSE, nullptr);
     gst_bin_add_many(GST_BIN(s.pipeline), comp, s.fpssink, nullptr);
     if (!gst_element_link(comp, s.fpssink)) {
@@ -341,19 +491,45 @@ int main(int argc, char* argv[]) {
         b->index = i;
         b->queue = gst_element_factory_make("queue", nullptr);
         b->upload = gst_element_factory_make("d3d11upload", nullptr);
-        b->decodebin = gst_element_factory_make("uridecodebin", nullptr);
-        if (!b->queue || !b->upload || !b->decodebin) {
+        if (!b->queue || !b->upload) {
             std::cerr << "Failed to create branch elements for tile " << i << "\n";
             return 3;
         }
         // Drop stale frames on a slow branch rather than stalling the compositor.
         g_object_set(b->queue, "leaky", 2 /*downstream*/, "max-size-buffers", 3,
                      "max-size-time", static_cast<guint64>(0), "max-size-bytes", 0, nullptr);
-        g_object_set(b->decodebin, "uri", urls[i].c_str(), nullptr);
-        g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
-        g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
 
-        gst_bin_add_many(GST_BIN(s.pipeline), b->queue, b->upload, b->decodebin, nullptr);
+        if (testPattern) {
+            // Camera-free: loop the pre-encoded clip through decodebin so it
+            // picks the same hardware decoder rank a real stream would.
+            b->source = gst_element_factory_make("multifilesrc", nullptr);
+            b->decodebin = gst_element_factory_make("decodebin", nullptr);
+            if (!b->source || !b->decodebin) {
+                std::cerr << "Failed to create test-pattern elements for tile " << i << "\n";
+                return 3;
+            }
+            g_object_set(b->source, "location", patternFile.c_str(), nullptr);
+            if (g_object_class_find_property(G_OBJECT_GET_CLASS(b->source), "loop"))
+                g_object_set(b->source, "loop", TRUE, nullptr);
+            g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
+            gst_bin_add_many(GST_BIN(s.pipeline), b->source, b->decodebin,
+                             b->queue, b->upload, nullptr);
+            if (!gst_element_link(b->source, b->decodebin)) {
+                std::cerr << "Failed to link source -> decodebin for tile " << i << "\n";
+                return 3;
+            }
+        } else {
+            b->decodebin = gst_element_factory_make("uridecodebin", nullptr);
+            if (!b->decodebin) {
+                std::cerr << "Failed to create uridecodebin for tile " << i << "\n";
+                return 3;
+            }
+            g_object_set(b->decodebin, "uri", urls[i].c_str(), nullptr);
+            g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
+            g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
+            gst_bin_add_many(GST_BIN(s.pipeline), b->queue, b->upload, b->decodebin, nullptr);
+        }
+
         if (!gst_element_link(b->queue, b->upload)) {
             std::cerr << "Failed to link queue -> upload for tile " << i << "\n";
             return 3;
@@ -394,6 +570,22 @@ int main(int argc, char* argv[]) {
     g_object_get(s.fpssink, "frames-rendered", &rendered, "frames-dropped", &dropped, nullptr);
     std::cout << "SUMMARY: tiles=" << n << " composited rendered=" << rendered
               << " dropped=" << dropped << std::endl;
+
+    if (testPattern) {
+        guint64 totalFrames = 0;
+        for (auto* b : s.branches)
+            totalFrames += b->buffers.load(std::memory_order_relaxed);
+        const double elapsed =
+            s.playingUs ? (g_get_monotonic_time() - s.playingUs) / 1e6 : 0.0;
+        if (elapsed > 0) {
+            const double aggFps = totalFrames / elapsed;
+            std::cout << "SUMMARY(test-pattern): codec=" << codec << " src=" << srcW
+                      << "x" << srcH << " tiles=" << n
+                      << " aggregate decode fps=" << static_cast<int>(aggFps + 0.5)
+                      << "  (~" << static_cast<int>(aggFps / 25.0 + 0.5)
+                      << " sustainable 25fps streams)" << std::endl;
+        }
+    }
 
     gst_element_set_state(s.pipeline, GST_STATE_NULL);
     gst_object_unref(s.pipeline);
