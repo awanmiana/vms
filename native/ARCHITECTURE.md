@@ -2,8 +2,8 @@
 
 > Status: Approved direction (owner-approved 2026-07-20). This records the committed
 > technical decisions for the fully-native VMS client. It is a reference contract; the
-> controlling authority remains `../Development_plan.md`. The native-shell boundary and a
-> matching Approval Log entry should be reflected there by the owner (draft offered).
+> controlling authority remains `../Development_plan.md`, where this decision is recorded
+> as Approval Log row **N0** and the Native Client Track section (reconciled 2026-07-24).
 
 ## Decision: fully-native C++ client
 
@@ -63,13 +63,22 @@ software refuses to overload itself. (Matches P0-03H / P0-01L / P3-03.)
 
 ## Build sequence (incremental, each verified on real hardware before the next)
 
-1. **[in progress] Hardware probe (console, C++/Win32/DXGI/D3D11).** No Qt/GStreamer. Prove the toolchain;
-   output a machine profile (CPU, RAM, GPUs, per-codec HW-decode capability, tier).
-2. **Qt shell.** Minimal Qt6 window; prove Qt builds/runs with MSVC + CMake + Ninja.
-3. **GStreamer decode+render spike.** One RTSP stream → `d3d11` HW decode → render in the Qt/QML view;
-   measure glass-to-glass latency, dropped frames, CPU/GPU. Then scale tiles to find the smooth ceiling
-   per hardware tier (pass criteria in `../Development_plan.md` spike targets).
-4. Broker + SQLite + credential store; then the layered workspace + governor.
+1. **[verified] Hardware probe.** Console C++/Win32/DXGI/D3D11 profile with CPU, RAM, GPUs,
+   and per-codec hardware-decode capability.
+2. **[verified] Qt/GStreamer shell and self-contained packaging proof.**
+3. **[verified] RTSP decode/render and multi-tile measurement spikes.** One live RTSP stream,
+   a four-tile live grid, and camera-free main/sub decode ceilings on the dev box.
+4. **[in progress] Approved P3-03 governor.** Pure two-budget decision library, CTest self-check,
+   stateful add/remove/focus re-planning with low/high-water hysteresis, live-probe capacity seed,
+   governed camera-free grid, **applying changing plans to live media branches** (`--sweep`,
+   verified on hardware), **tier-driven selection of real per-camera RTSP main/sub streams**
+   (`--camera "main;sub"`, plumbing verified locally), a cost model **recalibrated** to the corrected
+   d3d12h265dec ramp, and the **honest per-tile state model** (live/degraded/paused-offscreen/
+   paused-capacity) are built; the P3-14 Qt/QML visual state UI, a seamless (non-reloading) live
+   apply, and (hardware-blocked) live-camera decode confirmation + low-end calibration remain.
+   Camera profile discovery/negotiation (ONVIF) is a separate later gate (P2-05), not done here.
+5. **[gated] Product shell and services.** Connection broker, production persistence/SQLite,
+   credential store, and layered workspace advance only under their controlling P-phase approvals.
 
 ## Decision: fully self-contained package (no user-installed dependencies)
 

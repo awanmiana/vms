@@ -1,0 +1,39 @@
+﻿grid: 4 tiles in 2x2 (800x450 each) on a 1600x900 surface
+encoding h265 test clip (1920x1080, 200 frames) -> C:\Users\zubair\AppData\Local\Temp/vms_grid_pattern.h265 ...
+encoded with x265enc; fanning out 4 decode-only branch(es). Sink sync is OFF, so per-tile fps is
+max decode throughput; sum(fps)/25 ~= sustainable 25 fps streams.
+connecting to 4 source(s) (credentials not shown)...
+first composited frame after 612.084 ms
+--
+  tile 0  60 fps  [nvh265dec]
+  tile 1  70 fps  [nvh265dec]
+  tile 2  76 fps  [nvh265dec]
+  tile 3  63 fps  [nvh265dec]
+  composited: rendered=16 dropped=0  rss=737MB
+--
+  tile 0  94 fps  [nvh265dec]
+  tile 1  87 fps  [nvh265dec]
+  tile 2  91 fps  [nvh265dec]
+  tile 3  91 fps  [nvh265dec]
+  composited: rendered=41 dropped=0  cpu=0%  rss=741MB
+--
+  tile 0  84 fps  [nvh265dec]
+  tile 1  98 fps  [nvh265dec]
+  tile 2  93 fps  [nvh265dec]
+  tile 3  104 fps  [nvh265dec]
+  composited: rendered=67 dropped=0  cpu=0%  rss=745MB
+--
+  tile 0  93 fps  [nvh265dec]
+  tile 1  101 fps  [nvh265dec]
+  tile 2  93 fps  [nvh265dec]
+  tile 3  94 fps  [nvh265dec]
+  composited: rendered=92 dropped=0  cpu=0%  rss=745MB
+--
+  tile 0  97 fps  [nvh265dec]
+  tile 1  87 fps  [nvh265dec]
+  tile 2  97 fps  [nvh265dec]
+  tile 3  99 fps  [nvh265dec]
+  composited: rendered=116 dropped=0  cpu=0%  rss=758MB
+-- time limit reached --
+SUMMARY: tiles=4 composited rendered=116 dropped=0
+SUMMARY(test-pattern): codec=h265 src=1920x1080 tiles=4 aggregate decode fps=384  (~15 sustainable 25fps streams)

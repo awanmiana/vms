@@ -40,8 +40,12 @@ std::string WideToUtf8(const wchar_t* w) {
     if (!w) return std::string();
     const int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 1) return std::string();
-    std::string out(static_cast<size_t>(len - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), len, nullptr, nullptr);
+    // len includes the terminating NUL. Allocate room for it during the Win32
+    // call, then remove it from the returned std::string.
+    std::string out(static_cast<size_t>(len), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), len, nullptr, nullptr) != len)
+        return std::string();
+    out.pop_back();
     return out;
 }
 

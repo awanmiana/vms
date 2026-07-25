@@ -1,0 +1,129 @@
+﻿grid: 4 tiles in 2x2 (800x450 each) on a 1600x900 surface
+encoding h264 test clip (1920x1080, 575 frames) -> C:\Users\zubair\AppData\Local\Temp/vms_grid_pattern.h264 ...
+encoded with x264enc; fanning out 4 decode-only branch(es). Sink sync is OFF, so per-tile fps is
+max decode throughput; sum(fps)/25 ~= sustainable 25 fps streams.
+connecting to 4 source(s) (credentials not shown)...
+first composited frame after 747.344 ms
+--
+  tile 0  134 fps  [avdec_h264]
+  tile 1  133 fps  [avdec_h264]
+  tile 2  133 fps  [avdec_h264]
+  tile 3  145 fps  [avdec_h264]
+  composited: rendered=20 dropped=0  rss=1055MB
+--
+  tile 0  162 fps  [avdec_h264]
+  tile 1  161 fps  [avdec_h264]
+  tile 2  156 fps  [avdec_h264]
+  tile 3  168 fps  [avdec_h264]
+  composited: rendered=45 dropped=0  cpu=63%  rss=1064MB
+--
+  tile 0  159 fps  [avdec_h264]
+  tile 1  147 fps  [avdec_h264]
+  tile 2  161 fps  [avdec_h264]
+  tile 3  160 fps  [avdec_h264]
+  composited: rendered=70 dropped=0  cpu=60%  rss=1065MB
+--
+  tile 0  155 fps  [avdec_h264]
+  tile 1  159 fps  [avdec_h264]
+  tile 2  157 fps  [avdec_h264]
+  tile 3  164 fps  [avdec_h264]
+  composited: rendered=95 dropped=0  cpu=47%  rss=1067MB
+--
+  tile 0  158 fps  [avdec_h264]
+  tile 1  164 fps  [avdec_h264]
+  tile 2  164 fps  [avdec_h264]
+  tile 3  158 fps  [avdec_h264]
+  composited: rendered=120 dropped=0  cpu=48%  rss=1067MB
+--
+  tile 0  164 fps  [avdec_h264]
+  tile 1  164 fps  [avdec_h264]
+  tile 2  159 fps  [avdec_h264]
+  tile 3  161 fps  [avdec_h264]
+  composited: rendered=145 dropped=0  cpu=47%  rss=1067MB
+--
+  tile 0  171 fps  [avdec_h264]
+  tile 1  162 fps  [avdec_h264]
+  tile 2  169 fps  [avdec_h264]
+  tile 3  167 fps  [avdec_h264]
+  composited: rendered=170 dropped=0  cpu=35%  rss=1067MB
+--
+  tile 0  158 fps  [avdec_h264]
+  tile 1  159 fps  [avdec_h264]
+  tile 2  156 fps  [avdec_h264]
+  tile 3  163 fps  [avdec_h264]
+  composited: rendered=195 dropped=0  cpu=41%  rss=1070MB
+--
+  tile 0  160 fps  [avdec_h264]
+  tile 1  171 fps  [avdec_h264]
+  tile 2  167 fps  [avdec_h264]
+  tile 3  166 fps  [avdec_h264]
+  composited: rendered=220 dropped=0  cpu=41%  rss=1070MB
+--
+  tile 0  164 fps  [avdec_h264]
+  tile 1  166 fps  [avdec_h264]
+  tile 2  158 fps  [avdec_h264]
+  tile 3  157 fps  [avdec_h264]
+  composited: rendered=245 dropped=0  cpu=44%  rss=1070MB
+--
+  tile 0  164 fps  [avdec_h264]
+  tile 1  167 fps  [avdec_h264]
+  tile 2  161 fps  [avdec_h264]
+  tile 3  160 fps  [avdec_h264]
+  composited: rendered=270 dropped=0  cpu=39%  rss=1073MB
+--
+  tile 0  171 fps  [avdec_h264]
+  tile 1  167 fps  [avdec_h264]
+  tile 2  166 fps  [avdec_h264]
+  tile 3  172 fps  [avdec_h264]
+  composited: rendered=295 dropped=0  cpu=37%  rss=1073MB
+--
+  tile 0  159 fps  [avdec_h264]
+  tile 1  165 fps  [avdec_h264]
+  tile 2  166 fps  [avdec_h264]
+  tile 3  169 fps  [avdec_h264]
+  composited: rendered=320 dropped=0  cpu=47%  rss=1073MB
+--
+  tile 0  161 fps  [avdec_h264]
+  tile 1  158 fps  [avdec_h264]
+  tile 2  162 fps  [avdec_h264]
+  tile 3  164 fps  [avdec_h264]
+  composited: rendered=345 dropped=0  cpu=54%  rss=1073MB
+--
+  tile 0  164 fps  [avdec_h264]
+  tile 1  164 fps  [avdec_h264]
+  tile 2  168 fps  [avdec_h264]
+  tile 3  163 fps  [avdec_h264]
+  composited: rendered=370 dropped=0  cpu=39%  rss=1075MB
+--
+  tile 0  175 fps  [avdec_h264]
+  tile 1  169 fps  [avdec_h264]
+  tile 2  171 fps  [avdec_h264]
+  tile 3  175 fps  [avdec_h264]
+  composited: rendered=395 dropped=0  cpu=33%  rss=1075MB
+--
+  tile 0  174 fps  [avdec_h264]
+  tile 1  175 fps  [avdec_h264]
+  tile 2  168 fps  [avdec_h264]
+  tile 3  170 fps  [avdec_h264]
+  composited: rendered=420 dropped=0  cpu=31%  rss=1075MB
+--
+  tile 0  168 fps  [avdec_h264]
+  tile 1  164 fps  [avdec_h264]
+  tile 2  165 fps  [avdec_h264]
+  tile 3  168 fps  [avdec_h264]
+  composited: rendered=445 dropped=0  cpu=43%  rss=1078MB
+--
+  tile 0  169 fps  [avdec_h264]
+  tile 1  156 fps  [avdec_h264]
+  tile 2  162 fps  [avdec_h264]
+  tile 3  166 fps  [avdec_h264]
+  composited: rendered=470 dropped=0  cpu=45%  rss=1078MB
+--
+  tile 0  157 fps  [avdec_h264]
+  tile 1  168 fps  [avdec_h264]
+  tile 2  161 fps  [avdec_h264]
+  tile 3  162 fps  [avdec_h264]
+  composited: rendered=495 dropped=0  cpu=47%  rss=1078MB
+-- time limit reached --
+SUMMARY: tiles=4 composited rendered=495 dropped=0
+SUMMARY(test-pattern): codec=h264 src=1920x1080 tiles=4 aggregate decode fps=658  (~26 sustainable 25fps streams)

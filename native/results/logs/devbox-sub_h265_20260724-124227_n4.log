@@ -1,0 +1,129 @@
+﻿grid: 4 tiles in 2x2 (800x450 each) on a 1600x900 surface
+encoding h265 test clip (640x480, 575 frames) -> C:\Users\zubair\AppData\Local\Temp/vms_grid_pattern.h265 ...
+encoded with x265enc; fanning out 4 decode-only branch(es). Sink sync is OFF, so per-tile fps is
+max decode throughput; sum(fps)/25 ~= sustainable 25 fps streams.
+connecting to 4 source(s) (credentials not shown)...
+first composited frame after 1397.69 ms
+--
+  tile 0  559 fps  [nvh265dec]
+  tile 1  535 fps  [nvh265dec]
+  tile 2  562 fps  [nvh265dec]
+  tile 3  564 fps  [nvh265dec]
+  composited: rendered=36 dropped=0  rss=299MB
+--
+  tile 0  381 fps  [nvh265dec]
+  tile 1  383 fps  [nvh265dec]
+  tile 2  409 fps  [nvh265dec]
+  tile 3  417 fps  [nvh265dec]
+  composited: rendered=61 dropped=0  cpu=1%  rss=302MB
+--
+  tile 0  408 fps  [nvh265dec]
+  tile 1  351 fps  [nvh265dec]
+  tile 2  399 fps  [nvh265dec]
+  tile 3  414 fps  [nvh265dec]
+  composited: rendered=86 dropped=0  cpu=1%  rss=303MB
+--
+  tile 0  382 fps  [nvh265dec]
+  tile 1  363 fps  [nvh265dec]
+  tile 2  409 fps  [nvh265dec]
+  tile 3  411 fps  [nvh265dec]
+  composited: rendered=111 dropped=0  cpu=1%  rss=304MB
+--
+  tile 0  406 fps  [nvh265dec]
+  tile 1  349 fps  [nvh265dec]
+  tile 2  416 fps  [nvh265dec]
+  tile 3  402 fps  [nvh265dec]
+  composited: rendered=136 dropped=0  cpu=1%  rss=304MB
+--
+  tile 0  380 fps  [nvh265dec]
+  tile 1  359 fps  [nvh265dec]
+  tile 2  415 fps  [nvh265dec]
+  tile 3  412 fps  [nvh265dec]
+  composited: rendered=161 dropped=0  cpu=1%  rss=304MB
+--
+  tile 0  390 fps  [nvh265dec]
+  tile 1  371 fps  [nvh265dec]
+  tile 2  392 fps  [nvh265dec]
+  tile 3  408 fps  [nvh265dec]
+  composited: rendered=186 dropped=0  cpu=1%  rss=304MB
+--
+  tile 0  384 fps  [nvh265dec]
+  tile 1  358 fps  [nvh265dec]
+  tile 2  404 fps  [nvh265dec]
+  tile 3  440 fps  [nvh265dec]
+  composited: rendered=211 dropped=0  cpu=2%  rss=305MB
+--
+  tile 0  387 fps  [nvh265dec]
+  tile 1  371 fps  [nvh265dec]
+  tile 2  411 fps  [nvh265dec]
+  tile 3  421 fps  [nvh265dec]
+  composited: rendered=236 dropped=0  cpu=2%  rss=305MB
+--
+  tile 0  403 fps  [nvh265dec]
+  tile 1  356 fps  [nvh265dec]
+  tile 2  403 fps  [nvh265dec]
+  tile 3  402 fps  [nvh265dec]
+  composited: rendered=261 dropped=0  cpu=3%  rss=305MB
+--
+  tile 0  406 fps  [nvh265dec]
+  tile 1  343 fps  [nvh265dec]
+  tile 2  404 fps  [nvh265dec]
+  tile 3  401 fps  [nvh265dec]
+  composited: rendered=286 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  395 fps  [nvh265dec]
+  tile 1  361 fps  [nvh265dec]
+  tile 2  409 fps  [nvh265dec]
+  tile 3  407 fps  [nvh265dec]
+  composited: rendered=311 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  389 fps  [nvh265dec]
+  tile 1  368 fps  [nvh265dec]
+  tile 2  405 fps  [nvh265dec]
+  tile 3  407 fps  [nvh265dec]
+  composited: rendered=336 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  392 fps  [nvh265dec]
+  tile 1  363 fps  [nvh265dec]
+  tile 2  409 fps  [nvh265dec]
+  tile 3  404 fps  [nvh265dec]
+  composited: rendered=361 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  403 fps  [nvh265dec]
+  tile 1  370 fps  [nvh265dec]
+  tile 2  414 fps  [nvh265dec]
+  tile 3  386 fps  [nvh265dec]
+  composited: rendered=386 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  394 fps  [nvh265dec]
+  tile 1  371 fps  [nvh265dec]
+  tile 2  414 fps  [nvh265dec]
+  tile 3  394 fps  [nvh265dec]
+  composited: rendered=411 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  387 fps  [nvh265dec]
+  tile 1  374 fps  [nvh265dec]
+  tile 2  417 fps  [nvh265dec]
+  tile 3  392 fps  [nvh265dec]
+  composited: rendered=436 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  395 fps  [nvh265dec]
+  tile 1  367 fps  [nvh265dec]
+  tile 2  396 fps  [nvh265dec]
+  tile 3  403 fps  [nvh265dec]
+  composited: rendered=461 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  338 fps  [nvh265dec]
+  tile 1  378 fps  [nvh265dec]
+  tile 2  391 fps  [nvh265dec]
+  tile 3  416 fps  [nvh265dec]
+  composited: rendered=486 dropped=0  cpu=1%  rss=305MB
+--
+  tile 0  351 fps  [nvh265dec]
+  tile 1  402 fps  [nvh265dec]
+  tile 2  379 fps  [nvh265dec]
+  tile 3  404 fps  [nvh265dec]
+  composited: rendered=511 dropped=0  cpu=1%  rss=305MB
+-- time limit reached --
+SUMMARY: tiles=4 composited rendered=511 dropped=0
+SUMMARY(test-pattern): codec=h265 src=640x480 tiles=4 aggregate decode fps=1568  (~63 sustainable 25fps streams)

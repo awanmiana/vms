@@ -1,14 +1,14 @@
-// Increment 4 (spike half) — multi-tile grid decode/render measurement.
+// Increment 4 — multi-tile grid decode/render measurement + governor harness.
 //
 // Decodes N RTSP streams (each preferring a hardware d3d11/d3d12 decoder when
 // available), composites them into one grid on a single Direct3D 11 surface,
 // and reports per-tile decode fps, the decoder each tile selected, aggregate
 // frames rendered/dropped, and this process's CPU% and working set.
 //
-// This is a MEASUREMENT spike, not the governor: it applies no priority states,
-// no per-view tiers, and no degrade/recover policy. Its job is to find the
-// smooth ceiling per hardware tier — the empirical input the P3-03 / P0-05
-// discussions need before any decode-governor policy is designed.
+// Without --govern this is the 4a MEASUREMENT spike: it applies no priority or
+// tier policy and finds the smooth ceiling per hardware tier. With --govern it
+// is the 4b integration harness: the startup hardware probe seeds a conservative
+// capacity profile and the governor maps requested Main tiles to cheaper tiers.
 //
 // Usage:
 //   vms_grid "rtsp://u:p%40host:port/path" [more urls...] [--count N]
@@ -17,26 +17,55 @@
 //   --seconds N run time; 0 = until the window/console is closed (default 30)
 //   (or set VMS_RTSP_URL for a single source)
 //
+// Governed live cameras (the governor selects each tile's real stream by tier):
+//   vms_grid --govern [--sweep] --camera "rtsp://MAIN;rtsp://SUB" [--camera ...]
+//            [--count N] [--profile auto|devbox|lowend] [--seconds N]
+//   Main tier opens the main stream, Sub/Thumb the sub stream, Paused opens no
+//   session. Pass one --camera per camera as "mainUrl;subUrl" (sub optional).
+//   URLs are never printed — only a credential-free "stream selection:" line.
+//
 // Camera-free fan-out (to measure the PURE decode+composite ceiling of a
 // machine, without a camera's session cap or a single low-res sub-stream):
 //   vms_grid --test-pattern --count N [--codec h265|h264]
 //            [--srcw W] [--srch H] [--seconds N]
+//            [--govern] [--profile auto|devbox|lowend]
 //   Encodes one synthetic clip up front, then fans out N decode-only branches
 //   from it. The video sink runs with sync OFF, so each tile decodes as fast
 //   as the hardware allows: per-tile fps is the max decode throughput, and
 //   sum(fps)/25 estimates how many realtime 25 fps streams this box sustains.
 //   Use --codec h264 on machines with no H.265 hardware decode (e.g. the
 //   low-end i5 tier) to measure their QuickSync/DXVA H.264 ceiling instead.
+//   --profile defaults to auto; named profiles are reproducible test overrides.
+//
+// Dynamic re-planning (the 4b "apply the plan to live branches" step):
+//   vms_grid --test-pattern --govern --sweep [--sweep-interval N] --count 64 ...
+//   Builds every requested tile as a live branch at its governed tier, then every
+//   N seconds (default 4) moves the focused tile to the next cell, re-runs the
+//   stateful governor, diffs the new plan against the running one, and applies
+//   each per-tile change to the LIVE pipeline: an upgraded/downgraded tile swaps
+//   its decoded source resolution in place, a paused tile releases its decoder
+//   (shown as a black, non-live tile), and a resumed tile rebuilds one. Releases
+//   are applied before acquisitions so the machine is never transiently
+//   over-subscribed. This exercises degrade/recover with hysteresis on real
+//   decode branches instead of a one-shot startup plan.
 //
 // Credentials are supplied at run time only and are never stored or committed.
 
 #include <gst/gst.h>
 
+#include "governor/Governor.h"
+#ifdef _WIN32
+#include "hardware/HardwareProbe.h"
+#endif
+
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -46,6 +75,68 @@
 #endif
 
 namespace {
+
+const char* PickFactory(const char* const* names);
+
+#ifdef _WIN32
+vms::CapacityProfile AutoCapacityProfile(const std::string& codec) {
+    const vms::MachineProfile machine = vms::ProbeMachine();
+    const vms::Codec workingCodec = (codec == "h264") ? vms::Codec::H264 : vms::Codec::H265;
+    const char* const h264HardwareDecoders[] = {
+        "d3d12h264dec", "d3d11h264dec", "nvh264dec", "qsvh264dec", nullptr
+    };
+    const char* const h265HardwareDecoders[] = {
+        "d3d12h265dec", "d3d11h265dec", "nvh265dec", "qsvh265dec", nullptr
+    };
+    const bool hasRegisteredHardwareDecoder =
+        PickFactory(workingCodec == vms::Codec::H264
+                        ? h264HardwareDecoders
+                        : h265HardwareDecoders) != nullptr;
+
+    vms::HardwareInputs hw;
+    hw.totalRamMb =
+        static_cast<double>(machine.totalRamBytes) / (1024.0 * 1024.0);
+    hw.logicalCores = machine.logicalCores;
+
+    std::string decoderAdapter;
+    for (const auto& gpu : machine.gpus) {
+        if (gpu.isSoftwareAdapter) continue;
+        const bool supports =
+            (workingCodec == vms::Codec::H264) ? gpu.decode.h264 : gpu.decode.h265Main;
+        if (!supports || !hasRegisteredHardwareDecoder) continue;
+
+        hw.hasHardwareDecode = true;
+        const double dedicatedMb =
+            static_cast<double>(gpu.dedicatedVideoMemoryBytes) / (1024.0 * 1024.0);
+        // Small "dedicated" allocations generally describe integrated/shared
+        // graphics. HardwareInputs intentionally represents those as unknown.
+        if (dedicatedMb >= 512.0 && dedicatedMb > hw.videoMemoryMb) {
+            hw.videoMemoryMb = dedicatedMb;
+            decoderAdapter = gpu.description;
+        } else if (decoderAdapter.empty()) {
+            decoderAdapter = gpu.description;
+        }
+    }
+
+    std::ostringstream label;
+    label << "auto " << codec << " (" << machine.tier << ", "
+          << (hw.hasHardwareDecode ? "hardware" : "software") << " decode";
+    if (!decoderAdapter.empty()) label << ", " << decoderAdapter;
+    label << ")";
+    return vms::MakeCapacityProfile(hw, label.str());
+}
+#endif
+
+// One camera's two stream URLs. The governor's tier decision selects which one a
+// tile opens: Main -> the full-resolution main stream; Sub/Thumb -> the lower-
+// resolution sub stream (a camera typically publishes exactly these two); Paused
+// -> nothing is opened, so an off-working-set camera holds no session. These are
+// operator-provided URLs; discovering a device's profiles (ONVIF/P2-05) is a
+// separate, later gate and is deliberately not done here.
+struct Camera {
+    std::string main;
+    std::string sub;   // empty -> Sub/Thumb fall back to the main stream
+};
 
 struct Branch {
     int index = 0;
@@ -59,6 +150,8 @@ struct Branch {
     bool linked = false;
     bool failed = false;
     std::string decoder = "(pending)";
+    vms::Tier tier = vms::Tier::Main;  // current governed tier of this branch
+    vms::TileState state = vms::TileState::Live;  // honest governed state
 };
 
 struct GridState {
@@ -69,6 +162,19 @@ struct GridState {
     std::vector<Branch*> branches;
     gint64 playingUs = 0;
     bool firstFrameSeen = false;
+
+    // Dynamic re-planning state (--sweep). Populated only when governing live.
+    bool sweep = false;
+    int sweepIntervalSec = 4;
+    int focusIndex = 0;
+    vms::GovernorSession* session = nullptr;   // owned; deleted after the loop
+    std::vector<vms::TileRequest> reqs;         // one entry per branch, id == index
+    vms::GovernorResult plan;                   // the plan currently applied
+    std::string tierFile[4];                    // clip path per (int)Tier: 1=thumb 2=sub 3=main
+
+    // Governed-RTSP state: real per-camera streams selected by tier (see Camera).
+    bool rtsp = false;                           // build fronts from cameras, not clips
+    std::vector<Camera> cameras;                 // one entry per branch, id == index
 #ifdef _WIN32
     ULARGE_INTEGER lastKernel{}, lastUser{};
     ULARGE_INTEGER lastWall{};
@@ -125,7 +231,11 @@ bool EncodePattern(const std::string& codec, int sw, int sh, int frames,
                  "is-live", FALSE, nullptr);
     GstCaps* c = gst_caps_new_simple(
         "video/x-raw", "width", G_TYPE_INT, sw, "height", G_TYPE_INT, sh,
-        "framerate", GST_TYPE_FRACTION, 25, 1, nullptr);
+        "framerate", GST_TYPE_FRACTION, 25, 1,
+        // Camera H.264/H.265 main profiles are normally 4:2:0. Without an
+        // explicit format x264 can negotiate 4:4:4, which hardware decoders do
+        // not accept and makes decodebin fall back to software.
+        "format", G_TYPE_STRING, "I420", nullptr);
     g_object_set(caps, "caps", c, nullptr);
     gst_caps_unref(c);
     // Frequent IDRs so multifilesrc's loop wrap re-syncs the decoder quickly.
@@ -273,7 +383,9 @@ gboolean StatsTick(gpointer user_data) {
         const guint64 now = b->buffers.load(std::memory_order_relaxed);
         const guint64 fps = now - b->lastBuffers;
         b->lastBuffers = now;
-        std::cout << "  tile " << b->index << "  " << fps << " fps  [" << b->decoder << "]\n";
+        std::cout << "  tile " << b->index << "  [" << vms::TierName(b->tier) << "/"
+                  << vms::TileStateName(b->state) << "]  " << fps << " fps  ["
+                  << b->decoder << "]\n";
     }
     std::cout << "  composited: rendered=" << rendered << " dropped=" << dropped;
 
@@ -385,18 +497,182 @@ gboolean BusCb(GstBus* /*bus*/, GstMessage* msg, gpointer user_data) {
     return TRUE;
 }
 
+// ---- Dynamic re-planning: apply a changed governor plan to live branches ----
+//
+// Each branch has a stable spine (queue -> upload -> compositor pad) that never
+// moves. Only the decode "front" (source [+ decodebin]) is swapped when a tile's
+// tier changes, so the compositor is never disturbed and other tiles keep
+// running. All of this runs on the main-loop thread between StatsTick calls.
+
+// Detach and destroy whatever currently feeds this branch's queue.
+void TeardownBranchFront(GridState* s, Branch* b) {
+    GstPad* qsink = gst_element_get_static_pad(b->queue, "sink");
+    if (GstPad* peer = gst_pad_get_peer(qsink)) {
+        gst_pad_unlink(peer, qsink);
+        gst_object_unref(peer);
+    }
+    gst_object_unref(qsink);
+    if (b->decodebin) {
+        gst_element_set_state(b->decodebin, GST_STATE_NULL);
+        gst_bin_remove(GST_BIN(s->pipeline), b->decodebin);  // transfers the ref
+        b->decodebin = nullptr;
+    }
+    if (b->source) {
+        gst_element_set_state(b->source, GST_STATE_NULL);
+        gst_bin_remove(GST_BIN(s->pipeline), b->source);
+        b->source = nullptr;
+    }
+    b->linked = false;
+}
+
+// The stream URL a tier selects for a camera: Main -> main stream; Sub and Thumb
+// -> the sub stream (a camera usually has just those two), falling back to main
+// when no sub URL was provided. Paused opens nothing and is handled before this.
+const std::string& UriForTier(const Camera& c, vms::Tier tier) {
+    if (tier == vms::Tier::Main || c.sub.empty()) return c.main;
+    return c.sub;
+}
+
+// A concise, credential-free name for the stream a tier selects (never print the
+// URL itself — it carries the password).
+const char* StreamNameForTier(vms::Tier tier) {
+    switch (tier) {
+        case vms::Tier::Main:  return "main";
+        case vms::Tier::Sub:   return "sub";
+        case vms::Tier::Thumb: return "sub(thumb)";
+        case vms::Tier::Paused: return "none";
+    }
+    return "?";
+}
+
+// Build the decode front for a tier and link it to the queue. Paused tiles get
+// NO decoder (and, for RTSP, open NO session): a cheap black source keeps the
+// compositor pad fed while honestly showing no live video. In --test-pattern
+// mode the front is a looped synthetic clip; in governed-RTSP mode it is a
+// uridecodebin on the tier's real stream URL. Assumes the queue is already in
+// the pipeline; the caller syncs element state when the pipeline is running.
+bool BuildBranchFront(GridState* s, Branch* b, vms::Tier tier) {
+    b->tier = tier;
+    b->linked = false;
+
+    if (tier == vms::Tier::Paused) {
+        b->source = gst_element_factory_make("videotestsrc", nullptr);
+        b->decodebin = nullptr;
+        if (!b->source) return false;
+        // pattern 2 = solid black; is-live paces it so it does not flood the
+        // sync-off sink. No decoder is instantiated for a paused tile.
+        g_object_set(b->source, "pattern", 2, "is-live", TRUE, nullptr);
+        gst_bin_add(GST_BIN(s->pipeline), b->source);
+        GstPad* vsrc = gst_element_get_static_pad(b->source, "src");
+        GstPad* qsink = gst_element_get_static_pad(b->queue, "sink");
+        const bool ok = gst_pad_link(vsrc, qsink) == GST_PAD_LINK_OK;
+        gst_object_unref(vsrc);
+        gst_object_unref(qsink);
+        b->decoder = "(paused)";
+        b->linked = ok;
+        return ok;
+    }
+
+    if (s->rtsp) {
+        // Governed live camera: open the stream this tier selected. uridecodebin
+        // is source + demux + decoder in one; it exposes its decoded pad
+        // dynamically (OnPadAdded links it to the queue), so there is no separate
+        // source element to link here.
+        b->source = nullptr;
+        b->decodebin = gst_element_factory_make("uridecodebin", nullptr);
+        if (!b->decodebin) return false;
+        const std::string& uri = UriForTier(s->cameras[b->index], tier);
+        g_object_set(b->decodebin, "uri", uri.c_str(), nullptr);
+        g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
+        g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
+        gst_bin_add(GST_BIN(s->pipeline), b->decodebin);
+        b->decoder = "(pending)";
+        return true;
+    }
+
+    b->source = gst_element_factory_make("multifilesrc", nullptr);
+    b->decodebin = gst_element_factory_make("decodebin", nullptr);
+    if (!b->source || !b->decodebin) return false;
+    g_object_set(b->source, "location", s->tierFile[static_cast<int>(tier)].c_str(), nullptr);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(b->source), "loop"))
+        g_object_set(b->source, "loop", TRUE, nullptr);
+    g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
+    gst_bin_add_many(GST_BIN(s->pipeline), b->source, b->decodebin, nullptr);
+    b->decoder = "(pending)";
+    return gst_element_link(b->source, b->decodebin) != FALSE;
+}
+
+// Every interval: move focus to the next tile, re-run the stateful governor,
+// diff against the applied plan, and — only when the plan actually changed —
+// reconfigure the grid. An in-place hot-swap into a running pipeline was tried
+// first and does not survive the D3D12 hardware decoder plus the reused
+// compositor pad (the rebuilt decoder wedges in async PAUSED at 0 fps and stalls
+// teardown). The reliable mechanism is the one the flawless startup uses: take
+// the whole graph to NULL, rebuild EVERY branch's decode front fresh at its new
+// tier, and go PLAYING so they all preroll together from zero. (Cycling a front
+// that was itself rebuilt in a prior swap without rebuilding it fails with an
+// internal-stream error, so all fronts are rebuilt uniformly each time.)
+gboolean SweepTick(gpointer user_data) {
+    auto* s = static_cast<GridState*>(user_data);
+    if (!s->session || s->reqs.empty()) return TRUE;
+
+    s->focusIndex = (s->focusIndex + 1) % static_cast<int>(s->reqs.size());
+    for (auto& r : s->reqs) { r.focused = false; r.priority = vms::Priority::Medium; }
+    s->reqs[s->focusIndex].focused = true;
+    s->reqs[s->focusIndex].priority = vms::Priority::High;
+
+    const vms::GovernorResult next = s->session->update(s->reqs);
+    const std::vector<vms::TileTransition> moves = vms::DiffPlans(s->plan, next);
+
+    std::cout << "== sweep: focus -> tile " << s->focusIndex << "; "
+              << moves.size() << " live transition(s) ==\n";
+    for (const auto& t : moves)
+        std::cout << "  tile " << t.id << ": " << vms::TierName(t.from) << " -> "
+                  << vms::TierName(t.to) << (t.release() ? "  (release)" : "  (acquire)")
+                  << "\n";
+
+    if (!moves.empty()) {
+        gst_element_set_state(s->pipeline, GST_STATE_NULL);
+        gst_element_get_state(s->pipeline, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+
+        for (Branch* b : s->branches) {
+            vms::Tier target = vms::Tier::Paused;
+            vms::TileState state = vms::TileState::PausedOffscreen;
+            for (const auto& d : next.tiles)
+                if (d.id == b->index) { target = d.tier; state = d.state; break; }
+            TeardownBranchFront(s, b);
+            b->failed = false;
+            if (!BuildBranchFront(s, b, target)) {
+                std::cerr << "tile " << b->index << ": rebuild at "
+                          << vms::TierName(target) << " failed\n";
+                b->failed = true;
+            }
+            b->state = state;
+        }
+
+        gst_element_set_state(s->pipeline, GST_STATE_PLAYING);
+    }
+    s->plan = next;
+    return TRUE;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
     gst_init(&argc, &argv);
 
     std::vector<std::string> urls;
+    std::vector<Camera> cameras;   // --camera "mainUrl[;subUrl]" (governed RTSP)
     int count = 0;      // if >0, replicate the single URL this many times
     int seconds = 30;
     int outW = 1600, outH = 900;
     bool testPattern = false;   // camera-free synthetic fan-out
     std::string codec = "h265"; // test-pattern codec
     int srcW = 1920, srcH = 1080;  // test-pattern source resolution
+    bool govern = false;                  // apply the P3-03 governor to tier the tiles
+    std::string profileName = "auto";     // auto | devbox | lowend
+    bool sweep = false;                   // re-plan live as focus moves
+    int sweepInterval = 4;                // seconds between focus moves
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--count" && i + 1 < argc)        count = std::atoi(argv[++i]);
@@ -407,11 +683,24 @@ int main(int argc, char* argv[]) {
         else if (a == "--codec" && i + 1 < argc)   codec = argv[++i];
         else if (a == "--srcw" && i + 1 < argc)    srcW = std::atoi(argv[++i]);
         else if (a == "--srch" && i + 1 < argc)    srcH = std::atoi(argv[++i]);
+        else if (a == "--govern")                  govern = true;
+        else if (a == "--profile" && i + 1 < argc) profileName = argv[++i];
+        else if (a == "--sweep")                   sweep = true;
+        else if (a == "--sweep-interval" && i + 1 < argc) sweepInterval = std::atoi(argv[++i]);
+        else if (a == "--camera" && i + 1 < argc) {
+            // "mainUrl[;subUrl]" — the governor selects main vs sub per tile.
+            const std::string spec = argv[++i];
+            const std::size_t semi = spec.find(';');
+            Camera cam;
+            cam.main = (semi == std::string::npos) ? spec : spec.substr(0, semi);
+            if (semi != std::string::npos) cam.sub = spec.substr(semi + 1);
+            cameras.push_back(cam);
+        }
         else if (a.rfind("--", 0) != 0)            urls.push_back(a);
     }
 
     int n = 0;
-    std::string patternFile, encoderUsed;
+    std::string encoderUsed;
     if (testPattern) {
         if (codec != "h264" && codec != "h265") {
             std::cerr << "--codec must be h264 or h265\n";
@@ -419,22 +708,150 @@ int main(int argc, char* argv[]) {
         }
         n = (count > 0) ? count : 4;
     } else {
-        if (urls.empty()) {
+        // RTSP mode. Cameras come from --camera "main[;sub]" (governor selects the
+        // stream per tier) or from bare positional URLs (main only). Governed RTSP
+        // needs the main/sub split to be meaningful, but works either way.
+        if (cameras.empty() && urls.empty()) {
             if (const char* e = std::getenv("VMS_RTSP_URL")) urls.emplace_back(e);
         }
-        if (urls.empty()) {
+        for (const auto& u : urls) cameras.push_back(Camera{u, ""});
+        if (cameras.empty()) {
             std::cerr << "Usage: vms_grid \"rtsp://u:p%40host:port/path\" [more urls...] "
                          "[--count N] [--seconds N] [--width W] [--height H]\n"
                          "       (or set VMS_RTSP_URL). Encode any '@' in the password as %40.\n"
+                         "   governed live: vms_grid --govern [--sweep] "
+                         "--camera \"rtsp://MAIN;rtsp://SUB\" [--camera ...] [--count N]\n"
                          "   or: vms_grid --test-pattern --count N [--codec h265|h264] "
                          "[--srcw W] [--srch H] [--seconds N]\n";
             return 2;
         }
         if (count > 0) {
-            const std::string base = urls.front();
-            urls.assign(count, base);
+            const Camera base = cameras.front();
+            cameras.assign(count, base);
         }
-        n = static_cast<int>(urls.size());
+        // urls stays the flat main-only list the non-governed inline path uses.
+        urls.clear();
+        for (const auto& c : cameras) urls.push_back(c.main);
+        n = static_cast<int>(cameras.size());
+    }
+
+    const bool governedRtsp = govern && !testPattern;
+    if (govern && profileName != "auto" &&
+        profileName != "devbox" && profileName != "lowend") {
+        std::cerr << "--profile must be auto, devbox, or lowend\n";
+        return 2;
+    }
+    if (sweep && !govern) {
+        std::cerr << "--sweep re-plans the governor at run time, so it requires --govern.\n";
+        return 2;
+    }
+    if (governedRtsp) {
+        bool anySub = false;
+        for (const auto& c : cameras) if (!c.sub.empty()) anySub = true;
+        if (!anySub)
+            std::cerr << "note: no --camera sub stream given; Sub/Thumb tiers fall back to "
+                         "the main stream (no bandwidth saving). Pass \"main;sub\" for both.\n";
+    }
+    if (sweep && seconds <= sweepInterval) {
+        std::cerr << "--sweep needs --seconds greater than --sweep-interval so at least "
+                     "one re-plan happens (interval=" << sweepInterval << ").\n";
+        return 2;
+    }
+
+    // Governor integration. Turns a grid of requested main tiles into a tiered
+    // plan that fits the machine's decode + memory budget instead of over-
+    // subscribing. In --test-pattern mode a tier selects a synthetic clip; in
+    // governed-RTSP mode it selects a camera's real main vs sub stream (Paused
+    // opens no session at all).
+    std::vector<vms::Tier> tiers;  // per rendered tile (test-pattern / rtsp path)
+    std::vector<vms::TileState> tileStates;  // honest per-tile state (full grids)
+    // Sweep state, lifted to main scope so the stateful session outlives startup.
+    vms::GovernorSession* sweepSession = nullptr;
+    std::vector<vms::TileRequest> sweepReqs;
+    vms::GovernorResult sweepPlan;
+    const bool governing = govern;
+    // A full grid keeps every requested tile as a branch (paused ones shown black
+    // with a stable id->branch mapping): required for a real camera wall and for
+    // run-time re-planning. Only the static test-pattern measurement collapses.
+    const bool fullGrid = sweep || governedRtsp;
+    if (governing) {
+        vms::CapacityProfile prof;
+        if (profileName == "devbox") {
+            prof = vms::DevBoxProfile();
+        } else if (profileName == "lowend") {
+            prof = vms::LowEndProfile();
+        } else {
+#ifdef _WIN32
+            prof = AutoCapacityProfile(codec);
+#else
+            std::cerr << "--profile auto is not implemented on this platform; "
+                         "use an explicit calibrated profile.\n";
+            return 2;
+#endif
+        }
+        vms::GovernorSession* gov = new vms::GovernorSession(prof);
+        std::vector<vms::TileRequest> reqs;
+        reqs.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            vms::TileRequest r;
+            r.id = i;
+            r.desired = vms::Tier::Main;
+            r.priority = (i == 0) ? vms::Priority::High : vms::Priority::Medium;
+            r.focused = (i == 0);
+            reqs.push_back(r);
+        }
+        const vms::GovernorResult plan = gov->update(reqs);
+        int cm = 0, cs = 0, ct = 0, cp = 0;
+        for (const auto& d : plan.tiles) {
+            switch (d.tier) {
+                case vms::Tier::Main:  ++cm; break;
+                case vms::Tier::Sub:   ++cs; break;
+                case vms::Tier::Thumb: ++ct; break;
+                case vms::Tier::Paused: ++cp; break;
+            }
+        }
+        std::cout << "governor [" << prof.label << "]: requested " << n
+                  << " main tiles -> main=" << cm << " sub=" << cs << " thumb=" << ct
+                  << " paused=" << cp << "  (model decode=" << plan.decodeUsed
+                  << " main-eq, memory=" << plan.memoryUsedMb << "MB)\n";
+
+        if (fullGrid) {
+            // Keep EVERY requested tile as a live branch (paused ones included,
+            // shown black) so a camera wall has a stable id -> branch mapping and
+            // focus can move to any cell. n stays the full requested count.
+            tiers.resize(n, vms::Tier::Paused);
+            tileStates.assign(n, vms::TileState::PausedOffscreen);
+            for (const auto& d : plan.tiles)
+                if (d.id >= 0 && d.id < n) { tiers[d.id] = d.tier; tileStates[d.id] = d.state; }
+        } else {
+            // Static test-pattern measurement: collapse out paused tiles.
+            for (const auto& d : plan.tiles)
+                if (d.tier != vms::Tier::Paused) tiers.push_back(d.tier);
+            n = static_cast<int>(tiers.size());
+        }
+
+        if (governedRtsp) {
+            // Show which real stream each tile opens (never the URL: it carries
+            // the password).
+            std::cout << "stream selection: ";
+            for (int i = 0; i < n; ++i)
+                std::cout << "t" << i << "=" << StreamNameForTier(tiers[i])
+                          << (i + 1 < n ? " " : "\n");
+        }
+
+        if (sweep) {
+            sweepSession = gov;         // ownership passes to the run loop
+            sweepReqs = reqs;
+            sweepPlan = plan;
+        } else {
+            delete gov;
+        }
+        if (!fullGrid && n == 0) {
+            std::cerr << "governor paused all tiles; nothing to render.\n";
+            return 0;
+        }
+    } else if (testPattern) {
+        tiers.assign(n, vms::Tier::Main);
     }
 
     // Square-ish grid geometry.
@@ -446,18 +863,44 @@ int main(int argc, char* argv[]) {
               << " (" << tileW << "x" << tileH << " each) on a " << outW << "x" << outH
               << " surface\n";
 
+    // One encoded clip per distinct tier present in the plan (main at the
+    // requested source resolution; sub 640x480; thumb 320x240). Indexed by
+    // (int)Tier: 1=thumb, 2=sub, 3=main. Encoding is done once, up front, so its
+    // cost never pollutes the decode measurement.
+    std::string tierFile[4];
     if (testPattern) {
-        patternFile = std::string(g_get_tmp_dir()) + "/vms_grid_pattern." + codec;
         const int frames = (seconds > 0) ? (seconds + 3) * 25 : 250;
-        std::cout << "encoding " << codec << " test clip (" << srcW << "x" << srcH
-                  << ", " << frames << " frames) -> " << patternFile << " ...\n";
-        if (!EncodePattern(codec, srcW, srcH, frames, patternFile, encoderUsed)) {
-            std::cerr << "test-pattern encode failed; aborting.\n";
-            return 5;
+        auto resForTier = [&](vms::Tier t, int& w, int& h) {
+            switch (t) {
+                case vms::Tier::Sub:   w = 640; h = 480; break;
+                case vms::Tier::Thumb: w = 320; h = 240; break;
+                default:               w = srcW; h = srcH; break; // Main
+            }
+        };
+        bool need[4] = {false, false, false, false};
+        for (vms::Tier t : tiers) need[static_cast<int>(t)] = true;
+        // A sweep can drive any tile to any tier at run time, so every decode
+        // tier's clip must exist up front.
+        if (sweep) { need[1] = need[2] = need[3] = true; }
+        for (int ti = 1; ti <= 3; ++ti) {
+            if (!need[ti]) continue;
+            int w = 0, h = 0;
+            resForTier(static_cast<vms::Tier>(ti), w, h);
+            const std::string f = std::string(g_get_tmp_dir()) + "/vms_grid_pattern_" +
+                                  std::to_string(w) + "x" + std::to_string(h) + "." + codec;
+            std::string enc;
+            std::cout << "encoding " << codec << " " << w << "x" << h << " clip ("
+                      << frames << " frames) -> " << f << " ...\n";
+            if (!EncodePattern(codec, w, h, frames, f, enc)) {
+                std::cerr << "test-pattern encode failed; aborting.\n";
+                return 5;
+            }
+            tierFile[ti] = f;
+            encoderUsed = enc;
         }
         std::cout << "encoded with " << encoderUsed << "; fanning out " << n
-                  << " decode-only branch(es). Sink sync is OFF, so per-tile fps is\n"
-                     "max decode throughput; sum(fps)/25 ~= sustainable 25 fps streams.\n";
+                  << " decode branch(es)" << (governing ? " per governor plan" : "")
+                  << ". Sink sync is OFF, so per-tile fps is max decode throughput.\n";
     }
 
     GridState s;
@@ -486,6 +929,17 @@ int main(int argc, char* argv[]) {
         return 3;
     }
 
+    // Hand the run loop everything the live re-planner needs.
+    for (int ti = 0; ti < 4; ++ti) s.tierFile[ti] = tierFile[ti];
+    s.sweep = sweep && governing;
+    s.sweepIntervalSec = sweepInterval;
+    s.session = sweepSession;        // nullptr unless sweeping; owned here now
+    s.reqs = sweepReqs;
+    s.plan = sweepPlan;
+    s.focusIndex = 0;                // tile 0 is the initially focused tile
+    s.rtsp = governedRtsp;           // BuildBranchFront opens real streams by tier
+    s.cameras = cameras;             // one entry per branch, id == index
+
     for (int i = 0; i < n; ++i) {
         auto* b = new Branch();
         b->index = i;
@@ -499,7 +953,18 @@ int main(int argc, char* argv[]) {
         g_object_set(b->queue, "leaky", 2 /*downstream*/, "max-size-buffers", 3,
                      "max-size-time", static_cast<guint64>(0), "max-size-bytes", 0, nullptr);
 
-        if (testPattern) {
+        if (s.sweep || (governing && s.rtsp)) {
+            // Governed grid (live-replan and/or real cameras): every tile is a
+            // branch (paused ones shown black, no decoder / no session). The same
+            // BuildBranchFront path used for run-time tier swaps builds the
+            // initial front here — synthetic clip or real main/sub stream by tier.
+            gst_bin_add_many(GST_BIN(s.pipeline), b->queue, b->upload, nullptr);
+            if (!BuildBranchFront(&s, b, tiers[i])) {
+                std::cerr << "Failed to build initial front for tile " << i << "\n";
+                return 3;
+            }
+            if (i < static_cast<int>(tileStates.size())) b->state = tileStates[i];
+        } else if (testPattern) {
             // Camera-free: loop the pre-encoded clip through decodebin so it
             // picks the same hardware decoder rank a real stream would.
             b->source = gst_element_factory_make("multifilesrc", nullptr);
@@ -508,7 +973,9 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Failed to create test-pattern elements for tile " << i << "\n";
                 return 3;
             }
-            g_object_set(b->source, "location", patternFile.c_str(), nullptr);
+            b->tier = tiers[i];
+            g_object_set(b->source, "location",
+                         tierFile[static_cast<int>(tiers[i])].c_str(), nullptr);
             if (g_object_class_find_property(G_OBJECT_GET_CLASS(b->source), "loop"))
                 g_object_set(b->source, "loop", TRUE, nullptr);
             g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
@@ -562,6 +1029,12 @@ int main(int argc, char* argv[]) {
     }
 
     g_timeout_add_seconds(1, StatsTick, &s);
+    if (s.sweep) {
+        std::cout << "sweep: re-planning the governor every " << s.sweepIntervalSec
+                  << "s as focus moves across tiles; changes are applied to live "
+                     "decode branches.\n";
+        g_timeout_add_seconds(s.sweepIntervalSec, SweepTick, &s);
+    }
     if (seconds > 0) g_timeout_add_seconds(seconds, StopAfterTimeout, &s);
 
     g_main_loop_run(s.loop);
@@ -590,5 +1063,6 @@ int main(int argc, char* argv[]) {
     gst_element_set_state(s.pipeline, GST_STATE_NULL);
     gst_object_unref(s.pipeline);
     g_main_loop_unref(s.loop);
+    delete s.session;
     return 0;
 }

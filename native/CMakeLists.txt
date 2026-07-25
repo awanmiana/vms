@@ -33,6 +33,25 @@ if(WIN32)
 endif()
 
 # ---------------------------------------------------------------------------
+# Increment 4b — decode governor (pure decision core + self-check).
+# No Qt / no GStreamer: portable C++ policy, always builds, self-verifying.
+# ---------------------------------------------------------------------------
+add_library(vms_governor STATIC src/governor/Governor.cpp)
+target_include_directories(vms_governor PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_governor PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_govtest src/governor/main_govtest.cpp)
+target_link_libraries(vms_govtest PRIVATE vms_governor)
+if(WIN32)
+    target_compile_definitions(vms_govtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+enable_testing()
+add_test(NAME governor_selfcheck COMMAND vms_govtest)
+
+# ---------------------------------------------------------------------------
 # Increment 2 — Qt + GStreamer shell (linkage smoke test).
 # Builds only when both Qt6 and a GStreamer dev tree are available.
 # ---------------------------------------------------------------------------
@@ -91,20 +110,30 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
 endif()
 
 # ---------------------------------------------------------------------------
-# Increment 4 (spike half) — multi-tile grid decode/render measurement.
+# Increment 4 — multi-tile grid decode/render measurement + governor harness.
 # N streams -> per-tile hardware decode -> d3d11compositor -> one d3d11 window.
-# Measurement only (no governor policy); GStreamer d3d11 plugin required.
+# --govern adds the approved 4b tier plan; GStreamer d3d11 plugin required.
 # ---------------------------------------------------------------------------
 if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
-    add_executable(vms_grid src/grid/main_grid.cpp)
+    add_executable(vms_grid
+        src/grid/main_grid.cpp
+    )
+    if(WIN32)
+        target_sources(vms_grid PRIVATE src/hardware/HardwareProbe.cpp)
+    endif()
     target_include_directories(vms_grid PRIVATE
+        src
         "${GSTREAMER_ROOT}/include/gstreamer-1.0"
         "${GSTREAMER_ROOT}/include/glib-2.0"
         "${GSTREAMER_ROOT}/lib/glib-2.0/include"
     )
     target_link_directories(vms_grid PRIVATE "${GSTREAMER_ROOT}/lib")
-    target_link_libraries(vms_grid PRIVATE gstreamer-1.0 gobject-2.0 glib-2.0)
+    target_link_libraries(vms_grid PRIVATE
+        vms_governor
+        gstreamer-1.0 gobject-2.0 glib-2.0
+    )
     if(WIN32)
+        target_link_libraries(vms_grid PRIVATE dxgi d3d11 dxguid)
         target_compile_definitions(vms_grid PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()

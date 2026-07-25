@@ -7,12 +7,32 @@ specification, not the product runtime.
 > ⚠️ Native C++ is authored here but compiled/run on your hardware. If a build surfaces
 > compiler/linker errors, paste them and they get fixed.
 
-## Current status (2026-07-23)
+## Current status (2026-07-24)
 
 Foundation validated. Increments 1–3 build and run; self-contained packaging is proven. Increment
-4a (`vms_grid`) is verified on a live camera (4× `d3d12h265dec` @ ~25 fps, ~0 ongoing drops, CPU ~0%)
-and now has a camera-free `--test-pattern` fan-out to measure the pure decode ceiling per machine.
-**Next up: run the fan-out ramp on both hardware tiers, then the gated governor pass (4b / P3-03).**
+4a (`vms_grid`) is verified on a live camera and its camera-free `--test-pattern` fan-out measured
+the decode ceiling per tier on the dev box (see `MEASUREMENTS.md`: ~15 main / ~63 sub 1080p H.265
+streams; memory is the hard wall — 64 tiles crashed at 10.5 GB). P3-03 governor scope is approved
+(`governor-P3-03-proposal.md`) and increment **4b** has begun: the governor decision core
+(`vms_govtest`) is built and registered with CTest; the grid integration now probes the current
+machine by default, verifies per-codec D3D capability plus an installed GStreamer hardware decoder,
+and builds a bounded capacity profile. The corrected camera-typical I420, auto-probed 64-tile H.265
+case caps to 1 main + 47 sub + 16 thumb and runs at 3.77 GB instead of crashing. The stateful
+session's changing tier plans are now **applied to live media branches** (`vms_grid --sweep`): a
+runtime focus sweep re-plans, `DiffPlans` orders each change release-before-acquire, and the grid is
+reconfigured to the new plan — verified on hardware (all tiers resume, memory bounded, clean exit).
+The governor's tier decisions now also **select real per-camera RTSP streams** (`--govern --camera
+"main;sub"`): Main opens the main stream, Sub/Thumb the sub stream, Paused opens no session. The
+tier→stream mapping, the credential-free `stream selection:` line, and graceful per-tile connection
+handling are verified locally; live-camera decode confirmation needs a run with the camera's
+credentials. The dev-box cost model was **recalibrated** against the corrected I420 `d3d12h265dec`
+ramp (see `MEASUREMENTS.md`): ceilings ~70 main / ~249 sub, decode-throughput-bound (not memory-
+bound — the old 10.5 GB "wall" was a pre-fix NVDEC artifact), so the decode budget rose 15→64 and
+`--govern --profile auto` now keeps 25 of 64 tiles at full main resolution instead of 1. The
+**honest per-tile state model** (live / degraded / paused-offscreen / paused-capacity) is built and
+shown live (`tile 0 [main/live]`, `tile 5 [thumb/degraded]`); its *visual* rendering is the P3-14
+Qt/QML gate. **Next up: the P3-14 visual state UI, a seamless (non-reloading) live apply, and (blocked
+on hardware) live-camera RTSP confirmation and low-end i5 calibration.**
 
 | # | Component | Status |
 | :- | :- | :- |
@@ -21,7 +41,7 @@ and now has a camera-free `--test-pattern` fan-out to measure the pure decode ce
 | 3 | `vms_spike` — RTSP → HW decode → D3D11 render + stats | ✅ verified (live camera) |
 | — | Self-contained packaging (bundle Qt+GStreamer; user installs nothing) | ✅ proven (ran with cleaned PATH) |
 | 4a | `vms_grid` — N streams → per-tile HW decode → `d3d11compositor` → one window; per-tile fps + composited rendered/dropped + process CPU/RAM; camera-free `--test-pattern` fan-out | ✅ verified on live camera (4-tile); fan-out ramp + low-end run pending |
-| 4b | First governor pass (priority/tier policy, decode caps, degrade/recover) | ⛔ gated — P3-03 (unapproved); needs scope + Approval Log entry first |
+| 4b | Decode governor — `vms_governor` decision core + stateful session, `vms_govtest`/CTest, and `vms_grid --govern` integration | 🟡 in progress; policy core passes at MSVC `/W4`; add/remove/focus re-planning and low/high-water hysteresis pass; **auto-probed decode integration verified on hardware: 64 requested main tiles become 1 main + 47 sub + 16 thumb and the corrected I420 path runs at 3.77 GB (`d3d12h265dec`) instead of crashing at 10.5 GB.** Changing plans are now **applied to live branches** via `vms_grid --sweep` (whole-grid NULL→rebuild on each plan change; seamless per-tile hot-swap deferred — it does not survive the D3D12 decoder + reused compositor pad). The governor's tiers also **select real RTSP main/sub streams** (`--govern --camera "main;sub"`; plumbing verified locally, live-camera decode pending). The cost model was **recalibrated** to the corrected I420 `d3d12h265dec` ramp (budget 15→64, sub cost 0.238→0.28, VRAM-tiered auto seed; auto now plans 25 main + 39 sub of 64, CTest green). The **honest per-tile state model** (live/degraded/paused-offscreen/paused-capacity) is built, unit-tested, and shown live. P3-03 scope approved 2026-07-24. Remaining: P3-14 visual state UI, seamless apply, and (hardware-blocked) live-camera RTSP confirmation + low-end i5 calibration |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.
@@ -91,6 +111,27 @@ $env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer
 # On machines with NO H.265 hardware decode (the low-end i5 tier), use --codec h264
 # to measure the QuickSync/DXVA H.264 ceiling instead. --srcw/--srch set the encoded
 # source resolution (1920x1080 ~ a main stream; 640x480 ~ a sub stream).
+
+# 4b) Apply a capacity plan seeded from the live hardware probe (auto is the default).
+.\build\vms_grid.exe --test-pattern --govern --profile auto --count 64 --codec h265 --seconds 20
+# Reproducible diagnostic overrides remain available as --profile devbox|lowend.
+# --govern intentionally rejects RTSP input until real per-camera main/sub URLs are wired.
+
+# 4b-sweep) Apply CHANGING plans to live branches: every --sweep-interval seconds the
+#   focus moves to the next tile, the stateful governor re-plans, and the grid is
+#   reconfigured to the new plan (releases applied before acquisitions).
+.\build\vms_grid.exe --test-pattern --govern --sweep --profile auto --count 64 --codec h265 --seconds 24 --sweep-interval 6
+# Watch each "== sweep: focus -> tile N ==" print its per-tile transitions, then the
+# grid resume decoding within budget. A tight profile shows more movement:
+.\build\vms_grid.exe --test-pattern --govern --sweep --profile lowend --count 8 --codec h265 --seconds 20 --sweep-interval 4
+
+# 4b-rtsp) The governor selects each tile's REAL stream by tier: Main -> main URL,
+#   Sub/Thumb -> sub URL, Paused -> no session opened. Pass one --camera per camera
+#   as "mainUrl;subUrl" (encode any '@' in the password as %40). URLs are never
+#   printed; only a credential-free "stream selection: t0=main t1=sub ..." line.
+.\build\vms_grid.exe --govern --camera "rtsp://u:p%40host:554/Streaming/Channels/101;rtsp://u:p%40host:554/Streaming/Channels/102" --count 9 --seconds 30
+# Add --sweep to also re-plan (which stream each tile opens) as focus moves.
+# --count replicates one camera; or pass several distinct --camera entries.
 ```
 
 Verified result on the dev box (RTX 3050): hardware `d3d12h265dec`, ~25 fps, ~0 dropped frames.
@@ -105,13 +146,14 @@ frames, and process CPU/RAM. This is measurement only — the same character as 
 no priority/tier/degrade policy. Its purpose is to find the smooth ceiling per hardware tier, which
 is the empirical input the governor design needs. Run it on both the dev box and the low-end laptop.
 
-**4b — first governor pass (gated).** "Only decode what this machine can handle" — device priority
-(high/med/low/idle) + per-view tier (main/sub/thumb/paused), concurrent-decode caps, and
-degrade/recover with hysteresis — is the actual product feature. It maps to **P3-03** in
-`../Development_plan.md` (`[ ] Discussed | [ ] Approved`) and leans on **P0-01L** (whose transitions
-"will be discussed before this feature is implemented") and **P0-05**. Per the Approval Contract,
-no governor product code starts until P3-03 is Discussed + Approved and logged. The `vms_grid`
-numbers are meant to inform exactly that discussion.
+**4b — first governor pass (approved; in progress).** "Only decode what this machine can handle" is
+the actual product feature. P3-03 scope was approved and logged on 2026-07-24. Built so far: a pure
+two-budget decision core, deterministic tier assignment, a stateful session that re-plans on
+working-set/focus changes with low/high-water hysteresis, conservative profile construction from
+the live hardware probe, and camera-free decode-path integration. The named dev-box/low-end
+profiles are explicit test overrides; `auto` is the default. Applying changing session plans to
+active branches, real RTSP main/sub selection, and honest Qt/QML per-tile state remain before
+P3-03 can be marked Built and Verified.
 
 **Outstanding data:** run `vms_hwprobe.exe` (and now `vms_grid.exe`) on the low-end **i5 4th-gen /
 8GB / no-GPU** machine. That profile is the constraint the governor must be shaped around.

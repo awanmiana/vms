@@ -76,12 +76,16 @@ The prototype server and regression tests use Node.js built-in modules.
 
 ## Why this shape
 
-The first build is intentionally dependency-free so it runs immediately on Windows. The UI and data model are structured so a later stage can become a Windows desktop app using Electron/Tauri or a Qt shell while keeping the same operator concepts.
+The first build is intentionally dependency-free so it runs immediately on Windows. The UI and data model are structured around stable operator concepts that carry over to the delivered native client.
 
-The browser shell should remain the executable interaction prototype and backend
-test client through P0-04 and the initial media-contract work. Selecting a native
-shell before data authority, persistence, codec, media-process, and capacity
-requirements are approved would lock in deployment assumptions too early.
+On 2026-07-20 the owner approved a **fully-native C++ client** as the delivered runtime
+(Approval Log row **N0** and the Native Client Track section in
+[`Development_plan.md`](Development_plan.md); technical decisions in
+[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md)). This browser shell is therefore
+retained as the **reference specification** for behavior and domain model, and as the
+backend test/interaction harness — not the delivered runtime. It remains useful through
+P0-04 and the initial media-contract work while the native track advances by
+hardware-verified increments.
 
 ## Current prototype modules
 
@@ -231,17 +235,18 @@ README checklist.
 
 ## Native-shell boundary
 
-Backend implementation and testing should continue now while this web shell acts
-as the client and interaction harness.
+The delivered runtime is the fully-native C++ client under [`native/`](native/)
+(approved 2026-07-20, Approval Log row N0). Backend implementation and testing continue
+through this web shell as the reference specification and interaction/test harness.
 
-True native or operating-system-detached workspaces depend on approved data authority,
-stable inventory/layout/playback/resource-lease contracts, central resource admission,
-measured workstation/codec profiles, and a verified real-media path. Those dependencies
-are mapped to C0, P0-04 through P0-13, P1, P3, and P5 in the controlling guide.
-
-After the required gates pass, a native stack can be evaluated against measured
-requirements. The current frontend remains useful as the operator interaction and
-backend test harness.
+The native track advances by measurement spikes verified on real hardware before each
+next step (increments 1–3 and the 4a grid spike are built and verified). Product features
+still flow through their own gates: P3-03 governor scope is approved and its first native
+pass is in progress (including a live-probe capacity seed and governed grid harness), while data
+authority, stable inventory/layout/playback/resource-lease contracts, central resource
+admission, measured workstation/codec profiles, and a verified real-media path map to
+P0-04 through P0-13, P1, P3, and P5 in the controlling guide. True operating-system-detached
+workspaces still depend on central resource admission from those gates.
 
 ## Development plan
 
