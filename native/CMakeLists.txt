@@ -52,6 +52,32 @@ enable_testing()
 add_test(NAME governor_selfcheck COMMAND vms_govtest)
 
 # ---------------------------------------------------------------------------
+# Native increment 5 (P0-04) — persistence: an embedded local relational store
+# (SQLite via the Windows-bundled winsqlite3) behind the C0-03 adapter contract.
+# Qt-free and self-verifying, like the governor. On non-Windows a system SQLite
+# backend would slot in behind the same Store interface (deferred).
+# ---------------------------------------------------------------------------
+if(WIN32)
+    add_library(vms_persist STATIC src/persist/Store.cpp)
+    target_include_directories(vms_persist PUBLIC src)
+    # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
+    # winsqlite3.lib from the Windows SDK). No download, no vendoring.
+    target_link_libraries(vms_persist PUBLIC winsqlite3)
+    target_compile_definitions(vms_persist PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+        target_compile_options(vms_persist PRIVATE /W4 /permissive-)
+    endif()
+
+    add_executable(vms_dbtest src/persist/main_dbtest.cpp)
+    target_link_libraries(vms_dbtest PRIVATE vms_persist)
+    add_test(NAME persist_selfcheck COMMAND vms_dbtest)
+else()
+    message(STATUS "Non-Windows: skipping vms_persist (winsqlite3 backend); a "
+                   "system-SQLite backend behind Store is deferred.")
+endif()
+
+# ---------------------------------------------------------------------------
 # Increment 2 — Qt + GStreamer shell (linkage smoke test).
 # Builds only when both Qt6 and a GStreamer dev tree are available.
 # ---------------------------------------------------------------------------
