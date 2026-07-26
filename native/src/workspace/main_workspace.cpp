@@ -32,6 +32,46 @@
 #include <iostream>
 #include <string>
 
+#ifdef VMS_WITH_PERSIST
+#include <QDir>
+#include <QStandardPaths>
+
+#include "persist/Schema.h"
+#include "persist/Store.h"
+#include "persist/WorkspaceRepo.h"
+
+namespace {
+
+// P0-04 inc 5c: restore a stateful instance's saved layout (tile count + per-tile
+// desired-tier + priority overrides) onto its controller. A no-op on first run.
+void restoreInstance(vms::persist::Store& store, const std::string& name,
+                     WorkspaceController& c) {
+    vms::persist::WorkspaceRepo repo(store);
+    vms::persist::InstanceState st;
+    bool found = false;
+    if (repo.load(name, st, found) && found && st.tileCount > 0) {
+        c.setTileCount(st.tileCount);
+        for (const auto& t : st.tiles) {
+            c.setDesiredTier(t.id, t.desiredTier);
+            c.setPriority(t.id, t.priority);
+        }
+    }
+}
+
+// Save an instance's current layout so the next launch restores it.
+void saveInstance(vms::persist::Store& store, const std::string& name,
+                  const WorkspaceController& c) {
+    vms::persist::WorkspaceRepo repo(store);
+    vms::persist::InstanceState st;
+    st.tileCount = c.tileCount();
+    for (int i = 0; i < c.tileCount(); ++i)
+        st.tiles.push_back({i, c.desiredTierOf(i), c.priorityOf(i)});
+    repo.save(name, st);
+}
+
+} // namespace
+#endif // VMS_WITH_PERSIST
+
 #ifdef VMS_WITH_GSTREAMER
 #include <gst/gst.h>
 
@@ -357,6 +397,16 @@ bool WorkspaceController::autoSweeping() const {
     return timer_.isActive();
 }
 
+int WorkspaceController::desiredTierOf(int id) const {
+    if (id < 0 || id >= static_cast<int>(requests_.size())) return 3;
+    return static_cast<int>(requests_[id].desired);
+}
+
+int WorkspaceController::priorityOf(int id) const {
+    if (id < 0 || id >= static_cast<int>(requests_.size())) return 2;
+    return static_cast<int>(requests_[id].priority);
+}
+
 std::vector<vms::Tier> WorkspaceController::currentTiers() const {
     const int n = static_cast<int>(requests_.size());
     std::vector<vms::Tier> tier(n, vms::Tier::Paused);
@@ -494,6 +544,8 @@ int main(int argc, char* argv[]) {
     int sweepIntervalSec = 4;
     bool selftest = false;
     bool video = false;
+    bool noPersist = false;
+    std::string dbPathArg;
 #ifdef VMS_WITH_GSTREAMER
     std::string profileName = "auto";   // seed from the live hardware probe
 #else
@@ -506,6 +558,10 @@ int main(int argc, char* argv[]) {
             selftest = true;
         } else if (a == "--video") {
             video = true;
+        } else if (a == "--no-persist") {
+            noPersist = true;
+        } else if (a == "--db" && i + 1 < argc) {
+            dbPathArg = argv[++i];
         } else if (a == "--count" && i + 1 < argc) {
             count = std::atoi(argv[++i]);
         } else if (a == "--sweep-interval" && i + 1 < argc) {
@@ -578,6 +634,38 @@ int main(int argc, char* argv[]) {
     // that source is the Phase-4 recording backend).
     WorkspaceController liveController(profile, count);
     WorkspaceController playbackController(profile, count);
+
+#ifdef VMS_WITH_PERSIST
+    // P0-04 inc 5c: open the standalone store, migrate to the canonical schema,
+    // and restore each instance's saved layout BEFORE the QML/video are built so
+    // they come up exactly as the operator left them. Persistence failures are
+    // non-fatal — the app runs, just without remembering state.
+    vms::persist::Store store;
+    bool persisting = false;
+    if (!noPersist) {
+        std::string dbPath = dbPathArg;
+        if (dbPath.empty()) {
+            const QString dir = QStandardPaths::writableLocation(
+                QStandardPaths::AppDataLocation);
+            QDir().mkpath(dir);
+            dbPath = (dir + "/workspace.sqlite").toStdString();
+        }
+        vms::persist::Error e = store.open(dbPath);
+        if (e) e = store.migrate(vms::persist::coreMigrations());
+        if (!e) {
+            std::cerr << "persist: " << vms::persist::StatusName(e.status) << ": "
+                      << e.message << " — continuing without persistence"
+                      << std::endl;
+            store.close();
+        } else {
+            persisting = true;
+            restoreInstance(store, "live", liveController);
+            restoreInstance(store, "playback", playbackController);
+            std::cout << "persist: " << dbPath << " (schema v"
+                      << store.schemaVersion() << ")" << std::endl;
+        }
+    }
+#endif
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("liveCtrl"),
@@ -668,6 +756,17 @@ int main(int argc, char* argv[]) {
         });
     }
 #endif // VMS_WITH_GSTREAMER
+
+#ifdef VMS_WITH_PERSIST
+    // Save both instances' layouts on exit so the next launch restores them.
+    if (persisting) {
+        QObject::connect(&app, &QGuiApplication::aboutToQuit,
+                         [&store, &liveController, &playbackController]() {
+            saveInstance(store, "live", liveController);
+            saveInstance(store, "playback", playbackController);
+        });
+    }
+#endif
 
     // The Live instance runs the automatic focus sweep; in --video the planChanged
     // connection above makes the picture follow it. A tile click stops the timer

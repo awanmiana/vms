@@ -1,0 +1,72 @@
+#include "persist/Schema.h"
+
+namespace vms::persist {
+
+std::vector<Migration> coreMigrations() {
+    return {
+        // v1 — core inventory: devices, their credential reference (secret is the
+        // DPAPI gate, not here), cameras, and camera groups.
+        {1, "core_inventory",
+         "CREATE TABLE devices ("
+         "  id TEXT PRIMARY KEY,"
+         "  name TEXT NOT NULL,"
+         "  address TEXT,"
+         "  vendor TEXT,"
+         "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
+         "CREATE TABLE device_credentials ("
+         "  device_id TEXT PRIMARY KEY,"
+         "  credential_ref TEXT NOT NULL,"       // opaque handle; secret via DPAPI later
+         "  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE);"
+         "CREATE TABLE cameras ("
+         "  id TEXT PRIMARY KEY,"
+         "  device_id TEXT NOT NULL,"
+         "  name TEXT NOT NULL,"
+         "  main_url TEXT,"
+         "  sub_url TEXT,"
+         "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+         "  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE);"
+         "CREATE TABLE camera_groups ("
+         "  id TEXT PRIMARY KEY,"
+         "  name TEXT NOT NULL);"
+         "CREATE TABLE camera_group_members ("
+         "  group_id TEXT NOT NULL,"
+         "  camera_id TEXT NOT NULL,"
+         "  PRIMARY KEY(group_id, camera_id),"
+         "  FOREIGN KEY(group_id) REFERENCES camera_groups(id) ON DELETE CASCADE,"
+         "  FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE);"},
+
+        // v2 — operator settings (key/value) and per-camera stream profiles.
+        {2, "operator_settings_and_profiles",
+         "CREATE TABLE operator_settings ("
+         "  key TEXT PRIMARY KEY,"
+         "  value TEXT NOT NULL,"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
+         "CREATE TABLE stream_profiles ("
+         "  camera_id TEXT NOT NULL,"
+         "  tier TEXT NOT NULL,"                 // main / sub / thumb
+         "  width INTEGER, height INTEGER, codec TEXT,"
+         "  PRIMARY KEY(camera_id, tier),"
+         "  FOREIGN KEY(camera_id) REFERENCES cameras(id) ON DELETE CASCADE);"},
+
+        // v3 — workspace layout state: the tile count and per-tile operator
+        // overrides (desired tier + priority) for each stateful instance
+        // (Live / Playback). This is what 5c persists across a restart.
+        {3, "workspace_layout",
+         "CREATE TABLE workspace_instance ("
+         "  name TEXT PRIMARY KEY,"              // 'live' | 'playback'
+         "  tile_count INTEGER NOT NULL,"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
+         "CREATE TABLE workspace_tile ("
+         "  instance TEXT NOT NULL,"
+         "  tile_id INTEGER NOT NULL,"
+         "  desired_tier INTEGER NOT NULL,"      // vms::Tier value (3=Main..0=Off)
+         "  priority INTEGER NOT NULL,"          // vms::Priority value
+         "  PRIMARY KEY(instance, tile_id),"
+         "  FOREIGN KEY(instance) REFERENCES workspace_instance(name) "
+         "    ON DELETE CASCADE);"},
+    };
+}
+
+} // namespace vms::persist

@@ -98,6 +98,13 @@ public:
     // the picture matches the chrome.
     std::vector<vms::Tier> currentTiers() const;
 
+    // Persistence accessors (P0-04 inc 5c): the operator's per-tile overrides, so
+    // the layout can be saved and restored across a restart. Tier/priority are
+    // returned as their enum int values.
+    int tileCount() const { return static_cast<int>(requests_.size()); }
+    int desiredTierOf(int id) const;
+    int priorityOf(int id) const;
+
 signals:
     void changed();
     // Emitted whenever the plan is (re)built — a sweep, a click, or startup. In

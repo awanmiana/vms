@@ -58,7 +58,11 @@ add_test(NAME governor_selfcheck COMMAND vms_govtest)
 # backend would slot in behind the same Store interface (deferred).
 # ---------------------------------------------------------------------------
 if(WIN32)
-    add_library(vms_persist STATIC src/persist/Store.cpp)
+    add_library(vms_persist STATIC
+        src/persist/Store.cpp
+        src/persist/Schema.cpp
+        src/persist/WorkspaceRepo.cpp
+    )
     target_include_directories(vms_persist PUBLIC src)
     # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
     # winsqlite3.lib from the Windows SDK). No download, no vendoring.
@@ -168,6 +172,9 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
     if(WIN32)
         # dxgi/d3d11/dxguid: the HardwareProbe used by --profile auto.
         target_link_libraries(vms_workspace PRIVATE dxgi d3d11 dxguid)
+        # P0-04 inc 5c: persist and restore the workspace layout (embedded SQLite).
+        target_link_libraries(vms_workspace PRIVATE vms_persist)
+        target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
         target_compile_definitions(vms_workspace PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         # Keep the console subsystem so --selftest output is visible.

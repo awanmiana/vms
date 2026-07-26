@@ -1,9 +1,11 @@
-// P0-04 persistence self-check (native increment 5a). Exercises the store's
-// acceptance criteria (proposal §8) with no Qt, no display, no camera:
-// durability across reopen, idempotent forward migrations, atomic rollback, and
-// a backup/restore round-trip. Registered with CTest as `persist_selfcheck`.
+// P0-04 persistence self-check (native increments 5a–5c). No Qt, no display, no
+// camera. Exercises the canonical schema, durability across reopen, idempotent
+// forward migrations, atomic rollback, the workspace layout round-trip (5c), and
+// a backup/export round-trip. Registered with CTest as `persist_selfcheck`.
 
+#include "persist/Schema.h"
 #include "persist/Store.h"
+#include "persist/WorkspaceRepo.h"
 
 #include <filesystem>
 #include <iostream>
@@ -17,37 +19,15 @@ namespace {
 int failures = 0;
 
 void check(bool cond, const std::string& what) {
-    if (cond) {
-        std::cout << "  ok  " << what << "\n";
-    } else {
-        std::cout << "  FAIL " << what << "\n";
-        ++failures;
-    }
-}
-
-// A minimal slice of the reference schema: enough to prove the store works.
-std::vector<Migration> migrations() {
-    return {
-        {1, "core_devices_cameras",
-         "CREATE TABLE devices ("
-         "  id TEXT PRIMARY KEY, name TEXT NOT NULL,"
-         "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
-         "CREATE TABLE cameras ("
-         "  id TEXT PRIMARY KEY, device_id TEXT NOT NULL,"
-         "  name TEXT NOT NULL,"
-         "  FOREIGN KEY(device_id) REFERENCES devices(id));"},
-        {2, "camera_desired_tier",
-         "ALTER TABLE cameras ADD COLUMN desired_tier TEXT NOT NULL "
-         "DEFAULT 'main';"},
-    };
+    std::cout << (cond ? "  ok  " : "  FAIL ") << what << "\n";
+    if (!cond) ++failures;
 }
 
 std::string tmpPath(const std::string& name) {
     return (std::filesystem::temp_directory_path() / name).string();
 }
 
-std::int64_t countRows(Store& s, const std::string& sql) {
+std::int64_t count(Store& s, const std::string& sql) {
     Result r;
     if (!s.query(sql, {}, r) || r.rows.empty()) return -1;
     return std::get<std::int64_t>(r.rows[0][0]);
@@ -65,57 +45,56 @@ int main() {
                                  bakFile})
         std::filesystem::remove(f, ec);
 
-    // 1) Open + migrate.
+    // 1) Open + migrate the canonical schema.
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "open database file");
-        check(static_cast<bool>(s.migrate(migrations())), "apply migrations");
-        check(s.schemaVersion() == 2, "schema at version 2");
+        check(static_cast<bool>(s.migrate(coreMigrations())),
+              "apply canonical migrations");
+        check(s.schemaVersion() == 3, "schema at version 3");
 
-        // 2) Insert a device + camera (declared tables, positional binds).
+        // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
-                  "INSERT INTO devices(id, name) VALUES(?, ?);",
-                  {std::string("dev-1"), std::string("Front NVR")})),
+                  "INSERT INTO devices(id, name, address, vendor) "
+                  "VALUES(?, ?, ?, ?);",
+                  {std::string("dev-1"), std::string("Front NVR"),
+                   std::string("192.168.0.254"), std::string("Hikvision")})),
               "insert device");
         check(static_cast<bool>(s.exec(
-                  "INSERT INTO cameras(id, device_id, name, desired_tier) "
-                  "VALUES(?, ?, ?, ?);",
+                  "INSERT INTO device_credentials(device_id, credential_ref) "
+                  "VALUES(?, ?);",
+                  {std::string("dev-1"), std::string("cred://dev-1")})),
+              "insert credential ref");
+        check(static_cast<bool>(s.exec(
+                  "INSERT INTO cameras(id, device_id, name, main_url, sub_url) "
+                  "VALUES(?, ?, ?, ?, ?);",
                   {std::string("cam-1"), std::string("dev-1"),
-                   std::string("Lobby"), std::string("sub")})),
+                   std::string("Lobby"), std::string("rtsp://.../101"),
+                   std::string("rtsp://.../102")})),
               "insert camera");
 
-        // Constraint: the FK must reject an orphan camera.
         Error orphan = s.exec(
             "INSERT INTO cameras(id, device_id, name) VALUES(?, ?, ?);",
-            {std::string("cam-x"), std::string("missing"),
-             std::string("Orphan")});
+            {std::string("cam-x"), std::string("missing"), std::string("Orphan")});
         check(orphan.status == Status::Constraint,
               "foreign-key constraint rejects an orphan camera");
     }
 
-    // 3) Durability: reopen and read the data back.
+    // 3) Durability + idempotency + atomicity on reopen.
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 2, "schema still at version 2 after reopen");
-        check(countRows(s, "SELECT COUNT(*) FROM devices;") == 1,
+        check(s.schemaVersion() == 3, "schema still at version 3 after reopen");
+        check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
-        Result r;
-        s.query("SELECT name, desired_tier FROM cameras WHERE id=?;",
-                {std::string("cam-1")}, r);
-        check(r.rows.size() == 1 &&
-                  std::get<std::string>(r.rows[0][0]) == "Lobby" &&
-                  std::get<std::string>(r.rows[0][1]) == "sub",
-              "camera row persisted with its values");
+        check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
+              "camera persisted across reopen");
 
-        // 4) Migration idempotency: re-running applies nothing, stays valid.
-        check(static_cast<bool>(s.migrate(migrations())),
+        check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(s.schemaVersion() == 2, "schema unchanged after re-migrate");
-        check(countRows(s, "SELECT COUNT(*) FROM schema_migrations;") == 2,
-              "exactly two migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 3,
+              "exactly three migrations recorded (not duplicated)");
 
-        // 5) Atomicity: a rolled-back transaction leaves no trace.
         {
             Store::Tx tx(s);
             check(static_cast<bool>(tx.begin()), "begin transaction");
@@ -123,19 +102,61 @@ int main() {
                       "INSERT INTO devices(id, name) VALUES(?, ?);",
                       {std::string("dev-tmp"), std::string("Temp")})),
                   "insert inside transaction");
-            // tx goes out of scope WITHOUT commit -> rollback.
+            // no commit -> RAII rollback
         }
-        check(countRows(s, "SELECT COUNT(*) FROM devices;") == 1,
+        check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "rolled-back insert left no row (atomic)");
 
-        // 6) Backup round-trip.
-        check(static_cast<bool>(s.backupTo(bakFile)), "backup to file");
+        // 4) Workspace layout round-trip (5c).
+        WorkspaceRepo repo(s);
+        InstanceState in;
+        in.tileCount = 9;
+        in.tiles = {TilePref{0, 3, 3}, TilePref{5, 1, 2}};  // tile0 Main/High, tile5 Thumb/Med
+        check(static_cast<bool>(repo.save("live", in)), "save workspace layout");
+    }
+    {
+        Store s;
+        check(static_cast<bool>(s.open(dbFile)), "reopen for layout restore");
+        WorkspaceRepo repo(s);
+        InstanceState out;
+        bool found = false;
+        check(static_cast<bool>(repo.load("live", out, found)) && found,
+              "load saved workspace layout");
+        check(out.tileCount == 9, "restored tile count");
+        check(out.tiles.size() == 2 && out.tiles[0].id == 0 &&
+                  out.tiles[0].desiredTier == 3 && out.tiles[0].priority == 3 &&
+                  out.tiles[1].id == 5 && out.tiles[1].desiredTier == 1,
+              "restored per-tile overrides");
+
+        // save again (atomic replace) — still one instance row, new tiles.
+        InstanceState in2;
+        in2.tileCount = 4;
+        in2.tiles = {TilePref{1, 2, 2}};
+        check(static_cast<bool>(repo.save("live", in2)),
+              "re-save layout (atomic replace)");
+        check(count(s, "SELECT COUNT(*) FROM workspace_instance;") == 1,
+              "one instance row after re-save (no duplicate)");
+        check(count(s, "SELECT COUNT(*) FROM workspace_tile "
+                       "WHERE instance='live';") == 1,
+              "old tiles replaced, not appended");
+
+        // 5) A first-run instance loads as not-found (not an error).
+        InstanceState pb;
+        bool pbFound = true;
+        check(static_cast<bool>(repo.load("playback", pb, pbFound)) && !pbFound,
+              "unsaved instance loads as not-found");
+
+        // 6) Backup / export round-trip.
+        check(static_cast<bool>(s.backupTo(bakFile)), "backup/export to file");
     }
     {
         Store b;
-        check(static_cast<bool>(b.open(bakFile)), "open the backup");
-        check(countRows(b, "SELECT COUNT(*) FROM cameras;") == 1,
-              "backup contains the camera row");
+        check(static_cast<bool>(b.open(bakFile)), "open the exported snapshot");
+        check(count(b, "SELECT COUNT(*) FROM cameras;") == 1,
+              "export contains the camera row");
+        check(count(b, "SELECT tile_count FROM workspace_instance "
+                       "WHERE name='live';") == 4,
+              "export contains the latest layout");
     }
 
     for (const std::string& f : {dbFile, dbFile + "-wal", dbFile + "-shm",
@@ -143,8 +164,8 @@ int main() {
         std::filesystem::remove(f, ec);
 
     if (failures == 0) {
-        std::cout << "PASS: persistence store durable, migrated, atomic, and "
-                     "backed up\n";
+        std::cout << "PASS: schema, durability, atomicity, layout round-trip, "
+                     "and export all verified\n";
         return 0;
     }
     std::cout << "FAILED: " << failures << " check(s)\n";
