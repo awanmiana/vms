@@ -91,6 +91,67 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# P3-14 slice 1 — Qt Quick workspace: the governor's honest per-tile state,
+# rendered. Depends only on Qt Quick + the pure vms_governor library (no
+# GStreamer, no D3D), so it builds wherever Qt6 Quick is present and is
+# verifiable headless via --selftest. Live video under the state chrome is a
+# later slice.
+# ---------------------------------------------------------------------------
+find_package(Qt6 COMPONENTS Core Gui Qml Quick QUIET)
+
+if(Qt6_FOUND AND TARGET Qt6::Quick)
+    message(STATUS "Building vms_workspace with Qt6 Quick ${Qt6_VERSION}")
+
+    add_executable(vms_workspace
+        src/workspace/main_workspace.cpp
+        src/workspace/WorkspaceController.h
+        src/workspace/VideoItem.cpp
+        src/workspace/VideoItem.h
+        src/workspace/GridPipeline.cpp
+        src/workspace/GridPipeline.h
+        src/workspace/workspace.qrc
+    )
+    # --profile auto seeds the governor from the live hardware probe (Windows
+    # D3D11/DXGI); the probe source is compiled in on Windows.
+    if(WIN32)
+        target_sources(vms_workspace PRIVATE src/hardware/HardwareProbe.cpp)
+    endif()
+    set_target_properties(vms_workspace PROPERTIES
+        AUTOMOC ON
+        AUTORCC ON)
+    target_include_directories(vms_workspace PRIVATE src)
+    target_link_libraries(vms_workspace PRIVATE
+        vms_governor
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick
+    )
+    # Slice 2: live video under the chrome, via a GStreamer appsink. Compiled in
+    # only when the GStreamer dev tree is present; without it the pure-Qt slice-1
+    # workspace still builds and --video reports it is unavailable.
+    if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
+        message(STATUS "vms_workspace: GStreamer found, enabling --video (slice 2)")
+        target_include_directories(vms_workspace PRIVATE
+            "${GSTREAMER_ROOT}/include/gstreamer-1.0"
+            "${GSTREAMER_ROOT}/include/glib-2.0"
+            "${GSTREAMER_ROOT}/lib/glib-2.0/include"
+        )
+        target_link_directories(vms_workspace PRIVATE "${GSTREAMER_ROOT}/lib")
+        target_link_libraries(vms_workspace PRIVATE
+            gstreamer-1.0 gstapp-1.0 gobject-2.0 glib-2.0)
+        target_compile_definitions(vms_workspace PRIVATE VMS_WITH_GSTREAMER)
+    endif()
+    if(WIN32)
+        # dxgi/d3d11/dxguid: the HardwareProbe used by --profile auto.
+        target_link_libraries(vms_workspace PRIVATE dxgi d3d11 dxguid)
+        target_compile_definitions(vms_workspace PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+        # Keep the console subsystem so --selftest output is visible.
+        set_target_properties(vms_workspace PROPERTIES WIN32_EXECUTABLE OFF)
+    endif()
+else()
+    message(STATUS "Qt6 Quick not found; skipping vms_workspace (P3-14 slice 1).")
+endif()
+
+# ---------------------------------------------------------------------------
 # Increment 3 — RTSP decode + render spike (GStreamer only; no Qt).
 # d3d11videosink creates its own window, so this needs no UI toolkit.
 # ---------------------------------------------------------------------------

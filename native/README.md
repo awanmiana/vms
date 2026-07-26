@@ -7,7 +7,7 @@ specification, not the product runtime.
 > ⚠️ Native C++ is authored here but compiled/run on your hardware. If a build surfaces
 > compiler/linker errors, paste them and they get fixed.
 
-## Current status (2026-07-24)
+## Current status (2026-07-26)
 
 Foundation validated. Increments 1–3 build and run; self-contained packaging is proven. Increment
 4a (`vms_grid`) is verified on a live camera and its camera-free `--test-pattern` fan-out measured
@@ -30,9 +30,32 @@ ramp (see `MEASUREMENTS.md`): ceilings ~70 main / ~249 sub, decode-throughput-bo
 bound — the old 10.5 GB "wall" was a pre-fix NVDEC artifact), so the decode budget rose 15→64 and
 `--govern --profile auto` now keeps 25 of 64 tiles at full main resolution instead of 1. The
 **honest per-tile state model** (live / degraded / paused-offscreen / paused-capacity) is built and
-shown live (`tile 0 [main/live]`, `tile 5 [thumb/degraded]`); its *visual* rendering is the P3-14
-Qt/QML gate. **Next up: the P3-14 visual state UI, a seamless (non-reloading) live apply, and (blocked
-on hardware) live-camera RTSP confirmation and low-end i5 calibration.**
+shown live (`tile 0 [main/live]`, `tile 5 [thumb/degraded]`). Its *visual* rendering — the **P3-14
+Qt/QML gate, slice 1** — is now **built and verified on the dev box**: `vms_workspace` is a Qt Quick
+window that binds the real `GovernorSession` to a grid whose per-tile border + status strip carry the
+honest state (green live / amber degraded / red capacity-paused / slate off-screen), with an aggregate
+capacity meter and an over-capacity warning; a focus sweep re-plans live. This realizes P3-03
+acceptance #5 (a non-live tile is never shown as if it were live) on screen and not only in a log.
+It depends only on Qt Quick + the pure `vms_governor` library, so it verifies headlessly via
+`--selftest` and windowed. **Slice 2a is now built and verified too:** the gst→Qt Quick video path
+(`--video`) — a GStreamer `appsink` pulls finished RGBA frames and a `VideoItem` (`QQuickItem`)
+uploads each to a scene-graph texture, so the honest state chrome draws *over live video*. `qml6glsink`
+is absent from the MSVC GStreamer binaries, so this `appsink`→`QSGTexture` route is the deliberate,
+interop-free bridge. **Slice 2b-1 is now built and verified too:** `GridPipeline` makes the governed
+d3d11-composited grid the real video source (per-tile hardware decode → `d3d11compositor` →
+`d3d11download` → `appsink` → `VideoItem`), built from the governor's initial plan, chrome aligned
+cell-for-cell, paused tiles composited black. Verified on the dev box: 16 tiles decode real H.265
+(`d3d12h265dec`, hardware) under the honest chrome (lowend plan: 1 main/live + 1 sub/degraded + 14
+thumb/degraded, aligned). **Slice 2b-2 is now built and verified too:** a focus sweep re-plans BOTH
+layers in lock-step — the controller re-plans the chrome and `GridPipeline::applyPlan` reconfigures the
+live video to the same tiers (whole-graph NULL→rebuild-fronts→PLAYING; sweepable grids pre-encode every
+tier; a no-op when nothing changed). Verified with `--video --sweep-interval 3`: the MAIN/focused tile
+moves across the grid in step with the chrome, `d3d12h265dec`, no re-plan errors. **Slice 2b-3 is now
+built and verified too:** `--profile auto` (now the default) seeds the governor from the live hardware
+probe exactly as `vms_grid` does — on the dev box it reports `auto h265 (High, hardware decode, NVIDIA
+GeForce RTX 3050)` and plans 25 main + 39 sub of 64, matching `vms_grid`. **This completes the P3-14
+slice-2 group (video under the honest chrome). Next up: a seamless (non-reloading) live apply, and
+(blocked on hardware) live-camera RTSP confirmation and low-end i5 calibration.**
 
 | # | Component | Status |
 | :- | :- | :- |
@@ -41,7 +64,12 @@ on hardware) live-camera RTSP confirmation and low-end i5 calibration.**
 | 3 | `vms_spike` — RTSP → HW decode → D3D11 render + stats | ✅ verified (live camera) |
 | — | Self-contained packaging (bundle Qt+GStreamer; user installs nothing) | ✅ proven (ran with cleaned PATH) |
 | 4a | `vms_grid` — N streams → per-tile HW decode → `d3d11compositor` → one window; per-tile fps + composited rendered/dropped + process CPU/RAM; camera-free `--test-pattern` fan-out | ✅ verified on live camera (4-tile); fan-out ramp + low-end run pending |
-| 4b | Decode governor — `vms_governor` decision core + stateful session, `vms_govtest`/CTest, and `vms_grid --govern` integration | 🟡 in progress; policy core passes at MSVC `/W4`; add/remove/focus re-planning and low/high-water hysteresis pass; **auto-probed decode integration verified on hardware: 64 requested main tiles become 1 main + 47 sub + 16 thumb and the corrected I420 path runs at 3.77 GB (`d3d12h265dec`) instead of crashing at 10.5 GB.** Changing plans are now **applied to live branches** via `vms_grid --sweep` (whole-grid NULL→rebuild on each plan change; seamless per-tile hot-swap deferred — it does not survive the D3D12 decoder + reused compositor pad). The governor's tiers also **select real RTSP main/sub streams** (`--govern --camera "main;sub"`; plumbing verified locally, live-camera decode pending). The cost model was **recalibrated** to the corrected I420 `d3d12h265dec` ramp (budget 15→64, sub cost 0.238→0.28, VRAM-tiered auto seed; auto now plans 25 main + 39 sub of 64, CTest green). The **honest per-tile state model** (live/degraded/paused-offscreen/paused-capacity) is built, unit-tested, and shown live. P3-03 scope approved 2026-07-24. Remaining: P3-14 visual state UI, seamless apply, and (hardware-blocked) live-camera RTSP confirmation + low-end i5 calibration |
+| 4b | Decode governor — `vms_governor` decision core + stateful session, `vms_govtest`/CTest, and `vms_grid --govern` integration | 🟡 in progress; policy core passes at MSVC `/W4`; add/remove/focus re-planning and low/high-water hysteresis pass; **auto-probed decode integration verified on hardware: 64 requested main tiles become 1 main + 47 sub + 16 thumb and the corrected I420 path runs at 3.77 GB (`d3d12h265dec`) instead of crashing at 10.5 GB.** Changing plans are now **applied to live branches** via `vms_grid --sweep` (whole-grid NULL→rebuild on each plan change; seamless per-tile hot-swap deferred — it does not survive the D3D12 decoder + reused compositor pad). The governor's tiers also **select real RTSP main/sub streams** (`--govern --camera "main;sub"`; plumbing verified locally, live-camera decode pending). The cost model was **recalibrated** to the corrected I420 `d3d12h265dec` ramp (budget 15→64, sub cost 0.238→0.28, VRAM-tiered auto seed; auto now plans 25 main + 39 sub of 64, CTest green). The **honest per-tile state model** (live/degraded/paused-offscreen/paused-capacity) is built, unit-tested, and shown live. P3-03 scope approved 2026-07-24. Remaining: P3-14 slice 2 (live video under the state chrome + auto profile seed), seamless apply, and (hardware-blocked) live-camera RTSP confirmation + low-end i5 calibration |
+| P3-14 s1 | `vms_workspace` — Qt Quick window rendering the governor's honest per-tile state (border + status strip: green live / amber degraded / red capacity-paused / slate off-screen) + aggregate capacity meter + over-capacity warning; live focus-sweep re-plan; binds real `GovernorSession`; no media pipeline yet | ✅ built & verified (dev box): builds at Qt6 Quick 6.11.1, `--selftest` green (devbox 64→55 main + 9 sub degraded; lowend re-plan release-before-acquire), window renders all four states distinctly (see run section). Realizes P3-03 acceptance #5 on screen |
+| P3-14 s2a | gst→Qt Quick video path: `VideoItem` (`QQuickItem`) + a GStreamer `appsink` (`--video`); frames go `appsink → QImage → QSGTexture`, chrome drawn over live video. `qml6glsink` is absent from the MSVC binaries, so this interop-free route is the chosen bridge | ✅ built & verified (dev box): `videotestsrc` SMPTE renders full-window behind the translucent governed tiles; default (non-video) path unchanged. Source is a synthetic test pattern — governed d3d11 grid is s2b |
+| P3-14 s2b-1 | The governed d3d11-composited grid IS the video source (`GridPipeline`): per-tile hardware decode → `d3d11compositor` → `d3d11download` → `appsink` → `VideoItem`, built from the governor's initial plan; chrome aligned cell-for-cell (equal fractions, zero-gap); paused tiles composited black (never a stale frame) | ✅ built & verified (dev box): 16 tiles decode real H.265 (`decoders: d3d12h265dec`, hardware) under the honest chrome — lowend plan shows 1 main/live + 1 sub/degraded + 14 thumb/degraded, aligned. Note: the binary now links GStreamer, so its DLLs must be on PATH even for `--selftest` |
+| P3-14 s2b-2 | Live re-plan on a focus sweep: one timer drives BOTH layers — the controller re-plans the chrome and `GridPipeline::applyPlan` reconfigures the live video to the same tiers (whole-graph NULL→rebuild-fronts→PLAYING, the reliable path; sweepable grids pre-encode every tier). No-op when nothing changed (no flicker at steady load) | ✅ built & verified (dev box): with `--video --sweep-interval 3` the MAIN/focused tile moves 0→1→2… in lock-step across chrome and picture (captured), console logs each `sweep -- focus -> tile N; K transition(s)`, `d3d12h265dec`, no re-plan errors |
+| P3-14 s2b-3 | `--profile auto` (now the default): seed the governor from the live hardware probe — D3D per-codec capability + a registered GStreamer hardware decoder — exactly as `vms_grid` | ✅ built & verified (dev box): reports `auto h265 (High, hardware decode, NVIDIA GeForce RTX 3050)`, plans 25 main + 39 sub of 64 (matches `vms_grid`). Completes the P3-14 slice-2 group |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.
@@ -132,6 +160,36 @@ $env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer
 .\build\vms_grid.exe --govern --camera "rtsp://u:p%40host:554/Streaming/Channels/101;rtsp://u:p%40host:554/Streaming/Channels/102" --count 9 --seconds 30
 # Add --sweep to also re-plan (which stream each tile opens) as focus moves.
 # --count replicates one camera; or pass several distinct --camera entries.
+
+# P3-14 s1) Honest per-tile state, RENDERED (Qt Quick; needs Qt on PATH; NO
+#   GStreamer/camera). A governed grid where each tile's border + status strip
+#   show its real state; a focus sweep re-plans every --sweep-interval seconds.
+$env:PATH = "C:\Qt\6.11.1\msvc2022_64\bin;$env:PATH"
+$env:QT_PLUGIN_PATH = "C:\Qt\6.11.1\msvc2022_64\plugins"
+.\build\vms_workspace.exe --count 25 --profile lowend --sweep-interval 4
+# --profile devbox|lowend selects a named calibration profile (MEASUREMENTS.md).
+# lowend at a high --count shows the honest mix: 1 main/live, the rest thumb/
+# degraded, the overflow capacity-paused, plus an "over capacity" header warning.
+# Headless build/logic check (no window, no display, no camera):
+.\build\vms_workspace.exe --selftest --count 64 --profile devbox
+
+# P3-14 s2b) Live GOVERNED VIDEO under the honest chrome (Qt + GStreamer on
+#   PATH). The governed d3d11-composited grid is the video source: each tile is
+#   a real per-tier hardware decode (main 1080p / sub 640x480 / thumb 320x240),
+#   composited -> d3d11download -> appsink -> a scene-graph texture, with the
+#   state chrome aligned cell-for-cell on top. Paused tiles are composited black.
+$env:PATH = "C:\Qt\6.11.1\msvc2022_64\bin;C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:PATH"
+$env:QT_PLUGIN_PATH = "C:\Qt\6.11.1\msvc2022_64\plugins"
+$env:GST_PLUGIN_PATH = "C:\Program Files\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0"
+.\build\vms_workspace.exe --video --count 16 --profile lowend --sweep-interval 3
+# Omitting --profile uses auto (the DEFAULT): the governor is seeded from the
+# live hardware probe (this dev box -> RTX 3050 hardware H.265, plans 25 main +
+# 39 sub of 64). devbox/lowend remain explicit calibration overrides: devbox
+# keeps all tiles at main/live; lowend shows the honest mix (main + sub + thumb,
+# all decoding real video) under the chrome. Every --sweep-interval seconds the
+# focus advances and BOTH the chrome and the live video re-plan to the new tiers
+# in lock-step (the MAIN tile moves across the grid). Large interval = static.
+# NOTE: the binary now links GStreamer, so even --selftest needs the DLLs on PATH.
 ```
 
 Verified result on the dev box (RTX 3050): hardware `d3d12h265dec`, ~25 fps, ~0 dropped frames.
