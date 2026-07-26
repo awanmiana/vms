@@ -20,6 +20,10 @@ Window {
     title: "VMS Native — Workspace (P3-14 · honest per-tile state)"
     color: "#0e1014"
 
+    // Workspace UI state (P3-14 layered panels).
+    property bool showBrowser: true
+    property string cameraSearch: ""
+
     function stateColor(s) {
         switch (s) {
         case "live":             return "#37c871";
@@ -30,16 +34,96 @@ Window {
         return "#8a93a3";
     }
 
+    // Filter the tile model for the resource browser by "cam N", tier, or state.
+    function filterTiles(tiles, q) {
+        if (!q || q.length === 0) return tiles;
+        var ql = q.toLowerCase();
+        var out = [];
+        for (var i = 0; i < tiles.length; i++) {
+            var t = tiles[i];
+            if (("cam " + t.id).toLowerCase().indexOf(ql) !== -1
+                || String(t.tier).toLowerCase().indexOf(ql) !== -1
+                || String(t.state).toLowerCase().indexOf(ql) !== -1)
+                out.push(t);
+        }
+        return out;
+    }
+
     Column {
         anchors.fill: parent
         spacing: 0
 
-        // --- header / capacity meter ---
+        // --- header / capacity meter + toolbar ---
         Rectangle {
             id: header
             width: parent.width
-            height: 84
+            height: 92
             color: "#141821"
+
+            // Toolbar (top-right): toggle the camera browser and the auto sweep.
+            Row {
+                id: toolbar
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: 20
+                anchors.topMargin: 12
+                spacing: 8
+
+                Text {
+                    text: "layout"
+                    color: "#6f7a86"; font.pixelSize: 11
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Repeater {
+                    model: [4, 9, 16, 25, 64]
+                    delegate: Rectangle {
+                        property bool active: governor.tiles.length === modelData
+                        width: 32; height: 28; radius: 6
+                        color: active ? "#2a3446" : "#1a1f28"
+                        border.color: active ? "#3a6ea5" : "#333c4c"; border.width: 1
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            color: active ? "#e8ecf3" : "#9aa4b4"; font.pixelSize: 12
+                        }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: governor.setTileCount(modelData)
+                        }
+                    }
+                }
+
+                Rectangle { width: 1; height: 24; color: "#2a3240"
+                    anchors.verticalCenter: parent.verticalCenter }
+
+                Rectangle {
+                    width: camBtnText.width + 22; height: 28; radius: 6
+                    color: root.showBrowser ? "#2a3446" : "#1a1f28"
+                    border.color: "#333c4c"; border.width: 1
+                    Text {
+                        id: camBtnText; anchors.centerIn: parent
+                        text: "☰ Cameras"; color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showBrowser = !root.showBrowser
+                    }
+                }
+                Rectangle {
+                    width: autoBtnText.width + 22; height: 28; radius: 6
+                    color: governor.autoSweeping ? "#243a2c" : "#1a1f28"
+                    border.color: "#333c4c"; border.width: 1
+                    Text {
+                        id: autoBtnText; anchors.centerIn: parent
+                        text: governor.autoSweeping ? "⏸ Auto sweep" : "▶ Auto sweep"
+                        color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: governor.setAutoSweep(!governor.autoSweeping)
+                    }
+                }
+            }
 
             Column {
                 anchors.left: parent.left
@@ -68,11 +152,12 @@ Window {
                 }
             }
 
-            // Legend
+            // Legend (bottom-right, under the toolbar)
             Row {
                 anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.bottom: parent.bottom
                 anchors.rightMargin: 20
+                anchors.bottomMargin: 12
                 spacing: 16
 
                 Repeater {
@@ -167,6 +252,20 @@ Window {
                             font.bold: true
                         }
 
+                        // high-priority pin, top-left under the id (persists even
+                        // when this tile is not the focused one)
+                        Text {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.leftMargin: 8
+                            anchors.topMargin: 26
+                            visible: modelData.priority === "high"
+                            text: "★ HIGH"
+                            color: "#f2c94c"
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+
                         // tier + state, centered
                         Column {
                             anchors.centerIn: parent
@@ -195,6 +294,260 @@ Window {
                             height: 5
                             radius: 2
                             color: root.stateColor(modelData.state)
+                        }
+
+                        // Operator picks the working set: click to focus this
+                        // tile. The governor re-plans (and, under --video, the
+                        // live picture follows) so the focused tile is protected
+                        // at Main and the rest degrade around it.
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: governor.focusTile(modelData.id)
+                        }
+                    }
+                }
+            }
+
+            // Layered "selected-camera information" panel, floating over the
+            // grid (P3-14: panels layer over the camera-grid background).
+            Rectangle {
+                id: infoPanel
+                property var sel: (governor.focusIndex >= 0
+                                   && governor.tiles.length > governor.focusIndex)
+                                  ? governor.tiles[governor.focusIndex] : null
+                visible: sel !== null
+                width: 288
+                height: 182
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: 16
+                radius: 10
+                color: Qt.rgba(0.055, 0.063, 0.078, 0.94)
+                border.width: 2
+                border.color: sel ? root.stateColor(sel.state) : "#3a4150"
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 5
+                    Text {
+                        text: infoPanel.sel ? ("Tile #" + infoPanel.sel.id + "  ·  selected")
+                                            : ""
+                        color: "#e8ecf3"; font.pixelSize: 15; font.bold: true
+                    }
+                    Text {
+                        text: infoPanel.sel ? (infoPanel.sel.tier + "  ·  "
+                                               + infoPanel.sel.stateText) : ""
+                        color: infoPanel.sel ? root.stateColor(infoPanel.sel.state)
+                                             : "#9aa4b4"
+                        font.pixelSize: 13
+                    }
+                    // Desired media tier (the first control axis): the quality
+                    // ceiling the governor will not exceed. Off frees this
+                    // camera's budget entirely for the others.
+                    Row {
+                        spacing: 5
+                        Text {
+                            text: "quality"
+                            color: "#9aa4b4"; font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Repeater {
+                            model: [
+                                { label: "Main",  lvl: 3, key: "main" },
+                                { label: "Sub",   lvl: 2, key: "sub" },
+                                { label: "Thumb", lvl: 1, key: "thumb" },
+                                { label: "Off",   lvl: 0, key: "off" }
+                            ]
+                            delegate: Rectangle {
+                                property bool active: infoPanel.sel
+                                    && infoPanel.sel.desired === modelData.key
+                                width: 44; height: 22; radius: 5
+                                color: active ? "#2a4258" : "#1a1f28"
+                                border.color: active ? "#3a6ea5" : "#333c4c"
+                                border.width: 1
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    color: active ? "#e8ecf3" : "#9aa4b4"
+                                    font.pixelSize: 11
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: governor.setDesiredTier(governor.focusIndex,
+                                                                       modelData.lvl)
+                                }
+                            }
+                        }
+                    }
+
+                    // Device-activity priority (the second control axis): sets how
+                    // hard the governor protects this camera's tier under pressure,
+                    // independent of which tile is focused. Persists across sweeps.
+                    Row {
+                        spacing: 6
+                        Text {
+                            text: "priority"
+                            color: "#9aa4b4"; font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Repeater {
+                            model: [
+                                { label: "High", lvl: 3, key: "high" },
+                                { label: "Med",  lvl: 2, key: "medium" },
+                                { label: "Low",  lvl: 1, key: "low" }
+                            ]
+                            delegate: Rectangle {
+                                property bool active: infoPanel.sel
+                                    && infoPanel.sel.priority === modelData.key
+                                width: 44; height: 22; radius: 5
+                                color: active ? "#2f6f4a" : "#1a1f28"
+                                border.color: active ? "#37c871" : "#333c4c"
+                                border.width: 1
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    color: active ? "#e8ecf3" : "#9aa4b4"
+                                    font.pixelSize: 11
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: governor.setPriority(governor.focusIndex,
+                                                                    modelData.lvl)
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "click a tile to focus · set priority to pin importance"
+                        color: "#6b7482"; font.pixelSize: 11
+                    }
+                }
+            }
+
+            // Layered "resource browser": the camera list + search, over the grid
+            // (P3-14). Clicking a row focuses that camera, exactly like clicking
+            // its tile; the focused camera is highlighted. Toggled from the
+            // toolbar's ☰ Cameras button.
+            Rectangle {
+                id: browser
+                visible: root.showBrowser
+                width: 248
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                color: Qt.rgba(0.043, 0.051, 0.063, 0.95)
+                border.color: "#232a36"
+                border.width: 1
+
+                Text {
+                    id: browserTitle
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: 14
+                    text: "Cameras (" + governor.tiles.length + ")"
+                    color: "#e8ecf3"; font.pixelSize: 15; font.bold: true
+                }
+
+                Rectangle {
+                    id: searchBox
+                    anchors.top: browserTitle.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.topMargin: 10
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    height: 32
+                    radius: 6
+                    color: "#11151c"
+                    border.color: searchInput.activeFocus ? "#3a6ea5" : "#2a3240"
+                    border.width: 1
+
+                    TextInput {
+                        id: searchInput
+                        anchors.fill: parent
+                        anchors.leftMargin: 9
+                        anchors.rightMargin: 9
+                        verticalAlignment: TextInput.AlignVCenter
+                        color: "#e8ecf3"; font.pixelSize: 13
+                        clip: true
+                        selectByMouse: true
+                        onTextChanged: root.cameraSearch = text
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: searchInput.text.length === 0
+                            text: "search cameras…"
+                            color: "#5a6270"; font.pixelSize: 13
+                        }
+                    }
+                }
+
+                ListView {
+                    id: camList
+                    anchors.top: searchBox.bottom
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.topMargin: 10
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    anchors.bottomMargin: 8
+                    clip: true
+                    spacing: 4
+                    model: root.filterTiles(governor.tiles, root.cameraSearch)
+
+                    delegate: Rectangle {
+                        width: camList.width
+                        height: 46
+                        radius: 6
+                        color: modelData.focused ? Qt.rgba(0.16, 0.22, 0.33, 0.6)
+                                                 : Qt.rgba(1, 1, 1, 0.03)
+                        border.color: modelData.focused
+                                      ? root.stateColor(modelData.state) : "transparent"
+                        border.width: modelData.focused ? 2 : 0
+
+                        Rectangle {
+                            id: dot
+                            width: 10; height: 10; radius: 5
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: root.stateColor(modelData.state)
+                        }
+                        Column {
+                            anchors.left: dot.right
+                            anchors.leftMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 1
+                            Text {
+                                text: "Cam " + modelData.id
+                                      + (modelData.priority === "high" ? "  ★" : "")
+                                color: modelData.priority === "high" ? "#f2c94c" : "#e8ecf3"
+                                font.pixelSize: 13
+                                font.bold: modelData.focused
+                            }
+                            Text {
+                                text: modelData.tier + " · " + modelData.stateText
+                                color: "#9aa4b4"; font.pixelSize: 11
+                            }
+                        }
+                        Text {
+                            visible: modelData.focused
+                            anchors.right: parent.right
+                            anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "◉"
+                            color: "#e8ecf3"; font.pixelSize: 12
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: governor.focusTile(modelData.id)
                         }
                     }
                 }

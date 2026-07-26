@@ -315,6 +315,14 @@ bool GridPipeline::start(bool sweepable, std::string& error) {
         const std::string f = std::string(g_get_tmp_dir()) +
                               "/vms_workspace_" + std::to_string(w) + "x" +
                               std::to_string(h) + "." + d_->codec;
+        // Reuse a clip already encoded this session (or a prior run): the file
+        // name is deterministic, so a layout change rebuilds instantly instead of
+        // re-encoding.
+        if (g_file_test(f.c_str(), G_FILE_TEST_EXISTS)) {
+            d_->tierFile[static_cast<int>(t)] = f;
+            if (d_->encoderUsed.empty()) d_->encoderUsed = "cached";
+            continue;
+        }
         std::string enc;
         if (!EncodePattern(d_->codec, w, h, 250, f, enc)) {
             error = "failed to encode the " + std::to_string(w) + "x" +

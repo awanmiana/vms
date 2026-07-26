@@ -53,9 +53,30 @@ tier; a no-op when nothing changed). Verified with `--video --sweep-interval 3`:
 moves across the grid in step with the chrome, `d3d12h265dec`, no re-plan errors. **Slice 2b-3 is now
 built and verified too:** `--profile auto` (now the default) seeds the governor from the live hardware
 probe exactly as `vms_grid` does — on the dev box it reports `auto h265 (High, hardware decode, NVIDIA
-GeForce RTX 3050)` and plans 25 main + 39 sub of 64, matching `vms_grid`. **This completes the P3-14
-slice-2 group (video under the honest chrome). Next up: a seamless (non-reloading) live apply, and
-(blocked on hardware) live-camera RTSP confirmation and low-end i5 calibration.**
+GeForce RTX 3050)` and plans 25 main + 39 sub of 64, matching `vms_grid`. This completes the P3-14
+slice-2 group (video under the honest chrome). **Slice 3 adds the first workspace interaction:**
+clicking any tile focuses it (`focusTile`) — the governor protects it at Main and degrades the rest
+around it, a `planChanged` signal makes both the chrome and (under `--video`) the live picture follow,
+and a layered "selected-camera information" panel floats over the grid (id · tier · state · priority);
+a click stops the auto-sweep so the operator holds the working set. **Slice 4 adds the layered resource
+browser and toolbar:** a camera-list panel with a live search filter layers over the grid — each row
+(state dot · `Cam N` · tier·state) click-focuses that camera and the focused one is highlighted — and a
+toolbar toggles the browser and the auto sweep. Pure Qt Quick primitives (no new Qt module); verified
+over the live 16-tile governed video. **Slice 5 adds the second orthogonal control axis:** operator-
+settable device priority — decoupled from focus so it persists across sweeps, set via High/Med/Low
+buttons in the info panel (`setPriority`), with a ★ badge on High cameras; under capacity pressure the
+governor degrades lower-priority cameras first (verified: a non-focused High camera holds Main while a
+Low one is paused). **Slice 6 adds runtime layout control:** toolbar presets (4/9/16/25/64) resize the
+wall live (`setTileCount`) — the working set is rebuilt, the governor re-plans, and under `--video` the
+grid pipeline is rebuilt for the new geometry (cached clips make it instant); fewer tiles let the
+governor upgrade more to Main (verified: 2 main at 4 tiles vs 1 main at 16). **Slice 7 makes the first
+control axis interactive:** operator-set desired media tier (Main/Sub/Thumb/Off in the info panel,
+`setDesiredTier`) — the governor never exceeds the ceiling, so capping a camera or turning it Off frees
+budget for the others (verified: a Thumb cap holds at thumb, Off pauses, even with budget to spare).
+Both orthogonal axes from ARCHITECTURE.md (media tier + device priority) are now operator-controllable.
+**Next up: the two independently-stateful Live/Playback instances (Playback timeline/transport is
+Phase-4-recording-dependent) and a seamless (non-reloading) live apply; (blocked on hardware)
+live-camera RTSP confirmation and low-end i5 calibration.**
 
 | # | Component | Status |
 | :- | :- | :- |
@@ -70,6 +91,11 @@ slice-2 group (video under the honest chrome). Next up: a seamless (non-reloadin
 | P3-14 s2b-1 | The governed d3d11-composited grid IS the video source (`GridPipeline`): per-tile hardware decode → `d3d11compositor` → `d3d11download` → `appsink` → `VideoItem`, built from the governor's initial plan; chrome aligned cell-for-cell (equal fractions, zero-gap); paused tiles composited black (never a stale frame) | ✅ built & verified (dev box): 16 tiles decode real H.265 (`decoders: d3d12h265dec`, hardware) under the honest chrome — lowend plan shows 1 main/live + 1 sub/degraded + 14 thumb/degraded, aligned. Note: the binary now links GStreamer, so its DLLs must be on PATH even for `--selftest` |
 | P3-14 s2b-2 | Live re-plan on a focus sweep: one timer drives BOTH layers — the controller re-plans the chrome and `GridPipeline::applyPlan` reconfigures the live video to the same tiers (whole-graph NULL→rebuild-fronts→PLAYING, the reliable path; sweepable grids pre-encode every tier). No-op when nothing changed (no flicker at steady load) | ✅ built & verified (dev box): with `--video --sweep-interval 3` the MAIN/focused tile moves 0→1→2… in lock-step across chrome and picture (captured), console logs each `sweep -- focus -> tile N; K transition(s)`, `d3d12h265dec`, no re-plan errors |
 | P3-14 s2b-3 | `--profile auto` (now the default): seed the governor from the live hardware probe — D3D per-codec capability + a registered GStreamer hardware decoder — exactly as `vms_grid` | ✅ built & verified (dev box): reports `auto h265 (High, hardware decode, NVIDIA GeForce RTX 3050)`, plans 25 main + 39 sub of 64 (matches `vms_grid`). Completes the P3-14 slice-2 group |
+| P3-14 s3 | Interactive workspace: click any tile to focus it (`focusTile`) → the governor protects it at Main and degrades the rest around it; a `planChanged` signal makes both chrome and (under `--video`) the live picture follow; a layered "selected-camera information" panel floats over the grid (id · tier · state · priority). A click stops the auto-sweep (operator in control) | ✅ built & verified (dev box): `--selftest` proves `focusTile` promotes the picked tile to Main; a simulated click moved focus+MAIN to the clicked tile with chrome, live video, and the info panel all following (captured). This is the first operator→governor interaction and the first layered panel of the P3-14 workspace |
+| P3-14 s4 | Layered resource browser + toolbar: a camera-list panel (with a live search filter) layers over the grid — each row shows a state dot + `Cam N` + tier·state and click-focuses that camera, mirroring the tile; the focused camera is highlighted. A toolbar toggles the browser and the auto sweep (`setAutoSweep`, `autoSweeping`). Pure Qt Quick primitives — no new Qt module | ✅ built & verified (dev box): browser list state matches the tiles exactly (Cam 0 main/live, Cam 1 sub, rest thumb/degraded), search filters, Auto-sweep toggle reflects state; captured over the live 16-tile governed video with the info panel. CTest + `--selftest` green |
+| P3-14 s5 | Operator-settable device priority — the **second orthogonal control axis** (ARCHITECTURE.md). Priority is decoupled from focus (persists across sweeps); High/Med/Low buttons in the info panel set it (`setPriority`), and a ★ badge marks High cameras on tiles and in the browser. Under capacity pressure the governor degrades lower-priority cameras first | ✅ built & verified (dev box): `--selftest` shows a **non-focused High** camera holds Main while a Low one is paused (tile 1 High=main, tile 15 Low=paused on lowend-16); a simulated High click highlights the button and shows `Cam 0 ★`. CTest + `--selftest` green |
+| P3-14 s6 | Runtime layout control: toolbar presets (4/9/16/25/64) resize the wall live (`setTileCount`) — rebuilds the working set, re-plans, and (under `--video`) rebuilds the grid pipeline for the new geometry via a `layoutChanged` signal; encoded clips are cached so the rebuild is instant | ✅ built & verified (dev box): `--selftest` proves `setTileCount(4)`→2×2/4 tiles; a simulated click on the "4" preset rebuilt the 16-tile wall to 2×2 live, and the governor upgraded more tiles to Main (2 main + 2 sub at 4 tiles vs 1 main at 16) — real decoded video throughout. CTest + `--selftest` green |
+| P3-14 s7 | Operator-set desired media tier — the **first orthogonal control axis** made interactive. Main/Sub/Thumb/Off buttons in the info panel set a camera's quality ceiling (`setDesiredTier`); the governor never exceeds it (it seeds each tile at `desired`), so capping a camera or turning it Off frees decode+memory budget for the others | ✅ built & verified (dev box): `--selftest` shows a Thumb cap holds a camera at thumb and Off pauses it even with budget to spare; a simulated Thumb click capped the focused camera to THUMB·Live live (info panel + browser reflect it). CTest + `--selftest` green |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.

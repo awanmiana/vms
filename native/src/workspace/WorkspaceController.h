@@ -39,6 +39,9 @@ class WorkspaceController : public QObject {
     Q_PROPERTY(QString capacity READ capacity NOTIFY changed)
     Q_PROPERTY(QString profileLabel READ profileLabel CONSTANT)
     Q_PROPERTY(bool overflow READ overflow NOTIFY changed)
+    // Whether the automatic focus sweep is running (a tile click stops it; the
+    // toolbar toggles it). Lets the UI show an honest Auto ▶ / ⏸ control.
+    Q_PROPERTY(bool autoSweeping READ autoSweeping NOTIFY sweepingChanged)
 
 public:
     WorkspaceController(vms::CapacityProfile profile, int count,
@@ -51,13 +54,40 @@ public:
     QString capacity() const { return capacity_; }
     QString profileLabel() const { return profileLabel_; }
     bool overflow() const { return overflow_; }
+    bool autoSweeping() const;
 
     // Advance focus one cell, re-plan, refresh the model. Returns a one-line
     // human summary of the transitions (used by --selftest and logged live).
     Q_INVOKABLE QString sweep();
 
+    // Operator picks the working-set tile: focus `id` (High priority), re-plan,
+    // refresh. Stops the automatic sweep — the operator has taken control. Called
+    // from QML on a tile click; this is the input the governor exists to serve.
+    Q_INVOKABLE void focusTile(int id);
+
+    // Operator sets a camera's device-activity priority (level: 3=High, 2=Medium,
+    // 1=Low). Independent of focus and persistent across sweeps: under capacity
+    // pressure the governor degrades lower-priority cameras first, so a High mark
+    // keeps that camera at a better tier even while the operator looks elsewhere.
+    Q_INVOKABLE void setPriority(int id, int level);
+
+    // Operator sets a camera's desired media tier — the quality ceiling (the
+    // first control axis). level: 3=Main, 2=Sub, 1=Thumb, 0=Off. The governor
+    // never exceeds it, so capping a camera (or turning it Off) frees decode and
+    // memory budget for the others. Off means the camera does not decode at all.
+    Q_INVOKABLE void setDesiredTier(int id, int level);
+
+    // Change the wall layout to `count` tiles (a square-ish grid). Rebuilds the
+    // working set and re-plans from scratch. Fewer tiles means the governor can
+    // upgrade more of them to Main; more tiles means it degrades to fit budget.
+    Q_INVOKABLE void setTileCount(int count);
+
     // Begin an automatic focus sweep every intervalMs (<= 0 leaves it manual).
     void startAutoSweep(int intervalMs);
+
+    // Toolbar control: turn the automatic sweep back on (at the interval passed to
+    // startAutoSweep) or off. Turning it off leaves the operator's focus in place.
+    Q_INVOKABLE void setAutoSweep(bool on);
 
     // A plain-text dump of the current plan, one line per tile, mirroring the
     // vms_grid console form. Used by --selftest.
@@ -70,9 +100,18 @@ public:
 
 signals:
     void changed();
+    // Emitted whenever the plan is (re)built — a sweep, a click, or startup. In
+    // --video mode the app connects this to reconfigure the live grid, so the
+    // picture follows the chrome no matter what triggered the re-plan.
+    void planChanged();
+    void sweepingChanged();
+    // Emitted when the tile COUNT changes (not just tiers). In --video mode the
+    // app rebuilds the whole grid pipeline for this, rather than re-tiering the
+    // existing branches (which planChanged does).
+    void layoutChanged();
 
 private:
-    void rebuildModel();
+    void rebuildModel(bool isLayoutChange = false);
 
     vms::GovernorSession session_;
     std::vector<vms::TileRequest> requests_;
@@ -84,5 +123,6 @@ private:
     QString capacity_;
     QString profileLabel_;
     bool overflow_ = false;
+    int sweepIntervalMs_ = 0;   // remembered so the toolbar can resume the sweep
     QTimer timer_;
 };

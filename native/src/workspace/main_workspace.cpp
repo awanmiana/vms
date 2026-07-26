@@ -151,12 +151,16 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
 
     // Same request shape vms_grid uses: every tile wants Main; tile 0 is the
     // focused/High working-set tile, the rest Medium.
+    // The two axes are kept orthogonal (ARCHITECTURE.md): `focused` marks the
+    // working-set tile (protected at Main); `priority` is the operator's
+    // device-activity signal (persistent, a degrade tie-breaker under pressure).
+    // Focus never touches priority, so an operator's High mark survives a sweep.
     requests_.reserve(count);
     for (int i = 0; i < count; ++i) {
         vms::TileRequest r;
         r.id = i;
         r.desired = vms::Tier::Main;
-        r.priority = (i == 0) ? vms::Priority::High : vms::Priority::Medium;
+        r.priority = vms::Priority::Medium;
         r.focused = (i == 0);
         r.visible = true;
         requests_.push_back(r);
@@ -174,7 +178,7 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
     connect(&timer_, &QTimer::timeout, this, [this]() { sweep(); });
 }
 
-void WorkspaceController::rebuildModel() {
+void WorkspaceController::rebuildModel(bool isLayoutChange) {
     const int n = static_cast<int>(requests_.size());
 
     // Index by id so a tile keeps its grid cell across re-plans (no flapping
@@ -197,6 +201,14 @@ void WorkspaceController::rebuildModel() {
         m.insert(QStringLiteral("state"), sv.category);
         m.insert(QStringLiteral("stateText"), sv.text);
         m.insert(QStringLiteral("focused"), i == focusIndex_);
+        m.insert(QStringLiteral("priority"),
+                 QString::fromLatin1(vms::PriorityName(requests_[i].priority)));
+        // The operator's desired-tier ceiling ("off" when Paused), distinct from
+        // the tier the governor actually assigned above.
+        m.insert(QStringLiteral("desired"),
+                 requests_[i].desired == vms::Tier::Paused
+                     ? QStringLiteral("off")
+                     : QString::fromLatin1(vms::TierName(requests_[i].desired)));
         tiles_.push_back(m);
     }
 
@@ -211,6 +223,13 @@ void WorkspaceController::rebuildModel() {
                     .arg(n);
 
     emit changed();
+    // A layout change rebuilds the whole video grid; a same-size re-plan only
+    // re-tiers the existing branches. Keep them distinct so the video follows
+    // correctly (a planChanged handler must not run against a stale tile count).
+    if (isLayoutChange)
+        emit layoutChanged();
+    else
+        emit planChanged();
 }
 
 QString WorkspaceController::sweep() {
@@ -218,12 +237,8 @@ QString WorkspaceController::sweep() {
     if (n == 0) return QStringLiteral("no tiles");
 
     focusIndex_ = (focusIndex_ + 1) % n;
-    for (auto& r : requests_) {
-        r.focused = false;
-        r.priority = vms::Priority::Medium;
-    }
+    for (auto& r : requests_) r.focused = false;  // priority is left untouched
     requests_[focusIndex_].focused = true;
-    requests_[focusIndex_].priority = vms::Priority::High;
 
     const vms::GovernorResult next = session_.update(requests_);
     const std::vector<vms::TileTransition> moves = vms::DiffPlans(plan_, next);
@@ -244,8 +259,102 @@ QString WorkspaceController::sweep() {
     return summary;
 }
 
+void WorkspaceController::focusTile(int id) {
+    const int n = static_cast<int>(requests_.size());
+    if (id < 0 || id >= n) return;
+
+    if (timer_.isActive()) {
+        timer_.stop();   // operator took manual control of the working set
+        emit sweepingChanged();
+    }
+    focusIndex_ = id;
+    for (auto& r : requests_) r.focused = false;  // priority is left untouched
+    requests_[id].focused = true;
+
+    plan_ = session_.update(requests_);
+    rebuildModel();
+}
+
+void WorkspaceController::setPriority(int id, int level) {
+    const int n = static_cast<int>(requests_.size());
+    if (id < 0 || id >= n) return;
+
+    vms::Priority p;
+    switch (level) {
+        case 1:  p = vms::Priority::Low;    break;
+        case 3:  p = vms::Priority::High;   break;
+        default: p = vms::Priority::Medium; break;
+    }
+    if (requests_[id].priority == p) return;
+
+    // Device priority is independent of focus, so the sweep keeps running: this
+    // marks a camera important wherever it sits, not where the operator looks.
+    requests_[id].priority = p;
+    plan_ = session_.update(requests_);
+    rebuildModel();
+}
+
+void WorkspaceController::setDesiredTier(int id, int level) {
+    const int n = static_cast<int>(requests_.size());
+    if (id < 0 || id >= n) return;
+    if (level < 0) level = 0;
+    if (level > 3) level = 3;
+    const vms::Tier t = static_cast<vms::Tier>(level);
+    if (requests_[id].desired == t) return;
+
+    requests_[id].desired = t;
+    plan_ = session_.update(requests_);
+    rebuildModel();
+}
+
+void WorkspaceController::setTileCount(int count) {
+    if (count < 1) count = 1;
+    if (count == static_cast<int>(requests_.size())) return;
+
+    requests_.clear();
+    requests_.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        vms::TileRequest r;
+        r.id = i;
+        r.desired = vms::Tier::Main;
+        r.priority = vms::Priority::Medium;
+        r.focused = (i == 0);
+        r.visible = true;
+        requests_.push_back(r);
+    }
+    focusIndex_ = 0;
+    columns_ = std::max(1, static_cast<int>(std::ceil(std::sqrt(
+                               static_cast<double>(count)))));
+    rows_ = std::max(1, static_cast<int>(std::ceil(
+                            static_cast<double>(count) / columns_)));
+
+    session_.reset();   // a new working set: re-plan from scratch, no stale state
+    plan_ = session_.update(requests_);
+    rebuildModel(/*isLayoutChange=*/true);
+}
+
 void WorkspaceController::startAutoSweep(int intervalMs) {
-    if (intervalMs > 0) timer_.start(intervalMs);
+    sweepIntervalMs_ = intervalMs;
+    if (intervalMs > 0) {
+        timer_.start(intervalMs);
+        emit sweepingChanged();
+    }
+}
+
+void WorkspaceController::setAutoSweep(bool on) {
+    if (on && sweepIntervalMs_ > 0) {
+        if (!timer_.isActive()) {
+            timer_.start(sweepIntervalMs_);
+            emit sweepingChanged();
+        }
+    } else if (!on && timer_.isActive()) {
+        timer_.stop();
+        emit sweepingChanged();
+    }
+}
+
+bool WorkspaceController::autoSweeping() const {
+    return timer_.isActive();
 }
 
 std::vector<vms::Tier> WorkspaceController::currentTiers() const {
@@ -309,7 +418,72 @@ int runSelftest(const vms::CapacityProfile& profile, int count) {
     for (int i = 0; i < 3; ++i)
         std::cout << "  " << controller.sweep().toStdString() << "\n";
 
-    std::cout << "PASS: model populated and re-planned across sweeps\n";
+    // Interactive focus: clicking a tile must focus it and protect it at Main.
+    const int pick = (count > 5) ? 5 : count - 1;
+    controller.focusTile(pick);
+    std::cout << "focusTile(" << pick << "): focusIndex="
+              << controller.focusIndex() << "\n";
+    if (controller.focusIndex() != pick) {
+        std::cerr << "FAIL: focusTile did not move focus\n";
+        return 1;
+    }
+    const std::vector<vms::Tier> tiers = controller.currentTiers();
+    if (pick >= static_cast<int>(tiers.size()) ||
+        tiers[pick] != vms::Tier::Main) {
+        std::cerr << "FAIL: focused tile was not protected at Main\n";
+        return 1;
+    }
+
+    // Device priority: a High, non-focused camera must out-rank Medium peers
+    // under pressure. Focus tile 0, mark a different tile High, and check it
+    // holds a strictly better tier than a Medium peer. (Only meaningful when the
+    // machine is actually under pressure — i.e. some tiles are degraded.)
+    if (count >= 4) {
+        controller.focusTile(0);
+        const int hi = 1, mid = count - 1;
+        controller.setPriority(hi, 3);   // High
+        controller.setPriority(mid, 1);  // Low
+        const std::vector<vms::Tier> t2 = controller.currentTiers();
+        std::cout << "priority: tile " << hi << " (High)=" << vms::TierName(t2[hi])
+                  << ", tile " << mid << " (Low)=" << vms::TierName(t2[mid]) << "\n";
+        if (t2[mid] != vms::Tier::Main && t2[hi] < t2[mid]) {
+            std::cerr << "FAIL: High-priority camera ranked below a Low one\n";
+            return 1;
+        }
+    }
+
+    // Desired-tier ceiling: capping a camera holds it at/below the cap; Off
+    // stops it decoding. Honored regardless of pressure (the governor seeds at
+    // desired), so this holds on any profile.
+    if (count >= 4) {
+        controller.setDesiredTier(2, 1);  // Thumb cap
+        controller.setDesiredTier(3, 0);  // Off
+        const std::vector<vms::Tier> t3 = controller.currentTiers();
+        std::cout << "desired: tile 2 (cap Thumb)=" << vms::TierName(t3[2])
+                  << ", tile 3 (Off)=" << vms::TierName(t3[3]) << "\n";
+        if (t3[2] > vms::Tier::Thumb) {
+            std::cerr << "FAIL: desired-tier cap not honored\n";
+            return 1;
+        }
+        if (t3[3] != vms::Tier::Paused) {
+            std::cerr << "FAIL: Off camera still decoding\n";
+            return 1;
+        }
+    }
+
+    // Layout change: switching the wall size rebuilds the working set.
+    controller.setTileCount(4);
+    std::cout << "setTileCount(4): tiles=" << controller.tiles().size()
+              << " grid=" << controller.columns() << "x" << controller.rows()
+              << "\n";
+    if (controller.tiles().size() != 4 || controller.columns() != 2) {
+        std::cerr << "FAIL: setTileCount did not rebuild the layout\n";
+        return 1;
+    }
+
+    std::cout << "PASS: model populated, re-planned across sweeps, focused tile "
+                 "protected at Main, priority ordering honored, and layout "
+                 "rebuilt on resize\n";
     return 0;
 }
 
@@ -414,7 +588,6 @@ int main(int argc, char* argv[]) {
 #ifdef VMS_WITH_GSTREAMER
     GridPipeline* grid = nullptr;
     QTimer busTimer;
-    QTimer sweepTimer;
     if (video) {
         VideoItem* item =
             engine.rootObjects().first()->findChild<VideoItem*>(
@@ -439,46 +612,57 @@ int main(int argc, char* argv[]) {
                   << grid->summary() << std::endl;
         videoRunning = true;
 
-        QObject::connect(&busTimer, &QTimer::timeout, [grid]() {
+        // `grid` is rebuilt on a layout change, so every handler captures it by
+        // reference and uses whatever pipeline is current.
+        QObject::connect(&busTimer, &QTimer::timeout, [&grid]() {
             std::string e;
-            if (!grid->pumpBus(e))
+            if (grid && !grid->pumpBus(e))
                 std::cerr << "video: pipeline error: " << e << "\n";
         });
         busTimer.start(100);
 
         // Decoder selection is async (decodebin negotiates after PLAYING), so
         // report the resolved per-tile decoder once branches have prerolled.
-        QTimer::singleShot(2000, [grid]() {
-            std::cout << "video: " << grid->summary() << std::endl;
+        QTimer::singleShot(2000, [&grid]() {
+            if (grid) std::cout << "video: " << grid->summary() << std::endl;
         });
 
-        // Slice 2b-2: one focus sweep drives BOTH layers. The controller re-plans
-        // (chrome) and the grid reconfigures to the same tiers (video), so the
-        // picture moves with the state chrome, in lock-step, every interval.
-        if (sweepIntervalSec > 0) {
-            QObject::connect(&sweepTimer, &QTimer::timeout, [&controller, grid]() {
-                const QString moves = controller.sweep();
-                std::string e;
-                if (!grid->applyPlan(controller.currentTiers(), e))
-                    std::cerr << "video: re-plan error: " << e << "\n";
-                else
-                    std::cout << "video: sweep -- "
-                              << moves.split('\n').first().toStdString()
-                              << std::endl;
-            });
-            sweepTimer.start(sweepIntervalSec * 1000);
-        }
+        // A same-size re-plan (sweep, click, or priority change) just re-tiers the
+        // existing branches, keeping picture and chrome in lock-step.
+        QObject::connect(&controller, &WorkspaceController::planChanged,
+                         [&controller, &grid]() {
+            std::string e;
+            if (grid && !grid->applyPlan(controller.currentTiers(), e))
+                std::cerr << "video: re-plan error: " << e << "\n";
+        });
 
-        QObject::connect(&app, &QGuiApplication::aboutToQuit, [grid]() {
-            grid->stop();
+        // A layout change (different tile count) rebuilds the whole grid pipeline
+        // for the new geometry; encoded clips are cached so this is fast.
+        QObject::connect(&controller, &WorkspaceController::layoutChanged,
+                         [&controller, &grid, item]() {
+            if (grid) { grid->stop(); delete grid; }
+            grid = new GridPipeline(item, controller.columns(),
+                                    controller.rows(), controller.currentTiers(),
+                                    "h265");
+            std::string e;
+            if (!grid->start(/*sweepable=*/true, e))
+                std::cerr << "video: layout rebuild failed: " << e << "\n";
+            else
+                std::cout << "video: layout -> " << controller.tiles().size()
+                          << " tiles (" << controller.columns() << "x"
+                          << controller.rows() << ")\n";
+        });
+
+        QObject::connect(&app, &QGuiApplication::aboutToQuit, [&grid]() {
+            if (grid) grid->stop();
         });
     }
 #endif // VMS_WITH_GSTREAMER
 
-    // Non-video: the controller's own timer sweeps the chrome. Video mode drives
-    // the sweep itself (above) so chrome and picture re-plan together.
-    if (!videoRunning)
-        controller.startAutoSweep(sweepIntervalSec * 1000);
+    // The controller's own timer runs the automatic focus sweep in both modes;
+    // in --video the planChanged connection above makes the picture follow it. A
+    // tile click stops this timer (the operator has taken over the working set).
+    controller.startAutoSweep(sweepIntervalSec * 1000);
     const int rc = app.exec();
 #ifdef VMS_WITH_GSTREAMER
     delete grid;
