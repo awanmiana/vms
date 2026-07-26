@@ -20,6 +20,12 @@ Window {
     title: "VMS Native — Workspace (P3-14 · honest per-tile state)"
     color: "#0e1014"
 
+    // Two independently stateful instances of one workspace (P3-14): Live and
+    // Playback. `governor` points at whichever tab is active, so the entire view
+    // below re-binds to that instance's state with no duplication.
+    property int tabIndex: 0
+    property var governor: root.tabIndex === 0 ? liveCtrl : playbackCtrl
+
     // Workspace UI state (P3-14 layered panels).
     property bool showBrowser: true
     property string cameraSearch: ""
@@ -52,6 +58,51 @@ Window {
     Column {
         anchors.fill: parent
         spacing: 0
+
+        // --- Live / Playback tabs (two independently stateful instances) ---
+        Rectangle {
+            id: tabBar
+            width: parent.width
+            height: 36
+            color: "#0b0d11"
+
+            Row {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 4
+                Repeater {
+                    model: [ { label: "Live", idx: 0 },
+                             { label: "Playback", idx: 1 } ]
+                    delegate: Rectangle {
+                        property bool active: root.tabIndex === modelData.idx
+                        width: tabText.width + 30; height: 26; radius: 6
+                        color: active ? "#1b2230" : "transparent"
+                        border.color: active ? "#3a6ea5" : "transparent"
+                        border.width: 1
+                        Text {
+                            id: tabText; anchors.centerIn: parent
+                            text: modelData.label
+                            color: active ? "#e8ecf3" : "#8a93a3"
+                            font.pixelSize: 13; font.bold: active
+                        }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.tabIndex = modelData.idx
+                        }
+                    }
+                }
+            }
+            Text {
+                anchors.right: parent.right
+                anchors.rightMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.tabIndex === 0
+                      ? "live view"
+                      : "playback — awaiting recorded footage (Phase 4)"
+                color: "#5a6270"; font.pixelSize: 11
+            }
+        }
 
         // --- header / capacity meter + toolbar ---
         Rectangle {
@@ -189,7 +240,7 @@ Window {
         Item {
             id: gridArea
             width: parent.width
-            height: parent.height - header.height
+            height: parent.height - header.height - tabBar.height
 
             // No gaps over live video, so each chrome cell sits exactly on its
             // composited cell (both split this rectangle into rows x cols equal
@@ -207,7 +258,9 @@ Window {
                 id: videoLayer
                 objectName: "videoOut"
                 anchors.fill: parent
-                visible: videoActive
+                // The pipeline follows the Live instance; on the Playback tab
+                // there is no recorded footage yet, so the video is hidden.
+                visible: videoActive && root.tabIndex === 0
             }
 
             Grid {
@@ -224,9 +277,11 @@ Window {
                         height: gridArea.cellH
                         radius: 6
                         // Translucent over live video so the picture shows
-                        // through the chrome; opaque in the state-only mode.
-                        color: videoActive ? Qt.rgba(0.055, 0.063, 0.078, 0.32)
-                                           : "#171a21"
+                        // through the chrome; opaque in the state-only mode and on
+                        // the (footage-less) Playback tab.
+                        color: (videoActive && root.tabIndex === 0)
+                               ? Qt.rgba(0.055, 0.063, 0.078, 0.32)
+                               : "#171a21"
                         border.color: root.stateColor(modelData.state)
                         border.width: modelData.focused ? 3 : 1.5
 
@@ -550,6 +605,77 @@ Window {
                             onClicked: governor.focusTile(modelData.id)
                         }
                     }
+                }
+            }
+
+            // Playback transport, layered at the bottom on the Playback tab. This
+            // is the range/timeline/transport shell P3-14 calls for; the actual
+            // recorded footage (and a real availability track) arrives with the
+            // Phase-4 recording backend, so the timeline here is a scaffold.
+            Rectangle {
+                id: transport
+                visible: root.tabIndex === 1
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 96
+                color: Qt.rgba(0.03, 0.035, 0.045, 0.97)
+                border.color: "#232a36"; border.width: 1
+                property bool playing: false
+
+                Rectangle {
+                    id: track
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.topMargin: 16
+                    anchors.leftMargin: 20
+                    anchors.rightMargin: 20
+                    height: 8; radius: 4; color: "#1a1f28"
+                    Rectangle {
+                        width: parent.width * 0.35; height: parent.height
+                        radius: 4; color: "#3a6ea5"
+                    }
+                    Rectangle {
+                        x: parent.width * 0.35 - 2; y: -4
+                        width: 4; height: parent.height + 8; radius: 2
+                        color: "#e8ecf3"
+                    }
+                }
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 14
+                    spacing: 10
+                    Repeater {
+                        model: 5
+                        delegate: Rectangle {
+                            width: 40; height: 30; radius: 6
+                            color: "#161b24"; border.color: "#2a3240"; border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: index === 0 ? "⏮"
+                                    : index === 1 ? "◀◀"
+                                    : index === 2 ? (transport.playing ? "⏸" : "▶")
+                                    : index === 3 ? "▶▶" : "⏭"
+                                color: "#cbd3df"; font.pixelSize: 14
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: if (index === 2) transport.playing = !transport.playing
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 20
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 18
+                    text: "recorded footage: awaiting the recording backend (Phase 4)"
+                    color: "#6b7482"; font.pixelSize: 11
                 }
             }
         }

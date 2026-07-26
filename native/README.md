@@ -74,9 +74,13 @@ control axis interactive:** operator-set desired media tier (Main/Sub/Thumb/Off 
 `setDesiredTier`) — the governor never exceeds the ceiling, so capping a camera or turning it Off frees
 budget for the others (verified: a Thumb cap holds at thumb, Off pauses, even with budget to spare).
 Both orthogonal axes from ARCHITECTURE.md (media tier + device priority) are now operator-controllable.
-**Next up: the two independently-stateful Live/Playback instances (Playback timeline/transport is
-Phase-4-recording-dependent) and a seamless (non-reloading) live apply; (blocked on hardware)
-live-camera RTSP confirmation and low-end i5 calibration.**
+**Slice 8 realizes the P3-14 headline — two independently stateful instances:** a Live/Playback tab bar
+with two `WorkspaceController` instances, `governor` bound to the active tab so the whole view re-binds
+with no duplication; the video pipeline follows Live, and Playback is chrome-only with a transport
+scaffold honestly marked "awaiting recorded footage (Phase 4)". **Next up: wiring the Playback
+range/timeline/transport to real recordings (needs the Phase-4 recording backend) and a seamless
+(non-reloading) live apply; (blocked on hardware) live-camera RTSP confirmation and low-end i5
+calibration.**
 
 | # | Component | Status |
 | :- | :- | :- |
@@ -96,6 +100,7 @@ live-camera RTSP confirmation and low-end i5 calibration.**
 | P3-14 s5 | Operator-settable device priority — the **second orthogonal control axis** (ARCHITECTURE.md). Priority is decoupled from focus (persists across sweeps); High/Med/Low buttons in the info panel set it (`setPriority`), and a ★ badge marks High cameras on tiles and in the browser. Under capacity pressure the governor degrades lower-priority cameras first | ✅ built & verified (dev box): `--selftest` shows a **non-focused High** camera holds Main while a Low one is paused (tile 1 High=main, tile 15 Low=paused on lowend-16); a simulated High click highlights the button and shows `Cam 0 ★`. CTest + `--selftest` green |
 | P3-14 s6 | Runtime layout control: toolbar presets (4/9/16/25/64) resize the wall live (`setTileCount`) — rebuilds the working set, re-plans, and (under `--video`) rebuilds the grid pipeline for the new geometry via a `layoutChanged` signal; encoded clips are cached so the rebuild is instant | ✅ built & verified (dev box): `--selftest` proves `setTileCount(4)`→2×2/4 tiles; a simulated click on the "4" preset rebuilt the 16-tile wall to 2×2 live, and the governor upgraded more tiles to Main (2 main + 2 sub at 4 tiles vs 1 main at 16) — real decoded video throughout. CTest + `--selftest` green |
 | P3-14 s7 | Operator-set desired media tier — the **first orthogonal control axis** made interactive. Main/Sub/Thumb/Off buttons in the info panel set a camera's quality ceiling (`setDesiredTier`); the governor never exceeds it (it seeds each tile at `desired`), so capping a camera or turning it Off frees decode+memory budget for the others | ✅ built & verified (dev box): `--selftest` shows a Thumb cap holds a camera at thumb and Off pauses it even with budget to spare; a simulated Thumb click capped the focused camera to THUMB·Live live (info panel + browser reflect it). CTest + `--selftest` green |
+| P3-14 s8 | **Two independently stateful instances** (the P3-14 headline): a Live/Playback tab bar with two `WorkspaceController` instances; QML `governor` binds to the active tab so the whole view re-binds with no duplication. The video pipeline follows the Live instance; the Playback tab is chrome-only with a transport scaffold (timeline + ⏮◀◀▶▶▶⏭) honestly marked "awaiting recorded footage (Phase 4)" | ✅ built & verified (dev box): captured both tabs — Live shows the video-backed governed grid, Playback shows its own independent state + transport bar, video hidden; switching re-binds the entire workspace. CTest + `--selftest` green |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.

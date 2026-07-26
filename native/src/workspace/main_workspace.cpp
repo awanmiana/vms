@@ -571,11 +571,19 @@ int main(int argc, char* argv[]) {
 
     qmlRegisterType<VideoItem>("Vms", 1, 0, "VideoItem");
 
-    WorkspaceController controller(profile, count);
+    // Two independently stateful instances of one workspace (P3-14): Live and
+    // Playback. Each has its own governor session, focus, priority, tiers, and
+    // layout. QML binds `governor` to whichever tab is active; the video pipeline
+    // always follows the Live instance (Playback has no recorded footage yet —
+    // that source is the Phase-4 recording backend).
+    WorkspaceController liveController(profile, count);
+    WorkspaceController playbackController(profile, count);
 
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("governor"),
-                                              &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("liveCtrl"),
+                                              &liveController);
+    engine.rootContext()->setContextProperty(QStringLiteral("playbackCtrl"),
+                                              &playbackController);
     engine.rootContext()->setContextProperty(QStringLiteral("videoActive"),
                                               video);
     engine.load(QUrl(QStringLiteral("qrc:/Workspace.qml")));
@@ -601,8 +609,9 @@ int main(int argc, char* argv[]) {
         // from the same plan the chrome shows, so tile-for-tile they agree.
         // `sweepable` pre-encodes every tier's clip so a focus sweep (2b-2) can
         // move any tile to any tier.
-        grid = new GridPipeline(item, controller.columns(), controller.rows(),
-                                controller.currentTiers(), "h265");
+        grid = new GridPipeline(item, liveController.columns(),
+                                liveController.rows(),
+                                liveController.currentTiers(), "h265");
         std::string err;
         if (!grid->start(/*sweepable=*/true, err)) {
             std::cerr << "video: " << err << "\n";
@@ -627,30 +636,31 @@ int main(int argc, char* argv[]) {
             if (grid) std::cout << "video: " << grid->summary() << std::endl;
         });
 
-        // A same-size re-plan (sweep, click, or priority change) just re-tiers the
+        // The video follows the LIVE instance only (Playback has no footage yet).
+        // A same-size re-plan (sweep, click, priority, or tier change) re-tiers the
         // existing branches, keeping picture and chrome in lock-step.
-        QObject::connect(&controller, &WorkspaceController::planChanged,
-                         [&controller, &grid]() {
+        QObject::connect(&liveController, &WorkspaceController::planChanged,
+                         [&liveController, &grid]() {
             std::string e;
-            if (grid && !grid->applyPlan(controller.currentTiers(), e))
+            if (grid && !grid->applyPlan(liveController.currentTiers(), e))
                 std::cerr << "video: re-plan error: " << e << "\n";
         });
 
         // A layout change (different tile count) rebuilds the whole grid pipeline
         // for the new geometry; encoded clips are cached so this is fast.
-        QObject::connect(&controller, &WorkspaceController::layoutChanged,
-                         [&controller, &grid, item]() {
+        QObject::connect(&liveController, &WorkspaceController::layoutChanged,
+                         [&liveController, &grid, item]() {
             if (grid) { grid->stop(); delete grid; }
-            grid = new GridPipeline(item, controller.columns(),
-                                    controller.rows(), controller.currentTiers(),
-                                    "h265");
+            grid = new GridPipeline(item, liveController.columns(),
+                                    liveController.rows(),
+                                    liveController.currentTiers(), "h265");
             std::string e;
             if (!grid->start(/*sweepable=*/true, e))
                 std::cerr << "video: layout rebuild failed: " << e << "\n";
             else
-                std::cout << "video: layout -> " << controller.tiles().size()
-                          << " tiles (" << controller.columns() << "x"
-                          << controller.rows() << ")\n";
+                std::cout << "video: layout -> " << liveController.tiles().size()
+                          << " tiles (" << liveController.columns() << "x"
+                          << liveController.rows() << ")\n";
         });
 
         QObject::connect(&app, &QGuiApplication::aboutToQuit, [&grid]() {
@@ -659,10 +669,11 @@ int main(int argc, char* argv[]) {
     }
 #endif // VMS_WITH_GSTREAMER
 
-    // The controller's own timer runs the automatic focus sweep in both modes;
-    // in --video the planChanged connection above makes the picture follow it. A
-    // tile click stops this timer (the operator has taken over the working set).
-    controller.startAutoSweep(sweepIntervalSec * 1000);
+    // The Live instance runs the automatic focus sweep; in --video the planChanged
+    // connection above makes the picture follow it. A tile click stops the timer
+    // (the operator has taken over the working set). Playback is not swept — it is
+    // paused footage conceptually (and, for now, awaiting the recording backend).
+    liveController.startAutoSweep(sweepIntervalSec * 1000);
     const int rc = app.exec();
 #ifdef VMS_WITH_GSTREAMER
     delete grid;
