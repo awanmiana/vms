@@ -79,6 +79,40 @@ endif()
 add_test(NAME optimize_selfcheck COMMAND vms_opttest)
 
 # ---------------------------------------------------------------------------
+# Native increment 11 (P2-03/P2-14) — ONVIF WS-Discovery. Standards-exact device
+# discovery source for DeviceRepo: a pure Probe build + ProbeMatch parse (Qt6
+# Core: XML/URL) and a UDP multicast transport (Qt6 Network). Self-verifying
+# against real device fixtures; live LAN discovery needs devices on the network.
+# ---------------------------------------------------------------------------
+find_package(Qt6 COMPONENTS Core Network QUIET)
+if(Qt6_FOUND AND TARGET Qt6::Core)
+    message(STATUS "Building vms_onvif with Qt6 ${Qt6_VERSION}")
+    add_library(vms_onvif STATIC src/onvif/WsDiscovery.cpp)
+    set_target_properties(vms_onvif PROPERTIES AUTOMOC OFF)
+    target_include_directories(vms_onvif PUBLIC src)
+    target_link_libraries(vms_onvif PUBLIC Qt6::Core)
+    if(TARGET Qt6::Network)
+        target_sources(vms_onvif PRIVATE src/onvif/WsDiscoveryTransport.cpp)
+        target_link_libraries(vms_onvif PUBLIC Qt6::Network)
+    endif()
+    if(WIN32)
+        target_compile_definitions(vms_onvif PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+
+    add_executable(vms_onviftest src/onvif/main_onviftest.cpp)
+    set_target_properties(vms_onviftest PROPERTIES AUTOMOC OFF)
+    target_link_libraries(vms_onviftest PRIVATE vms_onvif Qt6::Core)
+    if(WIN32)
+        target_compile_definitions(vms_onviftest PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    add_test(NAME onvif_selfcheck COMMAND vms_onviftest)
+else()
+    message(STATUS "Qt6 Core not found; skipping vms_onvif (increment 11).")
+endif()
+
+# ---------------------------------------------------------------------------
 # Native increment 5 (P0-04) — persistence: an embedded local relational store
 # (SQLite via the Windows-bundled winsqlite3) behind the C0-03 adapter contract.
 # Qt-free and self-verifying, like the governor. On non-Windows a system SQLite
