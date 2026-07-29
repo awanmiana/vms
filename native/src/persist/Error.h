@@ -19,6 +19,7 @@ enum class Status {
     Migration,    // a migration step failed
     Misuse,       // API used incorrectly (e.g. store not open)
     Crypto,       // encrypt/decrypt failed (secret store; e.g. wrong user/machine)
+    Unavailable,  // temporarily refused: circuit open / device locked out / pool full
     Error,        // any other failure
 };
 
@@ -32,6 +33,7 @@ inline const char* StatusName(Status s) {
         case Status::Migration:  return "migration";
         case Status::Misuse:     return "misuse";
         case Status::Crypto:     return "crypto";
+        case Status::Unavailable: return "unavailable";
         case Status::Error:      return "error";
     }
     return "?";

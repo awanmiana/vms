@@ -87,6 +87,24 @@ if(WIN32)
     target_compile_definitions(vms_credtest PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_test(NAME credential_selfcheck COMMAND vms_credtest)
+
+    # Native increment 6c — the standalone ConnectionBroker (single device-
+    # connection identity). Pure C++: no Qt / no GStreamer, links only vms_persist
+    # (Store + CredentialRepo + SecretStore), so it is unit-testable in isolation.
+    add_library(vms_broker STATIC src/broker/ConnectionBroker.cpp)
+    target_include_directories(vms_broker PUBLIC src)
+    target_link_libraries(vms_broker PUBLIC vms_persist)
+    target_compile_definitions(vms_broker PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+        target_compile_options(vms_broker PRIVATE /W4 /permissive-)
+    endif()
+
+    add_executable(vms_brokertest src/broker/main_brokertest.cpp)
+    target_link_libraries(vms_brokertest PRIVATE vms_broker)
+    target_compile_definitions(vms_brokertest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME broker_selfcheck COMMAND vms_brokertest)
 else()
     message(STATUS "Non-Windows: skipping vms_persist (winsqlite3 backend); a "
                    "system-SQLite backend behind Store is deferred.")
