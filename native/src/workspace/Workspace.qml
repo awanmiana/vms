@@ -203,6 +203,14 @@ Window {
                     color: governor.overflow ? "#e05a4e" : "#6f7a86"
                     font.pixelSize: 13
                 }
+                // Live optimizer read-out (inc 8): what the health sampler adjusted
+                // and why. Empty (hidden) until the sampler runs.
+                Text {
+                    visible: governor.optimizer.length > 0
+                    text: governor.optimizer
+                    color: "#5aa0e0"
+                    font.pixelSize: 12
+                }
             }
 
             // Legend (bottom-right, under the toolbar)

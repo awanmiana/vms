@@ -244,6 +244,9 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # (needs vms_persist, so Windows-only alongside it).
         target_sources(vms_workspace PRIVATE src/workspace/PlaybackController.cpp)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
+        # inc 8: the live optimization sampler feeding the governor.
+        target_link_libraries(vms_workspace PRIVATE vms_optimize)
+        target_compile_definitions(vms_workspace PRIVATE VMS_WITH_OPTIMIZE)
         target_compile_definitions(vms_workspace PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         # Keep the console subsystem so --selftest output is visible.

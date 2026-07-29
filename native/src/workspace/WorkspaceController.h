@@ -38,6 +38,10 @@ class WorkspaceController : public QObject {
     // "decode 24.9 / 64 main-eq  ·  mem 2600 / 6000 MB  ·  decoding 40 / 64".
     Q_PROPERTY(QString capacity READ capacity NOTIFY changed)
     Q_PROPERTY(QString profileLabel READ profileLabel CONSTANT)
+    // A one-line live optimizer read-out (inc 8): what the health sampler adjusted
+    // and why, e.g. "optimizer: mem 480/1000 MB (ram) · cpu 34%". Empty until the
+    // sampler runs. Honest, read-only advice — the optimizer never mutates the OS.
+    Q_PROPERTY(QString optimizer READ optimizer NOTIFY changed)
     Q_PROPERTY(bool overflow READ overflow NOTIFY changed)
     // Whether the automatic focus sweep is running (a tile click stops it; the
     // toolbar toggles it). Lets the UI show an honest Auto ▶ / ⏸ control.
@@ -53,7 +57,20 @@ public:
     int focusIndex() const { return focusIndex_; }
     QString capacity() const { return capacity_; }
     QString profileLabel() const { return profileLabel_; }
+    QString optimizer() const { return optimizer_; }
     bool overflow() const { return overflow_; }
+
+    // inc 8: the machine's STATIC capacity ceiling (from the hardware probe /
+    // calibration), which the optimizer adjusts down from each sample.
+    const vms::CapacityProfile& baseProfile() const { return baseProfile_; }
+
+    // inc 8: apply an optimizer-adjusted capacity profile to the live session. If
+    // it differs from the profile currently in force, the session re-plans under
+    // the new budget (degrade under pressure / recover when it clears) and the UI
+    // refreshes; `reportText` is shown in the optimizer read-out. A no-op (no
+    // re-plan, no flicker) when the profile is unchanged.
+    void applyOptimizedProfile(const vms::CapacityProfile& profile,
+                               const QString& reportText);
     bool autoSweeping() const;
 
     // Advance focus one cell, re-plan, refresh the model. Returns a one-line
@@ -121,6 +138,7 @@ private:
     void rebuildModel(bool isLayoutChange = false);
 
     vms::GovernorSession session_;
+    vms::CapacityProfile baseProfile_;   // static ceiling; optimizer adjusts from this
     std::vector<vms::TileRequest> requests_;
     vms::GovernorResult plan_;
     QVariantList tiles_;
@@ -129,6 +147,7 @@ private:
     int focusIndex_ = 0;
     QString capacity_;
     QString profileLabel_;
+    QString optimizer_;
     bool overflow_ = false;
     int sweepIntervalMs_ = 0;   // remembered so the toolbar can resume the sweep
     QTimer timer_;

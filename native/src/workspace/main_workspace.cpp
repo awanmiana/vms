@@ -22,6 +22,13 @@
 
 #include "governor/Governor.h"
 
+#ifdef VMS_WITH_OPTIMIZE
+#include <memory>
+
+#include "optimize/Optimizer.h"
+#include "optimize/SystemHealth.h"
+#endif
+
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -254,7 +261,7 @@ StateView stateView(vms::TileState s) {
 
 WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count,
                                          QObject* parent)
-    : QObject(parent), session_(profile) {
+    : QObject(parent), session_(profile), baseProfile_(profile) {
     profileLabel_ = QString::fromStdString(profile.label.empty()
                                                ? std::string("(unlabelled)")
                                                : profile.label);
@@ -443,6 +450,29 @@ void WorkspaceController::setTileCount(int count) {
     rebuildModel(/*isLayoutChange=*/true);
 }
 
+void WorkspaceController::applyOptimizedProfile(const vms::CapacityProfile& p,
+                                                const QString& reportText) {
+    const vms::CapacityProfile& cur = session_.profile();
+    const bool profileChanged =
+        std::fabs(p.decodeBudget - cur.decodeBudget) > 1e-6 ||
+        std::fabs(p.memoryBudgetMb - cur.memoryBudgetMb) > 1e-6 ||
+        std::fabs(p.bandwidthBudgetKbps - cur.bandwidthBudgetKbps) > 1e-6;
+
+    if (profileChanged) {
+        // Re-plan under the new budget from scratch (a lowered budget must degrade
+        // even though the requests are unchanged, which the stateful fast-path
+        // would otherwise skip). The optimizer's own deadband keeps this rare.
+        session_ = vms::GovernorSession(p);
+        plan_ = session_.update(requests_);
+    }
+
+    if (reportText != optimizer_ || profileChanged) {
+        optimizer_ = reportText;
+        if (profileChanged) rebuildModel();   // refreshes tiles + capacity meter + emits
+        else emit changed();                  // just the read-out text
+    }
+}
+
 void WorkspaceController::startAutoSweep(int intervalMs) {
     sweepIntervalMs_ = intervalMs;
     if (intervalMs > 0) {
@@ -620,6 +650,10 @@ int main(int argc, char* argv[]) {
     std::string recDbArg = "rec.db";     // recording index for the Playback tab
     std::string recCamera = "cam-1";
     int smokeMs = 0;                     // >0: load, run this long offscreen, quit
+    int optIntervalSec = 2;              // optimizer health-sample cadence (inc 8)
+    bool noOptimize = false;             // disable the live optimizer sampler
+    double optFakeRamMb = -1.0;          // >=0: inject this free-RAM (test the loop)
+    double optFakeBwKbps = -1.0;         // >=0: inject a link budget
 #ifdef VMS_WITH_GSTREAMER
     std::string profileName = "auto";   // seed from the live hardware probe
 #else
@@ -644,6 +678,14 @@ int main(int argc, char* argv[]) {
             recCamera = argv[++i];
         } else if (a == "--smoke-ms" && i + 1 < argc) {
             smokeMs = std::atoi(argv[++i]);
+        } else if (a == "--opt-interval" && i + 1 < argc) {
+            optIntervalSec = std::atoi(argv[++i]);
+        } else if (a == "--no-optimize") {
+            noOptimize = true;
+        } else if (a == "--opt-fake-ram" && i + 1 < argc) {
+            optFakeRamMb = std::atof(argv[++i]);
+        } else if (a == "--opt-fake-bw" && i + 1 < argc) {
+            optFakeBwKbps = std::atof(argv[++i]);
         } else if (a == "--count" && i + 1 < argc) {
             count = std::atoi(argv[++i]);
         } else if (a == "--sweep-interval" && i + 1 < argc) {
@@ -935,6 +977,54 @@ int main(int argc, char* argv[]) {
     }
 #endif // VMS_WITH_GSTREAMER && VMS_WITH_PERSIST
 
+#ifdef VMS_WITH_OPTIMIZE
+    // inc 8: the live optimization sampler. Every optIntervalSec, read the
+    // machine's headroom and adjust the Live wall's capacity so it degrades before
+    // exhaustion and recovers when headroom clears — the "watch the bottleneck"
+    // loop. --opt-fake-ram injects a scripted free-RAM figure so the loop is
+    // verifiable under pressure without actually starving the box.
+    vms::optimize::OptimizerSession optimizer;
+    std::unique_ptr<vms::optimize::SystemHealthProbe> healthProbe;
+    if (optFakeRamMb >= 0.0) {
+        auto fake = std::make_unique<vms::optimize::FakeSystemHealthProbe>();
+        vms::optimize::SystemSample s;
+        s.valid = true;
+        s.totalRamMb = std::max(optFakeRamMb, 16000.0);
+        s.availRamMb = optFakeRamMb;
+        s.logicalCores = 8;
+        s.systemCpuLoadPct = 40.0;
+        s.estBandwidthKbps = optFakeBwKbps;
+        fake->set(s);
+        healthProbe = std::move(fake);
+    } else {
+#ifdef _WIN32
+        healthProbe = std::make_unique<vms::optimize::WindowsSystemHealthProbe>();
+#endif
+    }
+
+    QTimer optTimer;
+    if (healthProbe && !noOptimize) {
+        auto tick = [&]() {
+            const vms::optimize::SystemSample s = healthProbe->sample();
+            vms::optimize::OptimizationReport rep;
+            const vms::CapacityProfile eff =
+                optimizer.adjust(liveController.baseProfile(), s, rep);
+            QString text = QStringLiteral("optimizer: mem %1/%2 MB (%3)")
+                               .arg(static_cast<long>(rep.memoryBudgetMb))
+                               .arg(static_cast<long>(rep.baseMemoryBudgetMb))
+                               .arg(QString::fromStdString(rep.clampedBy));
+            if (rep.systemCpuLoadPct >= 0.0)
+                text += QStringLiteral(" · cpu %1%").arg(static_cast<int>(rep.systemCpuLoadPct));
+            if (eff.bandwidthBudgetKbps > 0.0)
+                text += QStringLiteral(" · link %1 kbps").arg(static_cast<long>(eff.bandwidthBudgetKbps));
+            liveController.applyOptimizedProfile(eff, text);
+        };
+        QObject::connect(&optTimer, &QTimer::timeout, &liveController, tick);
+        optTimer.start(optIntervalSec * 1000);
+        tick();   // apply once immediately so the read-out is populated at startup
+    }
+#endif // VMS_WITH_OPTIMIZE
+
 #ifdef VMS_WITH_PERSIST
     // Save both instances' layouts on exit so the next launch restores them.
     if (persisting) {
@@ -970,6 +1060,13 @@ int main(int argc, char* argv[]) {
                           << (pbPipe ? pbPipe->framesPulled() : 0) << std::endl;
             });
         }
+#endif
+#ifdef VMS_WITH_OPTIMIZE
+        QObject::connect(&app, &QGuiApplication::aboutToQuit, [&liveController]() {
+            std::cout << "smoke: " << liveController.optimizer().toStdString() << "\n"
+                      << "smoke: live " << liveController.capacity().toStdString()
+                      << std::endl;
+        });
 #endif
     }
 
