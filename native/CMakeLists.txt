@@ -79,6 +79,24 @@ endif()
 add_test(NAME optimize_selfcheck COMMAND vms_opttest)
 
 # ---------------------------------------------------------------------------
+# Native increment 13 (P2-13) — device health & lifecycle. Pure decision core:
+# honest per-dimension health -> derived state + exception lifecycle. No deps.
+# ---------------------------------------------------------------------------
+add_library(vms_health STATIC src/health/HealthMonitor.cpp)
+target_include_directories(vms_health PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_health PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_healthtest src/health/main_healthtest.cpp)
+target_link_libraries(vms_healthtest PRIVATE vms_health)
+if(WIN32)
+    target_compile_definitions(vms_healthtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME health_selfcheck COMMAND vms_healthtest)
+
+# ---------------------------------------------------------------------------
 # Native increment 11 (P2-03/P2-14) — ONVIF WS-Discovery. Standards-exact device
 # discovery source for DeviceRepo: a pure Probe build + ProbeMatch parse (Qt6
 # Core: XML/URL) and a UDP multicast transport (Qt6 Network). Self-verifying
