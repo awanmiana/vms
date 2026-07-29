@@ -274,3 +274,23 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Native increment 7a-media — recording pipeline. splitmuxsink writes segment
+# files and every completed segment is written into the SQLite SegmentIndex.
+# Needs GStreamer (pipeline) + vms_persist (index), so Windows-only for now.
+# ---------------------------------------------------------------------------
+if(WIN32 AND EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
+    add_executable(vms_record src/record/main_record.cpp)
+    target_include_directories(vms_record PRIVATE
+        src
+        "${GSTREAMER_ROOT}/include/gstreamer-1.0"
+        "${GSTREAMER_ROOT}/include/glib-2.0"
+        "${GSTREAMER_ROOT}/lib/glib-2.0/include"
+    )
+    target_link_directories(vms_record PRIVATE "${GSTREAMER_ROOT}/lib")
+    target_link_libraries(vms_record PRIVATE
+        vms_persist gstreamer-1.0 gobject-2.0 glib-2.0)
+    target_compile_definitions(vms_record PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
