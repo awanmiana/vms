@@ -39,6 +39,8 @@
 #include "persist/Schema.h"
 #include "persist/Store.h"
 #include "persist/WorkspaceRepo.h"
+#include "persist/SegmentIndex.h"
+#include "PlaybackController.h"
 
 namespace {
 
@@ -67,6 +69,72 @@ void saveInstance(vms::persist::Store& store, const std::string& name,
     for (int i = 0; i < c.tileCount(); ++i)
         st.tiles.push_back({i, c.desiredTierOf(i), c.priorityOf(i)});
     repo.save(name, st);
+}
+
+// P5-02 / inc 7c: headless check that PlaybackController turns the recording
+// SegmentIndex into an honest availability model and a playhead that knows when
+// it is over footage vs a gap. No window, no camera.
+int runPlaybackSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+
+    Store store;
+    check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+    check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+    SegmentIndex idx(store);
+    auto add = [&](const char* s, const char* e, const char* p) {
+        Segment seg;
+        seg.cameraId = "cam-1"; seg.startUtc = s; seg.endUtc = e;
+        seg.path = p; seg.codec = "h264"; seg.bytes = 1000;
+        std::int64_t id = 0; idx.add(seg, id);
+    };
+    add("2026-07-29 09:00:00", "2026-07-29 09:10:00", "a.mp4");
+    add("2026-07-29 09:10:00", "2026-07-29 09:20:00", "b.mp4");
+    add("2026-07-29 09:30:00", "2026-07-29 09:40:00", "c.mp4");   // 09:20-09:30 is a gap
+
+    PlaybackController pc(&idx, QStringLiteral("cam-1"));
+    pc.setRange(QStringLiteral("2026-07-29 09:00:00"),
+                QStringLiteral("2026-07-29 09:40:00"));
+    std::cout << "vms_workspace --playback-selftest\nspans:\n"
+              << pc.dumpSpans().toStdString();
+
+    check(pc.spans().size() == 3, "3 availability spans (available / missing / available)");
+    if (pc.spans().size() == 3) {
+        check(pc.spans()[0].toMap().value(QStringLiteral("state")).toString() ==
+                  QLatin1String("available"),
+              "span 0 is Available (contiguous footage merged)");
+        check(pc.spans()[1].toMap().value(QStringLiteral("state")).toString() ==
+                  QLatin1String("missing"),
+              "span 1 is an honest Missing gap");
+    }
+
+    pc.seekFrac(0.05);   // ~09:02, inside a.mp4
+    check(pc.onFootage(), "playhead over footage reports onFootage=true");
+    check(pc.segmentAtPlayhead().value(QStringLiteral("path")).toString() ==
+              QLatin1String("a.mp4"),
+          "segmentAtPlayhead resolves the backing recorded file");
+
+    pc.seekFrac(0.625);  // 09:25, inside the gap
+    check(!pc.onFootage(), "playhead in a gap reports onFootage=false (honest)");
+    check(pc.segmentAtPlayhead().value(QStringLiteral("path")).toString().isEmpty(),
+          "no backing file over a gap (requested time not shown as recorded)");
+
+    pc.play();
+    check(pc.playing(), "play() sets playing");
+    pc.setSpeed(2.0);
+    check(pc.speed() == 2.0, "setSpeed() updates the transport speed");
+
+    if (failures == 0) {
+        std::cout << "PASS: playback availability model, playhead footage/gap "
+                     "detection, and transport state verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
 }
 
 } // namespace
@@ -543,6 +611,7 @@ int main(int argc, char* argv[]) {
     int count = 16;
     int sweepIntervalSec = 4;
     bool selftest = false;
+    bool playbackSelftest = false;
     bool video = false;
     bool noPersist = false;
     std::string dbPathArg;
@@ -556,6 +625,8 @@ int main(int argc, char* argv[]) {
         const std::string a = argv[i];
         if (a == "--selftest") {
             selftest = true;
+        } else if (a == "--playback-selftest") {
+            playbackSelftest = true;
         } else if (a == "--video") {
             video = true;
         } else if (a == "--no-persist") {
@@ -581,6 +652,15 @@ int main(int argc, char* argv[]) {
             return 0;
         }
     }
+
+#ifdef VMS_WITH_PERSIST
+    if (playbackSelftest) return runPlaybackSelftest();
+#else
+    if (playbackSelftest) {
+        std::cerr << "--playback-selftest needs the persistence build.\n";
+        return 2;
+    }
+#endif
 
 #ifndef VMS_WITH_GSTREAMER
     if (video) {

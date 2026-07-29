@@ -211,6 +211,9 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         target_link_libraries(vms_workspace PRIVATE dxgi d3d11 dxguid)
         # P0-04 inc 5c: persist and restore the workspace layout (embedded SQLite).
         target_link_libraries(vms_workspace PRIVATE vms_persist)
+        # inc 7c: the Playback availability model over the recording SegmentIndex
+        # (needs vms_persist, so Windows-only alongside it).
+        target_sources(vms_workspace PRIVATE src/workspace/PlaybackController.cpp)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
         target_compile_definitions(vms_workspace PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
