@@ -92,6 +92,7 @@ if(WIN32)
         src/persist/SecretStore.cpp
         src/persist/CredentialRepo.cpp
         src/persist/SegmentIndex.cpp
+        src/persist/DeviceRepo.cpp
     )
     target_include_directories(vms_persist PUBLIC src)
     # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
@@ -140,6 +141,14 @@ if(WIN32)
     target_compile_definitions(vms_brokertest PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_test(NAME broker_selfcheck COMMAND vms_brokertest)
+
+    # Native increment 10 (P2-01/02/05) — device onboarding self-check. Links
+    # vms_broker so the test can prove an onboarded device is broker-connectable.
+    add_executable(vms_devtest src/persist/main_devtest.cpp)
+    target_link_libraries(vms_devtest PRIVATE vms_broker)
+    target_compile_definitions(vms_devtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME device_selfcheck COMMAND vms_devtest)
 else()
     message(STATUS "Non-Windows: skipping vms_persist (winsqlite3 backend); a "
                    "system-SQLite backend behind Store is deferred.")
