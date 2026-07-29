@@ -87,12 +87,17 @@ add_test(NAME optimize_selfcheck COMMAND vms_opttest)
 find_package(Qt6 COMPONENTS Core Network QUIET)
 if(Qt6_FOUND AND TARGET Qt6::Core)
     message(STATUS "Building vms_onvif with Qt6 ${Qt6_VERSION}")
-    add_library(vms_onvif STATIC src/onvif/WsDiscovery.cpp)
+    add_library(vms_onvif STATIC
+        src/onvif/WsDiscovery.cpp
+        src/onvif/OnvifClient.cpp
+    )
     set_target_properties(vms_onvif PROPERTIES AUTOMOC OFF)
     target_include_directories(vms_onvif PUBLIC src)
     target_link_libraries(vms_onvif PUBLIC Qt6::Core)
     if(TARGET Qt6::Network)
-        target_sources(vms_onvif PRIVATE src/onvif/WsDiscoveryTransport.cpp)
+        target_sources(vms_onvif PRIVATE
+            src/onvif/WsDiscoveryTransport.cpp
+            src/onvif/OnvifTransport.cpp)
         target_link_libraries(vms_onvif PUBLIC Qt6::Network)
     endif()
     if(WIN32)
