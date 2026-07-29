@@ -99,7 +99,9 @@ Window {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.tabIndex === 0
                       ? "live view"
-                      : "playback — awaiting recorded footage (Phase 4)"
+                      : ((typeof playback !== "undefined" && playback)
+                         ? ("playback — " + playback.spans.length + " footage span(s)")
+                         : "playback — no recording index")
                 color: "#5a6270"; font.pixelSize: 11
             }
         }
@@ -608,74 +610,147 @@ Window {
                 }
             }
 
-            // Playback transport, layered at the bottom on the Playback tab. This
-            // is the range/timeline/transport shell P3-14 calls for; the actual
-            // recorded footage (and a real availability track) arrives with the
-            // Phase-4 recording backend, so the timeline here is a scaffold.
+            // Playback transport, layered at the bottom on the Playback tab
+            // (P3-14 · P5-02). The timeline is bound to the real recording index
+            // via `playback`: green = recorded footage, amber = overlapping
+            // (duplicate) footage, and the dark track shows honestly through gaps
+            // where nothing was recorded — requested time is NEVER painted as
+            // recorded. The playhead is draggable; it reports the exact recorded
+            // time and whether it sits on footage or in a gap, and which file
+            // backs it. (Decoding those pixels into the pane is the next slice.)
             Rectangle {
                 id: transport
                 visible: root.tabIndex === 1
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                height: 96
+                height: 118
                 color: Qt.rgba(0.03, 0.035, 0.045, 0.97)
                 border.color: "#232a36"; border.width: 1
-                property bool playing: false
+                property var pb: (typeof playback !== "undefined") ? playback : null
+
+                function spanColor(s) {
+                    switch (s) {
+                    case "available":   return "#37c871";
+                    case "overlapping": return "#f2a33c";
+                    }
+                    return "transparent";   // missing gap: the dark track shows through
+                }
 
                 Rectangle {
                     id: track
                     anchors.top: parent.top
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    anchors.topMargin: 16
+                    anchors.topMargin: 18
                     anchors.leftMargin: 20
                     anchors.rightMargin: 20
-                    height: 8; radius: 4; color: "#1a1f28"
-                    Rectangle {
-                        width: parent.width * 0.35; height: parent.height
-                        radius: 4; color: "#3a6ea5"
+                    height: 16; radius: 4; color: "#11151c"
+                    border.color: "#242c39"; border.width: 1
+                    clip: true
+
+                    // Availability bands from the recording index.
+                    Repeater {
+                        model: transport.pb ? transport.pb.spans : []
+                        delegate: Rectangle {
+                            x: modelData.startFrac * track.width
+                            width: Math.max(1, (modelData.endFrac - modelData.startFrac) * track.width)
+                            height: track.height
+                            radius: 2
+                            color: transport.spanColor(modelData.state)
+                        }
                     }
+
+                    // Draggable playhead.
                     Rectangle {
-                        x: parent.width * 0.35 - 2; y: -4
-                        width: 4; height: parent.height + 8; radius: 2
-                        color: "#e8ecf3"
+                        visible: transport.pb !== null
+                        x: (transport.pb ? transport.pb.playheadFrac : 0) * track.width - 1.5
+                        y: -5; width: 3; height: track.height + 10; radius: 1.5
+                        color: transport.pb && transport.pb.onFootage ? "#e8ecf3" : "#e05a4e"
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        enabled: transport.pb !== null
+                        onPressed: (mouse) => { if (transport.pb)
+                            transport.pb.seekFrac(mouse.x / track.width) }
+                        onPositionChanged: (mouse) => { if (transport.pb)
+                            transport.pb.seekFrac(Math.max(0, Math.min(1, mouse.x / track.width))) }
                     }
                 }
 
+                // Readout: the recorded time under the playhead + footage/gap state.
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 20
+                    anchors.top: track.bottom
+                    anchors.topMargin: 8
+                    text: transport.pb
+                          ? (transport.pb.playheadUtc + " UTC   ·   "
+                             + (transport.pb.onFootage ? "on recorded footage"
+                                                       : "no footage at this time"))
+                          : "no recording index (run vms_record, or pass --rec-db)"
+                    color: transport.pb && transport.pb.onFootage ? "#9aa4b4" : "#e0785a"
+                    font.pixelSize: 12
+                }
+
+                // Transport controls + speed.
                 Row {
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 14
+                    anchors.bottomMargin: 12
                     spacing: 10
                     Repeater {
                         model: 5
                         delegate: Rectangle {
-                            width: 40; height: 30; radius: 6
+                            width: 42; height: 30; radius: 6
                             color: "#161b24"; border.color: "#2a3240"; border.width: 1
                             Text {
                                 anchors.centerIn: parent
                                 text: index === 0 ? "⏮"
-                                    : index === 1 ? "◀◀"
-                                    : index === 2 ? (transport.playing ? "⏸" : "▶")
-                                    : index === 3 ? "▶▶" : "⏭"
+                                    : index === 1 ? "◀ᖴ"
+                                    : index === 2 ? (transport.pb && transport.pb.playing ? "⏸" : "▶")
+                                    : index === 3 ? "ᖴ▶" : "⏭"
                                 color: "#cbd3df"; font.pixelSize: 14
                             }
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                onClicked: if (index === 2) transport.playing = !transport.playing
+                                enabled: transport.pb !== null
+                                onClicked: {
+                                    if (!transport.pb) return
+                                    if (index === 0) transport.pb.seekFrac(0)
+                                    else if (index === 1) transport.pb.stepFrames(-25)
+                                    else if (index === 2) transport.pb.playing
+                                                          ? transport.pb.pause() : transport.pb.play()
+                                    else if (index === 3) transport.pb.stepFrames(25)
+                                    else transport.pb.seekFrac(1)
+                                }
                             }
                         }
                     }
-                }
 
-                Text {
-                    anchors.left: parent.left
-                    anchors.leftMargin: 20
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 18
-                    text: "recorded footage: awaiting the recording backend (Phase 4)"
-                    color: "#6b7482"; font.pixelSize: 11
+                    Rectangle { width: 1; height: 24; color: "#2a3240"
+                        anchors.verticalCenter: parent.verticalCenter }
+
+                    Repeater {
+                        model: [ { label: "1×", v: 1 }, { label: "2×", v: 2 }, { label: "4×", v: 4 } ]
+                        delegate: Rectangle {
+                            property bool active: transport.pb && transport.pb.speed === modelData.v
+                            width: 34; height: 30; radius: 6
+                            color: active ? "#2a4258" : "#161b24"
+                            border.color: active ? "#3a6ea5" : "#2a3240"; border.width: 1
+                            Text {
+                                anchors.centerIn: parent; text: modelData.label
+                                color: active ? "#e8ecf3" : "#9aa4b4"; font.pixelSize: 12
+                            }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                enabled: transport.pb !== null
+                                onClicked: if (transport.pb) transport.pb.setSpeed(modelData.v)
+                            }
+                        }
+                    }
                 }
             }
         }

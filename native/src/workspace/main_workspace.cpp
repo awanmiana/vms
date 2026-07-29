@@ -26,6 +26,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QTimer>
 
 #include <cmath>
 #include <cstring>
@@ -615,6 +616,9 @@ int main(int argc, char* argv[]) {
     bool video = false;
     bool noPersist = false;
     std::string dbPathArg;
+    std::string recDbArg = "rec.db";     // recording index for the Playback tab
+    std::string recCamera = "cam-1";
+    int smokeMs = 0;                     // >0: load, run this long offscreen, quit
 #ifdef VMS_WITH_GSTREAMER
     std::string profileName = "auto";   // seed from the live hardware probe
 #else
@@ -633,6 +637,12 @@ int main(int argc, char* argv[]) {
             noPersist = true;
         } else if (a == "--db" && i + 1 < argc) {
             dbPathArg = argv[++i];
+        } else if (a == "--rec-db" && i + 1 < argc) {
+            recDbArg = argv[++i];
+        } else if (a == "--rec-camera" && i + 1 < argc) {
+            recCamera = argv[++i];
+        } else if (a == "--smoke-ms" && i + 1 < argc) {
+            smokeMs = std::atoi(argv[++i]);
         } else if (a == "--count" && i + 1 < argc) {
             count = std::atoi(argv[++i]);
         } else if (a == "--sweep-interval" && i + 1 < argc) {
@@ -747,11 +757,39 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+    // inc 7c: the Playback tab's timeline + transport bind to a PlaybackController
+    // over the recording SegmentIndex (written by vms_record). A separate store
+    // for recordings; the window defaults to the recorded footage extent so the
+    // timeline opens on real footage (or shows an honest empty range when none).
+    PlaybackController* playback = nullptr;
+#ifdef VMS_WITH_PERSIST
+    vms::persist::Store recStore;
+    vms::persist::SegmentIndex* recIndex = nullptr;
+    if (recStore.open(recDbArg) && recStore.migrate(vms::persist::coreMigrations())) {
+        recIndex = new vms::persist::SegmentIndex(recStore);
+        playback = new PlaybackController(recIndex, QString::fromStdString(recCamera), &app);
+        vms::persist::Result r;
+        if (recStore.query(
+                "SELECT MIN(start_utc), MAX(end_utc) FROM segments WHERE camera_id=?;",
+                {recCamera}, r) &&
+            !r.rows.empty() && std::holds_alternative<std::string>(r.rows[0][0])) {
+            playback->setRange(
+                QString::fromStdString(std::get<std::string>(r.rows[0][0])),
+                QString::fromStdString(std::get<std::string>(r.rows[0][1])));
+        }
+        std::cout << "playback: " << recDbArg << " camera '" << recCamera << "' ("
+                  << playback->spans().size() << " span(s))" << std::endl;
+    }
+#endif
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("liveCtrl"),
                                               &liveController);
     engine.rootContext()->setContextProperty(QStringLiteral("playbackCtrl"),
                                               &playbackController);
+    // `playback` is the recording-backed controller (or null on a build without
+    // persistence); the QML guards every use with `playback &&`.
+    engine.rootContext()->setContextProperty(QStringLiteral("playback"), playback);
     engine.rootContext()->setContextProperty(QStringLiteral("videoActive"),
                                               video);
     engine.load(QUrl(QStringLiteral("qrc:/Workspace.qml")));
@@ -853,6 +891,15 @@ int main(int argc, char* argv[]) {
     // (the operator has taken over the working set). Playback is not swept — it is
     // paused footage conceptually (and, for now, awaiting the recording backend).
     liveController.startAutoSweep(sweepIntervalSec * 1000);
+
+    // Headless smoke check: load the whole scene (so every QML binding evaluates
+    // and any error/warning surfaces), run briefly, then quit. Used with
+    // QT_QPA_PLATFORM=offscreen to build-verify the QML without a display.
+    if (smokeMs > 0) {
+        std::cout << "smoke: running " << smokeMs << "ms then quitting" << std::endl;
+        QTimer::singleShot(smokeMs, &app, &QGuiApplication::quit);
+    }
+
     const int rc = app.exec();
 #ifdef VMS_WITH_GSTREAMER
     delete grid;
