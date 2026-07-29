@@ -19,6 +19,8 @@
 #include <variant>
 #include <vector>
 
+#include "persist/Error.h"   // shared Status / Error (also used by SecretStore)
+
 struct sqlite3;        // opaque; keeps winsqlite3.h out of this header
 struct sqlite3_stmt;
 
@@ -27,28 +29,6 @@ namespace vms::persist {
 // A cell value. Blobs are out of scope for the entities this pass persists.
 using Value = std::variant<std::nullptr_t, std::int64_t, double, std::string>;
 using Row = std::vector<Value>;
-
-// Typed persistence status (the C0-03 "typed persistence errors" requirement).
-enum class Status {
-    Ok,
-    NotFound,     // an expected row was absent (set by repositories, not exec)
-    Constraint,   // uniqueness / FK / check violation
-    Busy,         // database locked
-    Io,           // disk / file error
-    Migration,    // a migration step failed
-    Misuse,       // API used incorrectly (e.g. store not open)
-    Error,        // any other failure
-};
-const char* StatusName(Status s);
-
-struct Error {
-    Status status = Status::Ok;
-    std::string message;
-    int sqliteCode = 0;
-    bool ok() const { return status == Status::Ok; }
-    explicit operator bool() const { return ok(); }  // `if (err)` == success
-    static Error success() { return {}; }
-};
 
 // One forward migration: applied once, in ascending version order, tracked in
 // schema_migrations. Forward-only (no down-migrations in the standalone pass).

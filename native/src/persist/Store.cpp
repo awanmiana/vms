@@ -6,20 +6,6 @@
 
 namespace vms::persist {
 
-const char* StatusName(Status s) {
-    switch (s) {
-        case Status::Ok:         return "ok";
-        case Status::NotFound:   return "not-found";
-        case Status::Constraint: return "constraint";
-        case Status::Busy:       return "busy";
-        case Status::Io:         return "io";
-        case Status::Migration:  return "migration";
-        case Status::Misuse:     return "misuse";
-        case Status::Error:      return "error";
-    }
-    return "?";
-}
-
 namespace {
 
 Status statusForSqlite(int code) {

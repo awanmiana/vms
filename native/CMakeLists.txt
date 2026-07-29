@@ -62,11 +62,15 @@ if(WIN32)
         src/persist/Store.cpp
         src/persist/Schema.cpp
         src/persist/WorkspaceRepo.cpp
+        src/persist/SecretStore.cpp
+        src/persist/CredentialRepo.cpp
     )
     target_include_directories(vms_persist PUBLIC src)
     # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
     # winsqlite3.lib from the Windows SDK). No download, no vendoring.
-    target_link_libraries(vms_persist PUBLIC winsqlite3)
+    # crypt32: DPAPI (CryptProtectData/CryptUnprotectData) for the secret store
+    # (native increment 6a). The SecretStore itself is SQLite-free and swappable.
+    target_link_libraries(vms_persist PUBLIC winsqlite3 crypt32)
     target_compile_definitions(vms_persist PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     if(MSVC)
@@ -76,6 +80,13 @@ if(WIN32)
     add_executable(vms_dbtest src/persist/main_dbtest.cpp)
     target_link_libraries(vms_dbtest PRIVATE vms_persist)
     add_test(NAME persist_selfcheck COMMAND vms_dbtest)
+
+    # Native increment 6a — credential store (DPAPI) self-check.
+    add_executable(vms_credtest src/persist/main_credtest.cpp)
+    target_link_libraries(vms_credtest PRIVATE vms_persist)
+    target_compile_definitions(vms_credtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME credential_selfcheck COMMAND vms_credtest)
 else()
     message(STATUS "Non-Windows: skipping vms_persist (winsqlite3 backend); a "
                    "system-SQLite backend behind Store is deferred.")

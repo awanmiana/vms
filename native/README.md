@@ -7,7 +7,7 @@ specification, not the product runtime.
 > ⚠️ Native C++ is authored here but compiled/run on your hardware. If a build surfaces
 > compiler/linker errors, paste them and they get fixed.
 
-## Current status (2026-07-26)
+## Current status (2026-07-27)
 
 Foundation validated. Increments 1–3 build and run; self-contained packaging is proven. Increment
 4a (`vms_grid`) is verified on a live camera and its camera-free `--test-pattern` fan-out measured
@@ -82,6 +82,24 @@ range/timeline/transport to real recordings (needs the Phase-4 recording backend
 (non-reloading) live apply; (blocked on hardware) live-camera RTSP confirmation and low-end i5
 calibration.**
 
+The **connection broker + credential store (DPAPI)** gate — the gate P0-04 deferred its
+`credential_ref` to — is now **scope-approved (2026-07-27, Option A: in-process broker + Windows
+DPAPI)** per `credential-broker-P1-03-proposal.md`, and **increment 6a is built and verified on the
+dev box:** `vms_persist` gains a swappable, SQLite-free `SecretStore` (a shared `Error.h` now carries
+the typed status vocabulary) with a **Windows DPAPI** backend (`CryptProtectData`/`CryptUnprotectData`,
+ciphertext base64-stored in an atomically-rewritten backing file, plaintext only in memory) and an
+in-memory test double. `vms_credtest`/CTest (`credential_selfcheck`) passes 26 checks: the interface
+contract, a real DPAPI encrypt→decrypt round-trip, the **no-plaintext-at-rest** property (the on-disk
+file holds only ciphertext), secret durability across reopen, idempotent remove, and typed
+`NotFound`/`Crypto`/`Misuse` failures. **Increment 6b is now built and verified too:** a
+`CredentialRepo` binds `device_credentials.credential_ref` ↔ `SecretStore` so SQLite holds only the
+opaque ref and the plaintext secret never enters any DB file. Provisioning is atomic — both the ref
+row and the encrypted secret are written or neither, verified on both failure paths (a failed secret
+write rolls back the ref row; an unknown-device FK violation writes no secret) — the ref is stable
+across secret rotation, and remove is atomic + idempotent. `vms_credtest` now runs 45 checks
+(6a + 6b), including a no-plaintext scan of the main + WAL + shm DB files. 6c (the standalone
+`ConnectionBroker`; rewire callers off URL-with-password) remains.
+
 | # | Component | Status |
 | :- | :- | :- |
 | 1 | `vms_hwprobe` — D3D11 per-codec HW-decode probe + machine tier | ✅ verified (dev box) |
@@ -102,6 +120,8 @@ calibration.**
 | P3-14 s7 | Operator-set desired media tier — the **first orthogonal control axis** made interactive. Main/Sub/Thumb/Off buttons in the info panel set a camera's quality ceiling (`setDesiredTier`); the governor never exceeds it (it seeds each tile at `desired`), so capping a camera or turning it Off frees decode+memory budget for the others | ✅ built & verified (dev box): `--selftest` shows a Thumb cap holds a camera at thumb and Off pauses it even with budget to spare; a simulated Thumb click capped the focused camera to THUMB·Live live (info panel + browser reflect it). CTest + `--selftest` green |
 | P3-14 s8 | **Two independently stateful instances** (the P3-14 headline): a Live/Playback tab bar with two `WorkspaceController` instances; QML `governor` binds to the active tab so the whole view re-binds with no duplication. The video pipeline follows the Live instance; the Playback tab is chrome-only with a transport scaffold (timeline + ⏮◀◀▶▶▶⏭) honestly marked "awaiting recorded footage (Phase 4)" | ✅ built & verified (dev box): captured both tabs — Live shows the video-backed governed grid, Playback shows its own independent state + transport bar, video hidden; switching re-binds the entire workspace. CTest + `--selftest` green |
 | 5 (P0-04) | Persistence — the standalone embedded store (owner-selected direction). `vms_persist`: SQLite via the Windows-bundled **winsqlite3** (no download/vendoring; Qt-free, swappable) behind the C0-03 adapter contract — declared tables, atomic writes + RAII rollback, versioned idempotent forward migrations (`Schema.cpp`, one source of truth), typed errors, online backup/export; a `WorkspaceRepo` for layout state; and `vms_workspace` wired to persist/restore. `vms_dbtest`/CTest | ✅ built & verified (dev box): `persist_selfcheck` green — 29 checks (canonical schema, durability across reopen, FK constraint, atomic rollback, layout round-trip, export). **5c end-to-end verified:** close the app with a 25-tile 5×5 layout, relaunch requesting `--count 4`, and it restores 25 tiles. Scope approved 2026-07-26 (`persistence-P0-04-proposal.md`). Central DB/cloud/sync + offline conflict reconciliation deferred to P1-10; credential secrets (DPAPI) are the next gate |
+| 6a (P1-03/N0) | Credential store — the OS secret store (DPAPI). `vms_persist` gains a swappable, SQLite-free `SecretStore` interface (shared `Error.h` typed status) with a **Windows DPAPI** backend (`CryptProtectData`/`CryptUnprotectData`; ciphertext base64 in an atomically-rewritten backing file; plaintext in memory only) and an in-memory double. Realizes the N0 broker decision + P1-03 secrets-storage clause for the standalone runtime. `vms_credtest`/CTest | ✅ built & verified (dev box): `credential_selfcheck` green — 26 checks (interface contract, real DPAPI encrypt→decrypt round-trip, **no-plaintext-at-rest**, durability across reopen, idempotent remove, typed `NotFound`/`Crypto`/`Misuse`). Scope approved 2026-07-27, Option A (`credential-broker-P1-03-proposal.md`). Coordinated vault/RBAC → P1-10, operator auth/MFA → rest of P1-03, credential audit → P1-06 |
+| 6b (P1-03/N0) | Credential wiring + atomicity. A `CredentialRepo` (`CredentialRepo.h/.cpp`, in `vms_persist`) binds `device_credentials.credential_ref` ↔ `SecretStore`: SQLite holds only the opaque ref, the plaintext secret never enters any DB file, and provisioning writes the ref row + encrypted secret **atomically** (both or neither). `vms_credtest`/CTest | ✅ built & verified (dev box): `credential_selfcheck` now 45 checks (6a + **19 for 6b**) — round-trip, opaque-ref, stable ref across rotation, both atomicity paths (failed secret write rolls back the ref row; unknown-device FK violation writes no secret), atomic + idempotent remove, and a **no-plaintext scan of the main + WAL + shm DB files**. **6c** (standalone `ConnectionBroker`; rewire `vms_grid`/`vms_workspace` off URL-with-password) next |
 
 **Outstanding data:** run `vms_hwprobe.exe` on the low-end **i5 4th-gen / 8GB / no-GPU** machine
 (expected `h265Main: false`). That profile shapes the governor in increment 4.
