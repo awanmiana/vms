@@ -79,6 +79,26 @@ endif()
 add_test(NAME optimize_selfcheck COMMAND vms_opttest)
 
 # ---------------------------------------------------------------------------
+# Native increment 9 (P1-10/P0-03/A0) — node-connectivity resilience. A pure
+# decision core: which of this software's own peer/AI-agent endpoints to use and
+# when to fail over (P0-03 breaker). No sockets — the transport is P1-10. Not
+# camera connectivity (that is the ConnectionBroker). Self-verifying.
+# ---------------------------------------------------------------------------
+add_library(vms_node STATIC src/node/NodeRegistry.cpp)
+target_include_directories(vms_node PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_node PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_nodetest src/node/main_nodetest.cpp)
+target_link_libraries(vms_nodetest PRIVATE vms_node)
+if(WIN32)
+    target_compile_definitions(vms_nodetest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME node_selfcheck COMMAND vms_nodetest)
+
+# ---------------------------------------------------------------------------
 # Native increment 5 (P0-04) — persistence: an embedded local relational store
 # (SQLite via the Windows-bundled winsqlite3) behind the C0-03 adapter contract.
 # Qt-free and self-verifying, like the governor. On non-Windows a system SQLite
