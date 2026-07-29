@@ -116,6 +116,15 @@ void PlaybackController::seekFrac(double frac) {
     emit playheadChanged();
 }
 
+void PlaybackController::setPlayheadAbs(long long epochSec) {
+    const long long a = startSec(), b = endSec();
+    if (epochSec < a) epochSec = a;
+    if (epochSec > b) epochSec = b;
+    if (epochSec == playheadSec_) return;
+    playheadSec_ = epochSec;
+    emit playheadChanged();
+}
+
 void PlaybackController::play() {
     if (!playing_) { playing_ = true; emit transportChanged(); }
 }

@@ -265,6 +265,19 @@ Window {
                 visible: videoActive && root.tabIndex === 0
             }
 
+            // Recorded video for the Playback tab (inc 7c-3): a second VideoItem
+            // fed by a PlaybackPipeline decoding the recorded .mp4 at the playhead.
+            // Placed above the (opaque) playback tile chrome but below the panels
+            // and transport, and only shown on the Playback tab.
+            VideoItem {
+                id: playbackVideoLayer
+                objectName: "playbackVideoOut"
+                anchors.fill: parent
+                z: 1
+                visible: root.tabIndex === 1
+                       && (typeof playback !== "undefined") && playback !== null
+            }
+
             Grid {
                 anchors.fill: parent
                 anchors.margins: gridArea.spacingPx

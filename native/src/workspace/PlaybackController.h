@@ -73,6 +73,12 @@ public:
     // is what slice 7c-2 hands to a playbin.
     Q_INVOKABLE QVariantMap segmentAtPlayhead() const;
 
+    // Absolute playhead position in epoch seconds, and a C++-side setter the
+    // playback pipeline uses to push the decoded position back so the timeline
+    // scrubber follows the video during playback (inc 7c-3). Clamps to the window.
+    long long playheadAbs() const { return playheadSec_; }
+    void setPlayheadAbs(long long epochSec);
+
     // Plain-text dump of the current spans (used by --playback-selftest).
     QString dumpSpans() const;
 

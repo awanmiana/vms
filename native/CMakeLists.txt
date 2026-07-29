@@ -52,6 +52,33 @@ enable_testing()
 add_test(NAME governor_selfcheck COMMAND vms_govtest)
 
 # ---------------------------------------------------------------------------
+# Native increment 8 (P12-03/P0-01F) — optimization service. A live system-
+# health probe feeds the governor's capacity so the wall degrades before the
+# machine is exhausted; adds a bandwidth admission budget and an honest report.
+# Pure decision core (Optimizer) + OS probe (SystemHealth, Windows impl) behind
+# a swappable interface, self-verifying like the governor.
+# ---------------------------------------------------------------------------
+add_library(vms_optimize STATIC src/optimize/Optimizer.cpp)
+target_include_directories(vms_optimize PUBLIC src)
+target_link_libraries(vms_optimize PUBLIC vms_governor)
+if(WIN32)
+    target_sources(vms_optimize PRIVATE src/optimize/SystemHealth.cpp)
+    target_compile_definitions(vms_optimize PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+if(MSVC)
+    target_compile_options(vms_optimize PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_opttest src/optimize/main_opttest.cpp)
+target_link_libraries(vms_opttest PRIVATE vms_optimize)
+if(WIN32)
+    target_compile_definitions(vms_opttest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME optimize_selfcheck COMMAND vms_opttest)
+
+# ---------------------------------------------------------------------------
 # Native increment 5 (P0-04) — persistence: an embedded local relational store
 # (SQLite via the Windows-bundled winsqlite3) behind the C0-03 adapter contract.
 # Qt-free and self-verifying, like the governor. On non-Windows a system SQLite
@@ -176,6 +203,8 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         src/workspace/VideoItem.h
         src/workspace/GridPipeline.cpp
         src/workspace/GridPipeline.h
+        src/workspace/PlaybackPipeline.cpp
+        src/workspace/PlaybackPipeline.h
         src/workspace/workspace.qrc
     )
     # --profile auto seeds the governor from the live hardware probe (Windows

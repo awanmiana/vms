@@ -122,6 +122,13 @@ int main(int argc, char* argv[]) {
 
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+    // Store an ABSOLUTE segment directory so the index is location-independent:
+    // Playback opens the files by the path recorded here, from any working dir.
+    {
+        std::error_code ae;
+        const std::filesystem::path abs = std::filesystem::absolute(outDir, ae);
+        if (!ae) outDir = abs.string();
+    }
 
     const std::string enc = (codec == "h265")
         ? "x265enc key-int-max=25"

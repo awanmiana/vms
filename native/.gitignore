@@ -9,3 +9,12 @@ out/
 *.exp
 CMakeCache.txt
 CMakeFiles/
+
+# Local test / measurement artifacts produced by the tools (never committed):
+#   credential/broker DBs, vms_record output, ramp-decode run logs.
+cams.db
+rec.db
+rec.db-shm
+rec.db-wal
+rec/
+results/logs/

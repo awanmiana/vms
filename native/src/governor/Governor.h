@@ -48,13 +48,16 @@ const char* TileStateName(TileState s);
 struct TierCost {
     double decode = 0.0;
     double memoryMb = 0.0;
+    double bandwidthKbps = 0.0;   // network cost of the stream (0 = unmodeled)
 };
 
 struct CostModel {
-    TierCost main{1.0, 50.0};
-    TierCost sub{0.28, 35.0};   // ~64/249 sustainable
-    TierCost thumb{0.10, 20.0};
-    TierCost paused{0.0, 0.0};
+    // Bandwidth defaults model a typical H.265 camera: ~4 Mbps main, ~1 Mbps sub,
+    // ~0.25 Mbps thumb. Only enforced when the profile sets a bandwidth budget.
+    TierCost main{1.0, 50.0, 4000.0};
+    TierCost sub{0.28, 35.0, 1000.0};   // ~64/249 sustainable
+    TierCost thumb{0.10, 20.0, 256.0};
+    TierCost paused{0.0, 0.0, 0.0};
     const TierCost& forTier(Tier t) const;
 };
 
@@ -66,6 +69,10 @@ struct CostModel {
 struct CapacityProfile {
     double decodeBudget = 64.0;
     double memoryBudgetMb = 6000.0;
+    // Network link budget in kbps. 0 = unmodeled/unlimited (the default, so the
+    // two-budget behavior is unchanged); the optimizer (increment 8) sets this
+    // from the estimated link so admission also respects bandwidth.
+    double bandwidthBudgetKbps = 0.0;
     double highWatermark = 0.90;
     double lowWatermark = 0.75;
     bool hardwareDecode = true; // false => software/CPU-bound machine
@@ -92,6 +99,7 @@ struct GovernorResult {
     std::vector<TileDecision> tiles;
     double decodeUsed = 0.0;    // main-equivalents
     double memoryUsedMb = 0.0;
+    double bandwidthUsedKbps = 0.0;
     int decoding = 0;           // tiles not Paused
     bool overflow = false;      // a visible tile that wanted video had to be paused
 };

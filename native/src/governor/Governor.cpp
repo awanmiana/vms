@@ -3,8 +3,18 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <tuple>
 #include <utility>
+
+namespace {
+// A budget of 0 means "unmodeled" (e.g. no bandwidth limit set) — treat its cap
+// as infinite so it never constrains admission.
+double CapOrInfinite(double budget, double watermark) {
+    return budget > 0.0 ? budget * watermark
+                        : std::numeric_limits<double>::infinity();
+}
+}  // namespace
 
 namespace {
 
@@ -82,21 +92,24 @@ GovernorResult Governor::assign(const std::vector<TileRequest>& requests) const 
         d[i].degraded = t < requests[i].desired;
     }
 
-    auto recompute = [&](double& dec, double& mem) {
+    auto recompute = [&](double& dec, double& mem, double& bw) {
         dec = 0.0;
         mem = 0.0;
+        bw = 0.0;
         for (const auto& x : d) {
             const TierCost& c = costs_.forTier(x.tier);
             dec += c.decode;
             mem += c.memoryMb;
+            bw += c.bandwidthKbps;
         }
     };
 
     const double decCap = profile_.decodeBudget * profile_.highWatermark;
     const double memCap = profile_.memoryBudgetMb * profile_.highWatermark;
+    const double bwCap = CapOrInfinite(profile_.bandwidthBudgetKbps, profile_.highWatermark);
 
-    double dec = 0.0, mem = 0.0;
-    recompute(dec, mem);
+    double dec = 0.0, mem = 0.0, bw = 0.0;
+    recompute(dec, mem, bw);
 
     // 2. Degrade one step at a time until within both caps, choosing the least
     //    important tile to downgrade. Ordering (pick the minimum): non-focused
@@ -110,7 +123,7 @@ GovernorResult Governor::assign(const std::vector<TileRequest>& requests) const 
                                -r.id);
     };
 
-    while (dec > decCap || mem > memCap) {
+    while (dec > decCap || mem > memCap || bw > bwCap) {
         long best = -1;
         for (std::size_t i = 0; i < n; ++i) {
             if (d[i].tier == Tier::Paused) continue; // nothing left to shed here
@@ -122,12 +135,13 @@ GovernorResult Governor::assign(const std::vector<TileRequest>& requests) const 
         const std::size_t b = static_cast<std::size_t>(best);
         d[b].tier = static_cast<Tier>(static_cast<int>(d[b].tier) - 1);
         d[b].degraded = d[b].tier < requests[b].desired;
-        recompute(dec, mem);
+        recompute(dec, mem, bw);
     }
 
     GovernorResult res;
     res.decodeUsed = dec;
     res.memoryUsedMb = mem;
+    res.bandwidthUsedKbps = bw;
     res.decoding = 0;
     res.overflow = false;
     for (std::size_t i = 0; i < n; ++i) {
@@ -263,6 +277,7 @@ GovernorResult GovernorSession::update(const std::vector<TileRequest>& requests)
             const TierCost& cost = costs_.forTier(tiers[i]);
             result.decodeUsed += cost.decode;
             result.memoryUsedMb += cost.memoryMb;
+            result.bandwidthUsedKbps += cost.bandwidthKbps;
             if (tiers[i] != Tier::Paused) ++result.decoding;
             if (requests[i].visible && requests[i].desired != Tier::Paused &&
                 tiers[i] == Tier::Paused)
@@ -290,12 +305,15 @@ GovernorResult GovernorSession::update(const std::vector<TileRequest>& requests)
     GovernorResult currentResult = resultFromTiers(current);
     const double highDecodeCap = profile_.decodeBudget * profile_.highWatermark;
     const double highMemoryCap = profile_.memoryBudgetMb * profile_.highWatermark;
+    const double highBwCap = CapOrInfinite(profile_.bandwidthBudgetKbps, profile_.highWatermark);
     if (currentResult.decodeUsed > highDecodeCap + 1e-9 ||
-        currentResult.memoryUsedMb > highMemoryCap + 1e-9)
+        currentResult.memoryUsedMb > highMemoryCap + 1e-9 ||
+        currentResult.bandwidthUsedKbps > highBwCap + 1e-9)
         return remember(highPlan);
 
     const double lowDecodeCap = profile_.decodeBudget * profile_.lowWatermark;
     const double lowMemoryCap = profile_.memoryBudgetMb * profile_.lowWatermark;
+    const double lowBwCap = CapOrInfinite(profile_.bandwidthBudgetKbps, profile_.lowWatermark);
 
     // Recover one tier at a time, most-important first, but only when the
     // upgraded plan remains below BOTH low watermarks.
@@ -311,7 +329,9 @@ GovernorResult GovernorSession::update(const std::vector<TileRequest>& requests)
             if (currentResult.decodeUsed + after.decode - before.decode >
                     lowDecodeCap + 1e-9 ||
                 currentResult.memoryUsedMb + after.memoryMb - before.memoryMb >
-                    lowMemoryCap + 1e-9)
+                    lowMemoryCap + 1e-9 ||
+                currentResult.bandwidthUsedKbps + after.bandwidthKbps - before.bandwidthKbps >
+                    lowBwCap + 1e-9)
                 continue;
 
             auto score = [&](std::size_t index) {
@@ -333,6 +353,7 @@ GovernorResult GovernorSession::update(const std::vector<TileRequest>& requests)
         const TierCost after = costs_.forTier(current[index]);
         currentResult.decodeUsed += after.decode - before.decode;
         currentResult.memoryUsedMb += after.memoryMb - before.memoryMb;
+        currentResult.bandwidthUsedKbps += after.bandwidthKbps - before.bandwidthKbps;
     }
 
     return remember(resultFromTiers(current));

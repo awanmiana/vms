@@ -148,6 +148,7 @@ int runPlaybackSelftest() {
 #include <QTimer>
 
 #include "GridPipeline.h"
+#include "PlaybackPipeline.h"
 #include "hardware/HardwareProbe.h"
 
 #include <sstream>
@@ -875,6 +876,65 @@ int main(int argc, char* argv[]) {
     }
 #endif // VMS_WITH_GSTREAMER
 
+#if defined(VMS_WITH_GSTREAMER) && defined(VMS_WITH_PERSIST)
+    // inc 7c-3: decode the recorded segment at the playhead into the Playback
+    // pane. The PlaybackController owns the timeline/scrub/transport intent; this
+    // wiring turns that intent into real decoded video and pushes the decoded
+    // position back so the scrubber follows the picture and rolls onto the next
+    // segment file at a boundary.
+    PlaybackPipeline* pbPipe = nullptr;
+    QTimer pbPoll;
+    long long pbSegStartAbs = 0;   // abs start of the file currently open
+    bool pbInternal = false;       // guard: playhead moves we caused ourselves
+    if (playback) {
+        VideoItem* pbItem = engine.rootObjects().first()->findChild<VideoItem*>(
+            QStringLiteral("playbackVideoOut"));
+        if (pbItem) {
+            pbPipe = new PlaybackPipeline(pbItem);
+
+            auto syncToPlayhead = [&]() {
+                const QVariantMap seg = playback->segmentAtPlayhead();
+                const QString path = seg.value(QStringLiteral("path")).toString();
+                const double off = seg.value(QStringLiteral("offsetSec")).toDouble();
+                if (path.isEmpty()) { if (pbPipe) pbPipe->pause(); return; }  // gap
+                std::string e;
+                if (pbPipe && !pbPipe->openFile(path.toStdString(), off, e))
+                    std::cerr << "playback video: " << e << std::endl;
+                pbSegStartAbs = playback->playheadAbs() - static_cast<long long>(off);
+            };
+
+            // Operator scrub/step/skip: (re)point the pipeline at the new time.
+            QObject::connect(playback, &PlaybackController::playheadChanged,
+                             [&]() { if (!pbInternal) syncToPlayhead(); });
+            // Play/pause + speed.
+            QObject::connect(playback, &PlaybackController::transportChanged, [&]() {
+                if (!pbPipe) return;
+                pbPipe->setRate(playback->speed());
+                if (playback->playing()) { syncToPlayhead(); pbPipe->play(); }
+                else pbPipe->pause();
+            });
+            // Advance the timeline playhead from the decoded position, and roll
+            // onto the next segment file when this one ends.
+            QObject::connect(&pbPoll, &QTimer::timeout, [&]() {
+                std::string e;
+                if (pbPipe && !pbPipe->pumpBus(e))
+                    std::cerr << "playback video: " << e << std::endl;
+                if (!pbPipe || !playback->playing()) return;
+                const double pos = pbPipe->positionSec();
+                if (pos < 0) return;
+                pbInternal = true;
+                playback->setPlayheadAbs(pbSegStartAbs + static_cast<long long>(pos));
+                pbInternal = false;
+                const QVariantMap seg = playback->segmentAtPlayhead();
+                if (seg.value(QStringLiteral("path")).toString().toStdString() !=
+                    pbPipe->currentFile())
+                    syncToPlayhead();   // crossed into a new segment (or a gap)
+            });
+            pbPoll.start(150);
+        }
+    }
+#endif // VMS_WITH_GSTREAMER && VMS_WITH_PERSIST
+
 #ifdef VMS_WITH_PERSIST
     // Save both instances' layouts on exit so the next launch restores them.
     if (persisting) {
@@ -898,11 +958,27 @@ int main(int argc, char* argv[]) {
     if (smokeMs > 0) {
         std::cout << "smoke: running " << smokeMs << "ms then quitting" << std::endl;
         QTimer::singleShot(smokeMs, &app, &QGuiApplication::quit);
+#if defined(VMS_WITH_GSTREAMER) && defined(VMS_WITH_PERSIST)
+        // Exercise the Playback decode path offscreen: seek to the start of the
+        // recorded footage and play, so the pipeline decodes real frames we can
+        // count (proves 7c-3 without a display).
+        if (pbPipe && playback && !playback->spans().isEmpty()) {
+            playback->seekFrac(0.0);
+            playback->play();
+            QObject::connect(&app, &QGuiApplication::aboutToQuit, [&pbPipe]() {
+                std::cout << "smoke: playback frames pulled = "
+                          << (pbPipe ? pbPipe->framesPulled() : 0) << std::endl;
+            });
+        }
+#endif
     }
 
     const int rc = app.exec();
 #ifdef VMS_WITH_GSTREAMER
     delete grid;
+#endif
+#if defined(VMS_WITH_GSTREAMER) && defined(VMS_WITH_PERSIST)
+    delete pbPipe;
 #endif
     return rc;
 }
