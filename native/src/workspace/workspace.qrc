@@ -2,5 +2,6 @@
 <RCC version="1.0">
     <qresource prefix="/">
         <file>Workspace.qml</file>
+        <file>DevicesView.qml</file>
     </qresource>
 </RCC>

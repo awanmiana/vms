@@ -73,7 +73,8 @@ Window {
                 spacing: 4
                 Repeater {
                     model: [ { label: "Live", idx: 0 },
-                             { label: "Playback", idx: 1 } ]
+                             { label: "Playback", idx: 1 },
+                             { label: "Devices", idx: 2 } ]
                     delegate: Rectangle {
                         property bool active: root.tabIndex === modelData.idx
                         width: tabText.width + 30; height: 26; radius: 6
@@ -99,16 +100,22 @@ Window {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.tabIndex === 0
                       ? "live view"
-                      : ((typeof playback !== "undefined" && playback)
-                         ? ("playback — " + playback.spans.length + " footage span(s)")
-                         : "playback — no recording index")
+                      : root.tabIndex === 2
+                        ? ((typeof devicesCtrl !== "undefined" && devicesCtrl)
+                           ? ("device management — " + devicesCtrl.deviceCount + " device(s)")
+                           : "device management — persistence unavailable")
+                        : ((typeof playback !== "undefined" && playback)
+                           ? ("playback — " + playback.spans.length + " footage span(s)")
+                           : "playback — no recording index")
                 color: "#5a6270"; font.pixelSize: 11
             }
         }
 
         // --- header / capacity meter + toolbar ---
+        // Hidden on the Devices tab (tabIndex 2), which is not a governed view.
         Rectangle {
             id: header
+            visible: root.tabIndex !== 2
             width: parent.width
             height: 92
             color: "#141821"
@@ -249,6 +256,7 @@ Window {
         // --- the governed grid ---
         Item {
             id: gridArea
+            visible: root.tabIndex !== 2
             width: parent.width
             height: parent.height - header.height - tabBar.height
 
@@ -773,6 +781,34 @@ Window {
                         }
                     }
                 }
+            }
+        }
+
+        // --- Devices tab (onboarding UI, increment 14) ---
+        // A non-governed management surface, shown only on tabIndex 2. Loaded
+        // (not just hidden) so its bindings don't evaluate against a null
+        // devicesCtrl on a build without persistence; when present it is
+        // instantiated up front so the offscreen --smoke-ms verifies its
+        // bindings even while another tab is active.
+        Loader {
+            id: devicesLoader
+            visible: root.tabIndex === 2
+            width: parent.width
+            height: root.height - tabBar.height
+            active: (typeof devicesCtrl !== "undefined") && devicesCtrl !== null
+            source: active ? "DevicesView.qml" : ""
+        }
+
+        // Fallback when persistence (and thus the device inventory) is absent.
+        Rectangle {
+            visible: root.tabIndex === 2 && !devicesLoader.active
+            width: parent.width
+            height: root.height - tabBar.height
+            color: "#0e1014"
+            Text {
+                anchors.centerIn: parent
+                text: "Device management needs the persistence build."
+                color: "#5a6270"; font.pixelSize: 14
             }
         }
     }

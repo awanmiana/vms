@@ -41,6 +41,8 @@
 #include <string>
 
 #ifdef VMS_WITH_PERSIST
+#include <memory>
+
 #include <QDir>
 #include <QStandardPaths>
 
@@ -48,7 +50,11 @@
 #include "persist/Store.h"
 #include "persist/WorkspaceRepo.h"
 #include "persist/SegmentIndex.h"
+#include "persist/DeviceRepo.h"
+#include "persist/SecretStore.h"
+#include "health/HealthMonitor.h"
 #include "PlaybackController.h"
+#include "DeviceController.h"
 
 namespace {
 
@@ -139,6 +145,136 @@ int runPlaybackSelftest() {
     if (failures == 0) {
         std::cout << "PASS: playback availability model, playhead footage/gap "
                      "detection, and transport state verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// increment 14 (onboarding UI): headless check that DeviceController turns the
+// DeviceRepo + HealthMonitor cores into the honest model the Devices tab binds
+// to — onboard → Unknown-until-observed → Offline/Online derivation → exception
+// raise / acknowledge / auto-clear → remove — with the credential stored only
+// via the SecretStore (never exposed). No window, no camera.
+int runDevicesSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+
+    Store store;
+    check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+    check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+    check(store.schemaVersion() == 5, "schema at v5 (device kind, inc 15)");
+    InMemorySecretStore secrets;
+    DeviceRepo repo(store, secrets);
+    vms::health::HealthMonitor health;
+    DeviceController ctrl(&repo, &health);
+
+    std::cout << "vms_workspace --devices-selftest\n";
+    check(ctrl.deviceCount() == 0, "starts with no devices");
+
+    QString err = ctrl.onboard(
+        QStringLiteral("cam-1"), QStringLiteral("Front Door"),
+        QStringLiteral("192.168.0.11"), QStringLiteral("Hikvision"),
+        QStringLiteral("admin"), QStringLiteral("secret@1"),
+        QStringLiteral("rtsp://192.168.0.11:554/Streaming/Channels/101"),
+        QStringLiteral("rtsp://192.168.0.11:554/Streaming/Channels/102"));
+    check(err.isEmpty(), "onboard via the controller succeeds");
+    check(ctrl.deviceCount() == 1, "device appears in the model");
+
+    // The credential is stored via the SecretStore under the broker's ref (and
+    // never read back by the controller) — proving the onboard atomicity path.
+    std::string secret;
+    check(static_cast<bool>(secrets.get(CredentialRepo::mintRef("cam-1"), secret)) &&
+              secret == "admin:secret@1",
+          "credential stored via SecretStore under the broker ref");
+
+    QVariantMap d0 = ctrl.devices().first().toMap();
+    check(d0.value(QStringLiteral("cameraCount")).toInt() == 1,
+          "one camera channel onboarded");
+    check(d0.value(QStringLiteral("health")).toMap()
+              .value(QStringLiteral("state")).toString() == QLatin1String("unknown"),
+          "new device health is Unknown until observed");
+
+    auto healthOf = [&]() {
+        return ctrl.devices().first().toMap()
+            .value(QStringLiteral("health")).toMap();
+    };
+
+    ctrl.reportReach(QStringLiteral("cam-1"), 0);   // offline
+    check(healthOf().value(QStringLiteral("state")).toString() ==
+              QLatin1String("offline"),
+          "reported offline -> Offline");
+    check(healthOf().value(QStringLiteral("exceptionActive")).toBool(),
+          "offline raises an exception");
+    check(ctrl.attentionCount() == 1, "offline device needs attention");
+
+    ctrl.acknowledge(QStringLiteral("cam-1"));
+    check(healthOf().value(QStringLiteral("exceptionActive")).toBool() &&
+              healthOf().value(QStringLiteral("exceptionAcknowledged")).toBool(),
+          "acknowledge silences the alert but keeps the exception");
+    check(ctrl.attentionCount() == 0,
+          "acknowledged device no longer needs attention");
+
+    ctrl.reportReach(QStringLiteral("cam-1"), 1);   // online
+    ctrl.reportStream(QStringLiteral("cam-1"), 2);  // ok
+    check(healthOf().value(QStringLiteral("state")).toString() ==
+              QLatin1String("online"),
+          "reachable + stream ok -> Online");
+    check(!healthOf().value(QStringLiteral("exceptionActive")).toBool(),
+          "recovery auto-clears the exception");
+
+    err = ctrl.removeDevice(QStringLiteral("cam-1"));
+    check(err.isEmpty() && ctrl.deviceCount() == 0, "remove clears the device");
+    check(!secrets.contains(CredentialRepo::mintRef("cam-1")),
+          "remove deletes the credential secret");
+
+    // inc 15: a multi-channel recorder onboards atomically — N channels expand
+    // from the URL templates and the default group is reconciled to all N.
+    err = ctrl.onboardRecorder(
+        QStringLiteral("nvr-1"), QStringLiteral("Lobby NVR"),
+        QStringLiteral("192.168.0.20"), QStringLiteral("Hikvision"),
+        QStringLiteral("nvr"), QStringLiteral("admin"), QStringLiteral("pw"),
+        4, QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}01"),
+        QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}02"));
+    check(err.isEmpty(), "recorder onboard succeeds");
+    check(ctrl.deviceCount() == 1, "recorder appears as one device");
+    QVariantMap nvr = ctrl.devices().first().toMap();
+    check(nvr.value(QStringLiteral("kind")).toString() == QLatin1String("nvr"),
+          "device kind persisted as nvr");
+    check(nvr.value(QStringLiteral("cameraCount")).toInt() == 4,
+          "4 channels expanded from the templates");
+
+    std::vector<std::string> ids;
+    repo.cameraIds("nvr-1", ids);
+    check(ids.size() == 4 && ids.front() == "nvr-1-ch1" && ids.back() == "nvr-1-ch4",
+          "channels have stable ids nvr-1-ch1..ch4");
+
+    // The default group (P2-02) holds exactly the 4 channels.
+    Result gr;
+    store.query("SELECT COUNT(*) FROM camera_group_members WHERE group_id=?;",
+                {DeviceRepo::defaultGroupId("nvr-1")}, gr);
+    check(!gr.rows.empty() && std::get<std::int64_t>(gr.rows[0][0]) == 4,
+          "default group reconciled to all 4 channels");
+
+    // Idempotent re-scan to 6 channels grows the inventory + the group.
+    ctrl.onboardRecorder(
+        QStringLiteral("nvr-1"), QStringLiteral("Lobby NVR"),
+        QStringLiteral("192.168.0.20"), QStringLiteral("Hikvision"),
+        QStringLiteral("nvr"), QStringLiteral("admin"), QStringLiteral("pw"),
+        6, QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}01"),
+        QString());
+    check(ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt() == 6,
+          "re-onboard to 6 channels is idempotent (device stays single, grows to 6)");
+
+    if (failures == 0) {
+        std::cout << "PASS: onboard -> honest health (Unknown/Offline/Online) -> "
+                     "exception raise/ack/auto-clear -> remove; recorder onboard "
+                     "expands N channels + reconciles the default group, via the "
+                     "DeviceController model\n";
         return 0;
     }
     std::cout << "FAILED: " << failures << " check(s)\n";
@@ -644,6 +780,8 @@ int main(int argc, char* argv[]) {
     int sweepIntervalSec = 4;
     bool selftest = false;
     bool playbackSelftest = false;
+    bool devicesSelftest = false;        // headless DeviceController check (inc 14)
+    bool devicesDemo = false;            // seed demo devices for the Devices tab
     bool video = false;
     bool noPersist = false;
     std::string dbPathArg;
@@ -666,6 +804,10 @@ int main(int argc, char* argv[]) {
             selftest = true;
         } else if (a == "--playback-selftest") {
             playbackSelftest = true;
+        } else if (a == "--devices-selftest") {
+            devicesSelftest = true;
+        } else if (a == "--devices-demo") {
+            devicesDemo = true;
         } else if (a == "--video") {
             video = true;
         } else if (a == "--no-persist") {
@@ -701,16 +843,23 @@ int main(int argc, char* argv[]) {
                 "  --sweep-interval S   seconds between focus re-plans (default 4)\n"
                 "  --video              render live video under the state chrome\n"
                 "                       (slice 2; needs the GStreamer build)\n"
-                "  --selftest           headless plan check, no window\n";
+                "  --selftest           headless plan check, no window\n"
+                "  --devices-selftest   headless onboarding/health check (inc 14)\n"
+                "  --devices-demo       seed demo devices in the Devices tab\n";
             return 0;
         }
     }
 
 #ifdef VMS_WITH_PERSIST
     if (playbackSelftest) return runPlaybackSelftest();
+    if (devicesSelftest) return runDevicesSelftest();
 #else
     if (playbackSelftest) {
         std::cerr << "--playback-selftest needs the persistence build.\n";
+        return 2;
+    }
+    if (devicesSelftest) {
+        std::cerr << "--devices-selftest needs the persistence build.\n";
         return 2;
     }
 #endif
@@ -775,8 +924,9 @@ int main(int argc, char* argv[]) {
     // non-fatal — the app runs, just without remembering state.
     vms::persist::Store store;
     bool persisting = false;
+    std::string dbPath;   // hoisted: the device SecretStore backing file sits by it
     if (!noPersist) {
-        std::string dbPath = dbPathArg;
+        dbPath = dbPathArg;
         if (dbPath.empty()) {
             const QString dir = QStandardPaths::writableLocation(
                 QStandardPaths::AppDataLocation);
@@ -796,6 +946,75 @@ int main(int argc, char* argv[]) {
             restoreInstance(store, "playback", playbackController);
             std::cout << "persist: " << dbPath << " (schema v"
                       << store.schemaVersion() << ")" << std::endl;
+        }
+    }
+#endif
+
+    // increment 14 (onboarding UI): the Devices tab binds to a DeviceController
+    // over the SAME standalone store — the device inventory (DeviceRepo, atomic
+    // onboard / channel sync / remove) with the credential secret in the OS
+    // secret store (DPAPI), plus honest per-device health (HealthMonitor). Only
+    // available when persistence opened; the QML guards every use with a null
+    // check. The health feed is Unknown-until-observed — real observations from
+    // the broker/ONVIF are the live-blocked remainder; --devices-demo seeds a few
+    // devices with scripted health so the surface is verifiable without a camera.
+    QObject* devicesCtrl = nullptr;   // exposed to QML (null without persistence)
+#ifdef VMS_WITH_PERSIST
+    std::unique_ptr<vms::persist::SecretStore> deviceSecrets;
+    std::unique_ptr<vms::persist::DeviceRepo> deviceRepo;
+    vms::health::HealthMonitor deviceHealth;
+    DeviceController* devices = nullptr;
+    if (persisting) {
+#ifdef _WIN32
+        auto dpapi = std::make_unique<vms::persist::DpapiSecretStore>(
+            dbPath + ".secrets");
+        dpapi->open();   // a missing backing file is not an error (first run)
+        deviceSecrets = std::move(dpapi);
+#else
+        deviceSecrets = std::make_unique<vms::persist::InMemorySecretStore>();
+#endif
+        deviceRepo =
+            std::make_unique<vms::persist::DeviceRepo>(store, *deviceSecrets);
+        devices = new DeviceController(deviceRepo.get(), &deviceHealth, &app);
+        devicesCtrl = devices;
+
+        if (devicesDemo) {
+            struct Demo { const char* id; const char* name; const char* addr;
+                          const char* vendor; int reach; int stream; bool maint; };
+            const Demo demos[] = {
+                {"cam-front", "Front Door", "192.168.0.11", "Hikvision", 1, 2, false},
+                {"cam-park",  "Parking Lot", "192.168.0.12", "Axis",      1, 1, false},
+                {"cam-bay",   "Loading Bay", "192.168.0.13", "Dahua",     0, 0, false},
+                {"cam-lobby", "Lobby",       "192.168.0.14", "Hanwha",    1, 2, true},
+                {"cam-roof",  "Rooftop",     "192.168.0.15", "Bosch",    -1, -1, false},
+            };
+            for (const Demo& d : demos) {
+                const QString id = QString::fromLatin1(d.id);
+                devices->onboard(id, QString::fromLatin1(d.name),
+                                 QString::fromLatin1(d.addr),
+                                 QString::fromLatin1(d.vendor),
+                                 QStringLiteral("admin"), QStringLiteral("demo"),
+                                 QStringLiteral("rtsp://") +
+                                     QString::fromLatin1(d.addr) +
+                                     QStringLiteral(":554/Streaming/Channels/101"),
+                                 QString());
+                if (d.reach >= 0) devices->reportReach(id, d.reach);
+                if (d.stream >= 0) devices->reportStream(id, d.stream);
+                if (d.maint) devices->setMaintenance(id, true);
+            }
+            // A multi-channel recorder (inc 15): 8 channels expanded from the
+            // URL templates, reported online with an ok stream.
+            devices->onboardRecorder(
+                QStringLiteral("nvr-lobby"), QStringLiteral("Lobby NVR"),
+                QStringLiteral("192.168.0.20"), QStringLiteral("Hikvision"),
+                QStringLiteral("nvr"), QStringLiteral("admin"), QStringLiteral("demo"),
+                8, QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}01"),
+                QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}02"));
+            devices->reportReach(QStringLiteral("nvr-lobby"), 1);
+            devices->reportStream(QStringLiteral("nvr-lobby"), 2);
+            std::cout << "devices: seeded " << devices->deviceCount()
+                      << " demo device(s), " << devices->attentionCount()
+                      << " need attention" << std::endl;
         }
     }
 #endif
@@ -833,6 +1052,10 @@ int main(int argc, char* argv[]) {
     // `playback` is the recording-backed controller (or null on a build without
     // persistence); the QML guards every use with `playback &&`.
     engine.rootContext()->setContextProperty(QStringLiteral("playback"), playback);
+    // `devicesCtrl` is the DeviceController (or null on a build without
+    // persistence); the Devices-tab QML guards its use behind a null check.
+    engine.rootContext()->setContextProperty(QStringLiteral("devicesCtrl"),
+                                              devicesCtrl);
     engine.rootContext()->setContextProperty(QStringLiteral("videoActive"),
                                               video);
     engine.load(QUrl(QStringLiteral("qrc:/Workspace.qml")));

@@ -85,6 +85,15 @@ std::vector<Migration> coreMigrations() {
          "  codec TEXT,"
          "  bytes INTEGER NOT NULL DEFAULT 0);"
          "CREATE INDEX idx_segments_cam_start ON segments(camera_id, start_utc);"},
+
+        // v5 — device kind (native increment 15, P2-01). Distinguishes the
+        // onboarding workflow a device belongs to: a single-channel direct IP
+        // 'camera' vs a multi-channel recorder ('nvr' / 'dvr' / 'hybrid'). A
+        // forward-only additive column with a default so existing rows (and the
+        // v1 direct-camera onboard path) stay valid; the recorder distinction is
+        // metadata, not a new table — channels already live in `cameras`.
+        {5, "device_kind",
+         "ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'camera';"},
     };
 }
 

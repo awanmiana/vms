@@ -40,8 +40,24 @@ struct DeviceOnboard {
     std::string name;
     std::string address;   // host / IP (credential-free)
     std::string vendor;
+    // Onboarding workflow: "camera" (single-channel direct IP camera) or a
+    // recorder ("nvr" / "dvr" / "hybrid") with many channels. Empty defaults to
+    // "camera" (the v1 direct-camera behavior, preserved).
+    std::string kind;
     std::string credentialSecret;   // "user:password"; stored via SecretStore only
     std::vector<CameraChannel> cameras;
+};
+
+// A read-only summary of a persisted device for the inventory/onboarding UI:
+// the credential-free device metadata plus how many camera channels it owns.
+// The secret is never included — it lives only in the SecretStore.
+struct DeviceSummary {
+    std::string id;
+    std::string name;
+    std::string address;
+    std::string vendor;
+    std::string kind;       // "camera" | "nvr" | "dvr" | "hybrid"
+    int cameraCount = 0;
 };
 
 class DeviceRepo {
@@ -69,6 +85,10 @@ public:
 
     // The device's current camera ids (stable order by id).
     Error cameraIds(const std::string& deviceId, std::vector<std::string>& out);
+
+    // Every onboarded device (credential-free summaries, ordered by id) with its
+    // camera-channel count — the enumeration the onboarding UI lists. Read-only.
+    Error listDevices(std::vector<DeviceSummary>& out);
 
     // The default device group id for a device (P2-02).
     static std::string defaultGroupId(const std::string& deviceId);

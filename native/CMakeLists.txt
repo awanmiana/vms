@@ -309,6 +309,12 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # inc 7c: the Playback availability model over the recording SegmentIndex
         # (needs vms_persist, so Windows-only alongside it).
         target_sources(vms_workspace PRIVATE src/workspace/PlaybackController.cpp)
+        # inc 14 (onboarding UI): the Devices tab's DeviceController bridges the
+        # DeviceRepo (vms_persist) + HealthMonitor (vms_health) cores to QML.
+        target_sources(vms_workspace PRIVATE
+            src/workspace/DeviceController.cpp
+            src/workspace/DeviceController.h)
+        target_link_libraries(vms_workspace PRIVATE vms_health)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
         # inc 8: the live optimization sampler feeding the governor.
         target_link_libraries(vms_workspace PRIVATE vms_optimize)

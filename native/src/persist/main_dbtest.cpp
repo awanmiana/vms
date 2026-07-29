@@ -51,7 +51,7 @@ int main() {
         check(static_cast<bool>(s.open(dbFile)), "open database file");
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "apply canonical migrations");
-        check(s.schemaVersion() == 4, "schema at version 4");
+        check(s.schemaVersion() == 5, "schema at version 5");
 
         // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
@@ -84,7 +84,7 @@ int main() {
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 4, "schema still at version 4 after reopen");
+        check(s.schemaVersion() == 5, "schema still at version 5 after reopen");
         check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
         check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
@@ -92,8 +92,8 @@ int main() {
 
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 4,
-              "exactly four migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 5,
+              "exactly five migrations recorded (not duplicated)");
 
         {
             Store::Tx tx(s);

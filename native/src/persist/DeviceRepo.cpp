@@ -20,6 +20,37 @@ Error DeviceRepo::cameraIds(const std::string& deviceId,
     return Error::success();
 }
 
+namespace {
+// A TEXT column that may be NULL (address / vendor) as a std::string.
+std::string textOrEmpty(const Value& v) {
+    return std::holds_alternative<std::string>(v) ? std::get<std::string>(v)
+                                                   : std::string();
+}
+}  // namespace
+
+Error DeviceRepo::listDevices(std::vector<DeviceSummary>& out) {
+    out.clear();
+    Result r;
+    if (Error e = store_.query(
+            "SELECT d.id, d.name, d.address, d.vendor, d.kind, "
+            "(SELECT COUNT(*) FROM cameras c WHERE c.device_id = d.id) "
+            "FROM devices d ORDER BY d.id;",
+            {}, r);
+        !e)
+        return e;
+    for (const Row& row : r.rows) {
+        DeviceSummary s;
+        s.id = std::get<std::string>(row[0]);
+        s.name = std::get<std::string>(row[1]);
+        s.address = textOrEmpty(row[2]);
+        s.vendor = textOrEmpty(row[3]);
+        s.kind = textOrEmpty(row[4]);
+        s.cameraCount = static_cast<int>(std::get<std::int64_t>(row[5]));
+        out.push_back(std::move(s));
+    }
+    return Error::success();
+}
+
 Error DeviceRepo::reconcileGroup(const std::string& deviceId,
                                  const std::string& deviceName,
                                  const std::vector<std::string>& ids) {
@@ -57,13 +88,15 @@ Error DeviceRepo::onboard(const DeviceOnboard& d) {
     if (Error e = tx.begin(); !e) return e;
 
     if (Error e = store_.exec(
-            "INSERT INTO devices(id, name, address, vendor) VALUES(?, ?, ?, ?) "
+            "INSERT INTO devices(id, name, address, vendor, kind) "
+            "VALUES(?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
             "address=excluded.address, vendor=excluded.vendor, "
-            "updated_at=datetime('now');",
+            "kind=excluded.kind, updated_at=datetime('now');",
             {d.id, d.name,
              d.address.empty() ? Value{nullptr} : Value{d.address},
-             d.vendor.empty() ? Value{nullptr} : Value{d.vendor}});
+             d.vendor.empty() ? Value{nullptr} : Value{d.vendor},
+             d.kind.empty() ? std::string("camera") : d.kind});
         !e)
         return e;
 
