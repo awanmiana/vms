@@ -64,6 +64,7 @@ if(WIN32)
         src/persist/WorkspaceRepo.cpp
         src/persist/SecretStore.cpp
         src/persist/CredentialRepo.cpp
+        src/persist/SegmentIndex.cpp
     )
     target_include_directories(vms_persist PUBLIC src)
     # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
@@ -87,6 +88,13 @@ if(WIN32)
     target_compile_definitions(vms_credtest PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_test(NAME credential_selfcheck COMMAND vms_credtest)
+
+    # Native increment 7a — recording segment-index self-check.
+    add_executable(vms_rectest src/persist/main_rectest.cpp)
+    target_link_libraries(vms_rectest PRIVATE vms_persist)
+    target_compile_definitions(vms_rectest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME recording_selfcheck COMMAND vms_rectest)
 
     # Native increment 6c — the standalone ConnectionBroker (single device-
     # connection identity). Pure C++: no Qt / no GStreamer, links only vms_persist
@@ -257,6 +265,11 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
     )
     if(WIN32)
         target_link_libraries(vms_grid PRIVATE dxgi d3d11 dxguid)
+        # Native increment 6c-2: connect through the standalone ConnectionBroker by
+        # camera_id (no URL-with-password on the run path). vms_broker is Windows-only
+        # (it links vms_persist -> winsqlite3/crypt32).
+        target_link_libraries(vms_grid PRIVATE vms_broker)
+        target_compile_definitions(vms_grid PRIVATE VMS_WITH_BROKER)
         target_compile_definitions(vms_grid PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()

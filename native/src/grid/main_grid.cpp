@@ -74,6 +74,14 @@
 #include <psapi.h>
 #endif
 
+#ifdef VMS_WITH_BROKER
+#include "broker/ConnectionBroker.h"
+#include "persist/CredentialRepo.h"
+#include "persist/Schema.h"
+#include "persist/SecretStore.h"
+#include "persist/Store.h"
+#endif
+
 namespace {
 
 const char* PickFactory(const char* const* names);
@@ -658,6 +666,174 @@ gboolean SweepTick(gpointer user_data) {
 
 }  // namespace
 
+#ifdef VMS_WITH_BROKER
+// ---- Native increment 6c-2: connect through the ConnectionBroker by camera_id.
+// The run path takes camera_ids (never a URL-with-password); the broker resolves
+// each camera's device + credential-free URL template + secret and materializes
+// the credentialed URL in memory. We resolve Main/Sub once into the existing
+// Camera{main,sub} vector, so the entire branch/replan/teardown pipeline below is
+// reused unchanged — only the SOURCE of the URLs moved behind the broker.
+namespace {
+
+using vms::broker::ConnectionBroker;
+using vms::broker::Session;
+using vms::broker::StreamKind;
+using vms::persist::CredentialRepo;
+using vms::persist::Error;
+using vms::persist::InMemorySecretStore;
+using vms::persist::Store;
+using vms::persist::Value;
+
+// "<camera_id>|<user:pass>|<mainTemplate>[|<subTemplate>]"
+struct ProvisionSpec {
+    std::string cameraId, secret, mainUrl, subUrl;
+    bool ok = false;
+};
+ProvisionSpec ParseProvision(const std::string& spec) {
+    ProvisionSpec p;
+    std::vector<std::string> parts;
+    std::string cur;
+    std::istringstream ss(spec);
+    while (std::getline(ss, cur, '|')) parts.push_back(cur);
+    if (parts.size() >= 3) {
+        p.cameraId = parts[0];
+        p.secret = parts[1];
+        p.mainUrl = parts[2];
+        if (parts.size() >= 4) p.subUrl = parts[3];
+        p.ok = !p.cameraId.empty() && !p.mainUrl.empty();
+    }
+    return p;
+}
+
+// Write one camera's device + credential-free URL templates + encrypted secret.
+// device_id is derived from the camera_id; the secret goes through the
+// CredentialRepo so no plaintext reaches SQLite.
+Error ProvisionCamera(Store& store, CredentialRepo& creds, const ProvisionSpec& p) {
+    const std::string dev = p.cameraId + "-dev";
+    if (Error e = store.exec(
+            "INSERT INTO devices(id, name) VALUES(?, ?) "
+            "ON CONFLICT(id) DO NOTHING;", {dev, p.cameraId}); !e)
+        return e;
+    const Value subVal = p.subUrl.empty() ? Value{nullptr} : Value{p.subUrl};
+    if (Error e = store.exec(
+            "INSERT INTO cameras(id, device_id, name, main_url, sub_url) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "device_id=excluded.device_id, main_url=excluded.main_url, "
+            "sub_url=excluded.sub_url;",
+            {p.cameraId, dev, p.cameraId, p.mainUrl, subVal}); !e)
+        return e;
+    return creds.put(dev, p.secret);
+}
+
+// Resolve each camera_id's Main and Sub stream URLs through the broker, filling
+// the Camera{main,sub} the pipeline consumes. Sub is optional (falls back to
+// main). Sessions are released after materialization (we only need the URL).
+bool ResolveCamerasViaBroker(ConnectionBroker& broker,
+                             const std::vector<std::string>& ids,
+                             std::vector<Camera>& out) {
+    for (const std::string& id : ids) {
+        Camera cam;
+        Session s;
+        if (Error e = broker.connect(id, StreamKind::Main, s); !e) {
+            std::cerr << "broker: cannot open main stream for '" << id
+                      << "': " << e.message << "\n";
+            return false;
+        }
+        cam.main = s.url;
+        broker.release(s);
+        Session sub;
+        if (Error e = broker.connect(id, StreamKind::Sub, sub); e) {
+            cam.sub = sub.url;
+            broker.release(sub);
+        }
+        out.push_back(cam);
+    }
+    return true;
+}
+
+// Build cameras for the run entirely from the broker: open the DB, migrate,
+// apply any provisioning, then resolve the requested camera_ids. All secret and
+// URL handling stays behind the broker; the caller only ever named camera_ids.
+bool PrepareCamerasFromBroker(const std::string& dbPath,
+                              const std::vector<std::string>& provisionSpecs,
+                              std::vector<std::string> cameraIds,
+                              std::vector<Camera>& out) {
+    Store store;
+    if (Error e = store.open(dbPath); !e) {
+        std::cerr << "broker: cannot open db '" << dbPath << "': " << e.message << "\n";
+        return false;
+    }
+    if (Error e = store.migrate(vms::persist::coreMigrations()); !e) {
+        std::cerr << "broker: migrate failed: " << e.message << "\n";
+        return false;
+    }
+    InMemorySecretStore secrets;  // NOTE: for a persistent secret store use DpapiSecretStore
+    CredentialRepo creds(store, secrets);
+    for (const std::string& spec : provisionSpecs) {
+        ProvisionSpec p = ParseProvision(spec);
+        if (!p.ok) {
+            std::cerr << "broker: bad --provision '" << spec
+                      << "' (want \"id|user:pass|mainUrl[|subUrl]\")\n";
+            return false;
+        }
+        if (Error e = ProvisionCamera(store, creds, p); !e) {
+            std::cerr << "broker: provision '" << p.cameraId << "' failed: "
+                      << e.message << "\n";
+            return false;
+        }
+        if (cameraIds.empty()) cameraIds.push_back(p.cameraId);  // default: run what we provisioned
+    }
+    ConnectionBroker broker(store, creds);
+    return ResolveCamerasViaBroker(broker, cameraIds, out);
+}
+
+// Headless proof that vms_grid connects through the broker by camera_id (no
+// GStreamer, no camera, no window). Provisions a synthetic camera, resolves its
+// tiers through the broker, and asserts the credentialed URL is materialized in
+// memory while the run input was only a camera_id. Prints a credential-free line.
+int RunBrokerSelftest() {
+    std::cout << "vms_grid --broker-selftest (connect-by-camera_id via the broker)\n";
+    int failures = 0;
+    auto check = [&](bool cond, const std::string& what) {
+        std::cout << (cond ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!cond) ++failures;
+    };
+
+    std::vector<std::string> provs = {
+        "cam-1|admin:p@ss/w0rd|rtsp://10.0.0.5:554/Streaming/Channels/101"
+        "|rtsp://10.0.0.5:554/Streaming/Channels/102"};
+    std::vector<Camera> cams;
+    const bool ok = PrepareCamerasFromBroker(":memory:", provs, {"cam-1"}, cams);
+    check(ok && cams.size() == 1, "resolved 1 camera through the broker");
+    if (ok && cams.size() == 1) {
+        check(cams[0].main.find('@') != std::string::npos &&
+                  cams[0].main.find("%40") != std::string::npos,
+              "main URL is materialized with percent-encoded credentials (in memory)");
+        check(cams[0].main.find("/Streaming/Channels/101") != std::string::npos,
+              "main URL selected the main stream template");
+        check(cams[0].sub.find("/Streaming/Channels/102") != std::string::npos,
+              "sub URL selected the sub stream template");
+        // Credential-free operator-facing line (the URL itself is never printed).
+        std::cout << "  stream selection: cam-1 -> main+sub resolved by broker "
+                     "(run input was a camera_id, not a URL-with-password)\n";
+    }
+
+    // An unknown camera_id fails honestly rather than materializing anything.
+    std::vector<Camera> none;
+    const bool unknownOk = PrepareCamerasFromBroker(":memory:", {}, {"ghost"}, none);
+    check(!unknownOk && none.empty(), "unknown camera_id fails honestly (no URL materialized)");
+
+    if (failures == 0) {
+        std::cout << "PASS: vms_grid resolves streams through the broker by camera_id\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+}  // namespace
+#endif  // VMS_WITH_BROKER
+
 int main(int argc, char* argv[]) {
     gst_init(&argc, &argv);
 
@@ -673,6 +849,10 @@ int main(int argc, char* argv[]) {
     std::string profileName = "auto";     // auto | devbox | lowend
     bool sweep = false;                   // re-plan live as focus moves
     int sweepInterval = 4;                // seconds between focus moves
+    std::string brokerDb;                 // --broker-db <path>: connect via the broker
+    std::vector<std::string> provisionSpecs;  // --provision "id|user:pass|main[|sub]"
+    std::vector<std::string> cameraIds;   // --camera-id <id>: which cameras to open (broker)
+    bool brokerSelftest = false;          // --broker-selftest: headless integration check
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--count" && i + 1 < argc)        count = std::atoi(argv[++i]);
@@ -696,8 +876,40 @@ int main(int argc, char* argv[]) {
             if (semi != std::string::npos) cam.sub = spec.substr(semi + 1);
             cameras.push_back(cam);
         }
+        else if (a == "--broker-db" && i + 1 < argc)   brokerDb = argv[++i];
+        else if (a == "--provision" && i + 1 < argc)   provisionSpecs.push_back(argv[++i]);
+        else if (a == "--camera-id" && i + 1 < argc)   cameraIds.push_back(argv[++i]);
+        else if (a == "--broker-selftest")             brokerSelftest = true;
         else if (a.rfind("--", 0) != 0)            urls.push_back(a);
     }
+
+#ifdef VMS_WITH_BROKER
+    // Native increment 6c-2: connect through the ConnectionBroker by camera_id.
+    if (brokerSelftest) return RunBrokerSelftest();
+    if (!brokerDb.empty() || !provisionSpecs.empty() || !cameraIds.empty()) {
+        if (brokerDb.empty()) {
+            std::cerr << "--provision/--camera-id require --broker-db <path>\n";
+            return 2;
+        }
+        if (!cameras.empty()) {
+            std::cerr << "--broker-db resolves cameras by id; do not also pass "
+                         "--camera URLs on the same run\n";
+            return 2;
+        }
+        if (!PrepareCamerasFromBroker(brokerDb, provisionSpecs, cameraIds, cameras))
+            return 2;
+        if (cameras.empty()) {
+            std::cerr << "--broker-db: no cameras to open (pass --camera-id or --provision)\n";
+            return 2;
+        }
+    }
+#else
+    if (brokerSelftest || !brokerDb.empty() || !provisionSpecs.empty() ||
+        !cameraIds.empty()) {
+        std::cerr << "broker options require the Windows broker build (VMS_WITH_BROKER)\n";
+        return 2;
+    }
+#endif
 
     int n = 0;
     std::string encoderUsed;

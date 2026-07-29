@@ -66,6 +66,25 @@ std::vector<Migration> coreMigrations() {
          "  PRIMARY KEY(instance, tile_id),"
          "  FOREIGN KEY(instance) REFERENCES workspace_instance(name) "
          "    ON DELETE CASCADE);"},
+
+        // v4 — recording segment index (native increment 7a). One row per
+        // COMPLETED recorded segment; the footage itself lives in files on
+        // deployer-chosen storage and this table indexes its availability. This
+        // is the OPTIONAL local recording of P0-01E, not a mandatory archive.
+        // Times are UTC 'YYYY-MM-DD HH:MM:SS' (SQLite datetime() format) so age
+        // math works. There is intentionally NO foreign key to cameras: recorded
+        // footage / evidence may outlive a camera's current config row, and its
+        // lifecycle is governed by retention (P4-06), not by the inventory.
+        {4, "recording_segments",
+         "CREATE TABLE segments ("
+         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "  camera_id TEXT NOT NULL,"
+         "  start_utc TEXT NOT NULL,"
+         "  end_utc TEXT NOT NULL,"
+         "  path TEXT NOT NULL,"
+         "  codec TEXT,"
+         "  bytes INTEGER NOT NULL DEFAULT 0);"
+         "CREATE INDEX idx_segments_cam_start ON segments(camera_id, start_utc);"},
     };
 }
 
