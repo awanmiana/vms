@@ -36,6 +36,7 @@
 #include <QVariantMap>
 
 #include "health/HealthMonitor.h"
+#include "onvif/DiscoverySource.h"  // DiscoverySource + DiscoveryCandidate + OnvifDevice
 #include "persist/DeviceRepo.h"
 
 class DeviceController : public QObject {
@@ -52,16 +53,38 @@ class DeviceController : public QObject {
     // The last onboard/remove result, "" on success or a human error message.
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
 
+    // --- ONVIF discovery-as-a-source (increment 16, P2-03/P2-14) ---
+    // The candidates found by the last LAN scan. Each is a QVariantMap
+    // { endpointRef, name, hardware, host, xaddr, alreadyOnboarded } where
+    // alreadyOnboarded is true when a device at that host is already in the
+    // inventory (P2-03 duplicate detection). Rebuilt by startDiscovery().
+    Q_PROPERTY(QVariantList discoveredDevices READ discoveredDevices NOTIFY discoveryChanged)
+    // Whether a DiscoverySource is wired at all — QML hides the Discover panel
+    // when discovery is unavailable (e.g. a build without the ONVIF transports).
+    Q_PROPERTY(bool discoveryAvailable READ discoveryAvailable CONSTANT)
+    // True while a scan is running (drives the "Scanning…" affordance).
+    Q_PROPERTY(bool discovering READ discovering NOTIFY discoveryChanged)
+    // Honest status line: "", "Scanning…", "Found N device(s)", "No devices
+    // found", or an error / "unavailable" message.
+    Q_PROPERTY(QString discoveryStatus READ discoveryStatus NOTIFY discoveryChanged)
+
 public:
-    // `repo` and `health` are owned by the caller (main) and must outlive this.
+    // `repo`, `health`, and `discovery` are owned by the caller (main) and must
+    // outlive this. `discovery` may be null (discovery then reports unavailable).
     DeviceController(vms::persist::DeviceRepo* repo,
                      vms::health::HealthMonitor* health,
+                     vms::onvif::DiscoverySource* discovery = nullptr,
                      QObject* parent = nullptr);
 
     QVariantList devices() const { return devices_; }
     int deviceCount() const { return static_cast<int>(devices_.size()); }
     int attentionCount() const;
     QString lastError() const { return lastError_; }
+
+    QVariantList discoveredDevices() const { return discovered_; }
+    bool discoveryAvailable() const { return discovery_ != nullptr; }
+    bool discovering() const { return discovering_; }
+    QString discoveryStatus() const { return discoveryStatus_; }
 
     // Re-read the inventory from the repo and rebuild the model (adding any new
     // device to the health monitor as Unknown-until-observed). Idempotent.
@@ -113,15 +136,52 @@ public:
     Q_INVOKABLE void reportStorage(const QString& id, int level);
     Q_INVOKABLE void setFirmware(const QString& id, const QString& firmware);
 
+    // Scan the LAN for ONVIF devices (blocking up to `timeoutMs`) and rebuild
+    // the discoveredDevices model, each candidate flagged alreadyOnboarded
+    // against the current inventory (P2-03). A no-op reporting "unavailable"
+    // when no DiscoverySource is wired.
+    Q_INVOKABLE void startDiscovery(int timeoutMs = 3000);
+
+    // Onboard a discovered candidate (by endpointRef): fetch its ONVIF media
+    // profiles + RTSP stream URIs, map the highest-resolution stream to Main and
+    // a lower one to Sub, and onboard it atomically via DeviceRepo (kind
+    // "camera", one channel). `user`/`password` authenticate the ONVIF fetch AND
+    // become the stored credential secret. Returns "" on success or a human
+    // error; also sets lastError.
+    Q_INVOKABLE QString onboardDiscovered(const QString& endpointRef,
+                                          const QString& user,
+                                          const QString& password);
+
+    // Pure mapping (no I/O): choose the Main + Sub credential-free RTSP URLs from
+    // a fetched device's profiles/stream URIs — Main = the largest-resolution
+    // H.264/H.265 profile with a stream URI, Sub = a smaller one, if any. Static
+    // + exercised by --devices-selftest. `mainUrl` is empty when nothing usable.
+    static void chooseStreams(const vms::onvif::OnvifDevice& dev,
+                              std::string& mainUrl, std::string& subUrl);
+
+    // Pure: a stable, sanitized device id derived from a candidate's host
+    // ("192.168.0.254" -> "onvif-192-168-0-254"). Static + testable.
+    static std::string deviceIdFromHost(const std::string& host);
+
 signals:
     void changed();
+    void discoveryChanged();
 
 private:
     QVariantMap healthMap(const std::string& deviceId) const;
     void rebuild();
+    void rebuildDiscovered();
 
     vms::persist::DeviceRepo* repo_ = nullptr;
     vms::health::HealthMonitor* health_ = nullptr;
+    vms::onvif::DiscoverySource* discovery_ = nullptr;
     QVariantList devices_;
     QString lastError_;
+
+    // Discovery state: the raw candidates from the last scan (endpointRef ->
+    // candidate) plus the UI-facing model rebuilt over them + the inventory.
+    std::vector<vms::onvif::DiscoveryCandidate> candidates_;
+    QVariantList discovered_;
+    bool discovering_ = false;
+    QString discoveryStatus_;
 };

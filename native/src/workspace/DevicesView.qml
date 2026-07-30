@@ -116,6 +116,122 @@ Item {
                 anchors.margins: 18
                 spacing: 12
 
+                // --- ONVIF discovery (inc 16): scan the LAN, onboard a found
+                // device with its channels taken from its own media profiles.
+                // Hidden when no DiscoverySource is wired (honest unavailable).
+                Column {
+                    width: parent.width
+                    spacing: 8
+                    visible: devicesCtrl && devicesCtrl.discoveryAvailable
+
+                    Text {
+                        text: "Discover on LAN (ONVIF)"
+                        color: "#e8ecf3"; font.pixelSize: 16; font.bold: true
+                    }
+                    Text {
+                        text: "Scan for ONVIF devices, then onboard one — its "
+                              + "channels come from the device's own media profiles."
+                        color: "#6f7a86"; font.pixelSize: 11
+                        width: parent.width; wrapMode: Text.WordWrap
+                    }
+                    Row {
+                        width: parent.width; spacing: 10
+                        LabeledField { id: dUser; width: (parent.width - 10) / 2; label: "Username"; placeholder: "user" }
+                        LabeledField { id: dPass; width: (parent.width - 10) / 2; label: "Password"; placeholder: "••••"; secret: true }
+                    }
+                    Row {
+                        width: parent.width; spacing: 10
+                        Rectangle {
+                            width: scanText.width + 26; height: 32; radius: 6
+                            color: "#22303f"
+                            border.color: "#3a6ea5"; border.width: 1
+                            opacity: devicesCtrl.discovering ? 0.6 : 1.0
+                            Text {
+                                id: scanText; anchors.centerIn: parent
+                                text: devicesCtrl.discovering ? "Scanning…" : "⟳ Scan"
+                                color: "#e8ecf3"; font.pixelSize: 13
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: !devicesCtrl.discovering
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: devicesCtrl.startDiscovery(3000)
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - scanText.width - 36
+                            text: devicesCtrl.discoveryStatus
+                            color: "#8a93a3"; font.pixelSize: 11
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+
+                    // Candidate list (each: identity + new/onboarded state).
+                    Column {
+                        width: parent.width; spacing: 6
+                        Repeater {
+                            model: devicesCtrl.discoveredDevices
+                            delegate: Rectangle {
+                                width: parent.width; height: 56; radius: 6
+                                color: Qt.rgba(1, 1, 1, 0.03)
+                                border.width: 1
+                                border.color: modelData.alreadyOnboarded
+                                              ? "#2a3240" : "#37c871"
+
+                                Column {
+                                    anchors.left: parent.left; anchors.leftMargin: 10
+                                    anchors.right: candAction.left; anchors.rightMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 2
+                                    Text {
+                                        text: modelData.name ? modelData.name : modelData.host
+                                        color: "#e8ecf3"; font.pixelSize: 13
+                                        elide: Text.ElideRight; width: parent.width
+                                    }
+                                    Text {
+                                        text: modelData.host
+                                              + (modelData.hardware ? ("  ·  " + modelData.hardware) : "")
+                                        color: "#8a93a3"; font.pixelSize: 11
+                                        elide: Text.ElideRight; width: parent.width
+                                    }
+                                }
+                                Item {
+                                    id: candAction
+                                    anchors.right: parent.right; anchors.rightMargin: 10
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 92; height: 28
+                                    Text {
+                                        visible: modelData.alreadyOnboarded
+                                        anchors.centerIn: parent
+                                        text: "✓ onboarded"
+                                        color: "#8a93a3"; font.pixelSize: 11
+                                    }
+                                    Rectangle {
+                                        visible: !modelData.alreadyOnboarded
+                                        anchors.fill: parent; radius: 6
+                                        color: "#22543a"
+                                        border.color: "#37c871"; border.width: 1
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "＋ Onboard"; color: "#e8ecf3"
+                                            font.pixelSize: 12
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: devicesCtrl.onboardDiscovered(
+                                                modelData.endpointRef, dUser.text, dPass.text)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { width: parent.width; height: 1; color: "#232a36" }
+                }
+
                 Text {
                     text: "Onboard a device"
                     color: "#e8ecf3"; font.pixelSize: 16; font.bold: true

@@ -56,6 +56,53 @@
 #include "PlaybackController.h"
 #include "DeviceController.h"
 
+#ifdef VMS_WITH_ONVIF
+#include "onvif/DiscoverySource.h"
+
+namespace {
+// A fixture-backed DiscoverySource for --devices-demo and --devices-selftest:
+// it serves two canned ONVIF candidates and, on fetch, a two-profile device
+// (main 1080p + sub 480p H.264), so the whole discover -> map -> onboard flow
+// verifies offscreen with no LAN. The LIVE source (MakeLiveDiscoverySource) is
+// used for real windowed runs; this fake is never used there.
+class FakeDiscoverySource : public vms::onvif::DiscoverySource {
+public:
+    std::vector<vms::onvif::DiscoveryCandidate> discover(
+        int /*timeoutMs*/, std::string& error) override {
+        error.clear();
+        std::vector<vms::onvif::DiscoveryCandidate> out;
+        // One host collides with a seeded demo device (192.168.0.11 =
+        // cam-front) to exercise duplicate detection; one is new.
+        out.push_back({"urn:uuid:fake-existing-0001", "HIKVISION DS-2CD2042",
+                       "DS-2CD2042WD-I",
+                       "http://192.168.0.11/onvif/device_service", "192.168.0.11"});
+        out.push_back({"urn:uuid:fake-new-0002", "AXIS M3045", "M3045-V",
+                       "http://192.168.0.77/onvif/device_service", "192.168.0.77"});
+        return out;
+    }
+    bool fetch(const std::string& serviceUrl, const std::string& /*user*/,
+               const std::string& /*password*/, vms::onvif::OnvifDevice& out,
+               std::string& error) override {
+        error.clear();
+        out.info.manufacturer = serviceUrl.find("192.168.0.77") != std::string::npos
+                                    ? "Axis" : "Hikvision";
+        out.info.model = "Fixture Camera";
+        out.info.firmware = "V5.4.5";
+        out.profiles = {{"Profile_1", "mainStream", "H264", 1920, 1080},
+                        {"Profile_2", "subStream", "H264", 640, 480}};
+        // Parallel RTSP URIs (credential-free, as ONVIF GetStreamUri returns).
+        const std::string host =
+            serviceUrl.find("192.168.0.77") != std::string::npos
+                ? "192.168.0.77" : "192.168.0.11";
+        out.streamUris = {
+            "rtsp://" + host + ":554/Streaming/Channels/101",
+            "rtsp://" + host + ":554/Streaming/Channels/102"};
+        return true;
+    }
+};
+}  // namespace
+#endif  // VMS_WITH_ONVIF
+
 namespace {
 
 // P0-04 inc 5c: restore a stateful instance's saved layout (tile count + per-tile
@@ -171,7 +218,12 @@ int runDevicesSelftest() {
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
+#ifdef VMS_WITH_ONVIF
+    FakeDiscoverySource fakeDisc;
+    DeviceController ctrl(&repo, &health, &fakeDisc);
+#else
     DeviceController ctrl(&repo, &health);
+#endif
 
     std::cout << "vms_workspace --devices-selftest\n";
     check(ctrl.deviceCount() == 0, "starts with no devices");
@@ -269,6 +321,78 @@ int runDevicesSelftest() {
         QString());
     check(ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt() == 6,
           "re-onboard to 6 channels is idempotent (device stays single, grows to 6)");
+
+#ifdef VMS_WITH_ONVIF
+    // inc 16: ONVIF discovery-as-a-source. The fixture-backed DiscoverySource
+    // serves two candidates; the flow discovers, dedups against inventory, maps
+    // ONVIF profiles -> Main/Sub RTSP, and onboards atomically — all offscreen.
+    check(ctrl.discoveryAvailable(), "discovery is available (source wired)");
+
+    // Pure profile -> stream mapping: Main = highest resolution, Sub = a lower
+    // one; a JPEG-only / URI-less profile is ignored.
+    {
+        vms::onvif::OnvifDevice dev;
+        dev.profiles = {{"P1", "main", "H265", 2560, 1440},
+                        {"P2", "snap", "JPEG", 640, 480},
+                        {"P3", "sub", "H264", 640, 480}};
+        dev.streamUris = {"rtsp://x/main", "rtsp://x/jpeg", "rtsp://x/sub"};
+        std::string mainUrl, subUrl;
+        DeviceController::chooseStreams(dev, mainUrl, subUrl);
+        check(mainUrl == "rtsp://x/main" && subUrl == "rtsp://x/sub",
+              "chooseStreams: Main=largest H26x, Sub=smaller, JPEG ignored");
+    }
+    check(DeviceController::deviceIdFromHost("192.168.0.77") ==
+              "onvif-192-168-0-77",
+          "deviceIdFromHost sanitizes the host to a stable id");
+
+    ctrl.startDiscovery(100);
+    check(ctrl.discoveredDevices().size() == 2, "discovery lists 2 candidates");
+    // The current inventory (nvr-1 @ .0.20) matches neither host, so both are new.
+    check(!ctrl.discoveredDevices().first().toMap()
+               .value(QStringLiteral("alreadyOnboarded")).toBool(),
+          "candidate not yet onboarded is flagged new");
+
+    QString derr = ctrl.onboardDiscovered(
+        QStringLiteral("urn:uuid:fake-new-0002"),
+        QStringLiteral("admin"), QStringLiteral("onvifpw"));
+    check(derr.isEmpty(), "onboardDiscovered succeeds");
+    check(ctrl.deviceCount() == 2, "the discovered device is now in the inventory");
+
+    // The onboarded device carries the mapped id, one channel, and the ONVIF
+    // credential — stored only via the SecretStore under the broker ref.
+    bool foundOnvif = false;
+    for (const QVariant& v : ctrl.devices()) {
+        const QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("id")).toString() ==
+            QLatin1String("onvif-192-168-0-77")) {
+            foundOnvif = true;
+            check(m.value(QStringLiteral("cameraCount")).toInt() == 1,
+                  "discovered camera onboarded with one channel");
+            check(m.value(QStringLiteral("vendor")).toString() ==
+                      QLatin1String("Axis"),
+                  "vendor taken from ONVIF device info");
+        }
+    }
+    check(foundOnvif, "discovered device appears under its mapped id");
+    std::string onvifSecret;
+    check(static_cast<bool>(
+              secrets.get(CredentialRepo::mintRef("onvif-192-168-0-77"),
+                          onvifSecret)) &&
+              onvifSecret == "admin:onvifpw",
+          "ONVIF credential stored via SecretStore under the broker ref");
+
+    // After onboarding, re-scanning flags that candidate as already onboarded
+    // (P2-03 duplicate detection against the live inventory).
+    ctrl.startDiscovery(100);
+    bool dupFlagged = false;
+    for (const QVariant& v : ctrl.discoveredDevices()) {
+        const QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("host")).toString() ==
+            QLatin1String("192.168.0.77"))
+            dupFlagged = m.value(QStringLiteral("alreadyOnboarded")).toBool();
+    }
+    check(dupFlagged, "re-scan flags the onboarded device as already onboarded");
+#endif  // VMS_WITH_ONVIF
 
     if (failures == 0) {
         std::cout << "PASS: onboard -> honest health (Unknown/Offline/Online) -> "
@@ -975,7 +1099,23 @@ int main(int argc, char* argv[]) {
 #endif
         deviceRepo =
             std::make_unique<vms::persist::DeviceRepo>(store, *deviceSecrets);
-        devices = new DeviceController(deviceRepo.get(), &deviceHealth, &app);
+        // inc 16: wire the ONVIF discovery source. --devices-demo uses a
+        // fixture-backed fake so the Discover panel is populated without a LAN;
+        // a real run uses the live UDP+HTTP source (null when the transports
+        // were not compiled in, so the panel honestly reports unavailable).
+        vms::onvif::DiscoverySource* discSource = nullptr;
+#ifdef VMS_WITH_ONVIF
+        if (devicesDemo) {
+            static FakeDiscoverySource fakeSource;
+            discSource = &fakeSource;
+        } else {
+            static std::unique_ptr<vms::onvif::DiscoverySource> liveSource =
+                vms::onvif::MakeLiveDiscoverySource();
+            discSource = liveSource.get();
+        }
+#endif
+        devices = new DeviceController(deviceRepo.get(), &deviceHealth,
+                                       discSource, &app);
         devicesCtrl = devices;
 
         if (devicesDemo) {
@@ -1012,9 +1152,15 @@ int main(int argc, char* argv[]) {
                 QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}02"));
             devices->reportReach(QStringLiteral("nvr-lobby"), 1);
             devices->reportStream(QStringLiteral("nvr-lobby"), 2);
+            // inc 16: run one discovery pass so the Discover panel is populated
+            // (the fixture source returns 2 candidates — one collides with the
+            // seeded Front Door at .0.11 and shows "onboarded", one is new).
+            devices->startDiscovery(100);
             std::cout << "devices: seeded " << devices->deviceCount()
                       << " demo device(s), " << devices->attentionCount()
-                      << " need attention" << std::endl;
+                      << " need attention; discovery found "
+                      << devices->discoveredDevices().size() << " candidate(s)"
+                      << std::endl;
         }
     }
 #endif

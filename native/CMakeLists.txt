@@ -108,6 +108,9 @@ if(Qt6_FOUND AND TARGET Qt6::Core)
     add_library(vms_onvif STATIC
         src/onvif/WsDiscovery.cpp
         src/onvif/OnvifClient.cpp
+        # inc 16: the injectable discovery seam (pure host-parse + a live source
+        # over the transports, gated by VMS_ONVIF_TRANSPORT below).
+        src/onvif/DiscoverySource.cpp
     )
     set_target_properties(vms_onvif PROPERTIES AUTOMOC OFF)
     target_include_directories(vms_onvif PUBLIC src)
@@ -117,6 +120,9 @@ if(Qt6_FOUND AND TARGET Qt6::Core)
             src/onvif/WsDiscoveryTransport.cpp
             src/onvif/OnvifTransport.cpp)
         target_link_libraries(vms_onvif PUBLIC Qt6::Network)
+        # MakeLiveDiscoverySource() returns a real source only when the network
+        # transports are present; otherwise it honestly returns nullptr.
+        target_compile_definitions(vms_onvif PUBLIC VMS_ONVIF_TRANSPORT)
     endif()
     if(WIN32)
         target_compile_definitions(vms_onvif PRIVATE
@@ -316,6 +322,13 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
             src/workspace/DeviceController.h)
         target_link_libraries(vms_workspace PRIVATE vms_health)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
+        # inc 16 (discovery -> onboard UI): the Devices tab drives the ONVIF
+        # WS-Discovery + media SOAP cores through DeviceController's injectable
+        # DiscoverySource. Only wired when vms_onvif was built (Qt6 Core).
+        if(TARGET vms_onvif)
+            target_link_libraries(vms_workspace PRIVATE vms_onvif)
+            target_compile_definitions(vms_workspace PRIVATE VMS_WITH_ONVIF)
+        endif()
         # inc 8: the live optimization sampler feeding the governor.
         target_link_libraries(vms_workspace PRIVATE vms_optimize)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_OPTIMIZE)

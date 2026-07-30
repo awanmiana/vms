@@ -1,6 +1,10 @@
 #include "DeviceController.h"
 
+#include <algorithm>
+#include <cctype>
 #include <vector>
+
+#include "onvif/OnvifTransport.h"
 
 using vms::health::HealthMonitor;
 using vms::health::State;
@@ -12,6 +16,10 @@ using vms::persist::DeviceOnboard;
 using vms::persist::DeviceSummary;
 using vms::persist::CameraChannel;
 using vms::persist::Error;
+using vms::onvif::DiscoverySource;
+using vms::onvif::DiscoveryCandidate;
+using vms::onvif::OnvifDevice;
+using vms::onvif::MediaProfile;
 
 namespace {
 
@@ -70,8 +78,8 @@ QString errMessage(const Error& e) {
 }  // namespace
 
 DeviceController::DeviceController(DeviceRepo* repo, HealthMonitor* health,
-                                   QObject* parent)
-    : QObject(parent), repo_(repo), health_(health) {
+                                   DiscoverySource* discovery, QObject* parent)
+    : QObject(parent), repo_(repo), health_(health), discovery_(discovery) {
     refresh();
 }
 
@@ -274,4 +282,169 @@ void DeviceController::reportStorage(const QString& id, int level) {
 void DeviceController::setFirmware(const QString& id, const QString& firmware) {
     health_->setFirmware(id.toStdString(), firmware.toStdString());
     rebuild();
+}
+
+// ---- ONVIF discovery-as-a-source (increment 16, P2-03/P2-14) ---------------
+
+std::string DeviceController::deviceIdFromHost(const std::string& host) {
+    std::string s = "onvif-";
+    for (char ch : host) {
+        // Keep the id filesystem/URL-safe and stable: letters/digits pass;
+        // dots/colons/other separators collapse to a single dash.
+        if (std::isalnum(static_cast<unsigned char>(ch)))
+            s += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        else if (s.empty() || s.back() != '-')
+            s += '-';
+    }
+    while (!s.empty() && s.back() == '-') s.pop_back();
+    return s;
+}
+
+void DeviceController::chooseStreams(const OnvifDevice& dev, std::string& mainUrl,
+                                     std::string& subUrl) {
+    mainUrl.clear();
+    subUrl.clear();
+    // A usable profile: a video encoding we handle (H.264/H.265) with a
+    // non-empty RTSP URI (streamUris is parallel to profiles). JPEG-only or
+    // URI-less profiles are ignored.
+    struct Usable { long long px; std::string uri; };
+    std::vector<Usable> usable;
+    const std::size_t n =
+        std::min(dev.profiles.size(), dev.streamUris.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        const MediaProfile& p = dev.profiles[i];
+        const std::string& uri = dev.streamUris[i];
+        if (uri.empty()) continue;
+        if (p.encoding != "H264" && p.encoding != "H265") continue;
+        usable.push_back({static_cast<long long>(p.width) * p.height, uri});
+    }
+    if (usable.empty()) return;
+    // Main = largest resolution; Sub = smallest resolution distinct from Main.
+    std::sort(usable.begin(), usable.end(),
+              [](const Usable& a, const Usable& b) { return a.px > b.px; });
+    mainUrl = usable.front().uri;
+    if (usable.size() > 1 && usable.back().uri != mainUrl)
+        subUrl = usable.back().uri;
+}
+
+void DeviceController::rebuildDiscovered() {
+    discovered_.clear();
+    // The set of hosts already onboarded, for duplicate detection (P2-03).
+    std::vector<DeviceSummary> inventory;
+    repo_->listDevices(inventory);
+    for (const DiscoveryCandidate& c : candidates_) {
+        bool onboarded = false;
+        for (const DeviceSummary& d : inventory) {
+            if (!c.host.empty() && d.address == c.host) { onboarded = true; break; }
+        }
+        QVariantMap m;
+        m.insert(QStringLiteral("endpointRef"), QString::fromStdString(c.endpointRef));
+        m.insert(QStringLiteral("name"),
+                 QString::fromStdString(c.name.empty() ? c.hardware : c.name));
+        m.insert(QStringLiteral("hardware"), QString::fromStdString(c.hardware));
+        m.insert(QStringLiteral("host"), QString::fromStdString(c.host));
+        m.insert(QStringLiteral("xaddr"), QString::fromStdString(c.xaddr));
+        m.insert(QStringLiteral("alreadyOnboarded"), onboarded);
+        discovered_.push_back(m);
+    }
+    emit discoveryChanged();
+}
+
+void DeviceController::startDiscovery(int timeoutMs) {
+    if (!discovery_) {
+        discoveryStatus_ = QStringLiteral("Discovery unavailable in this build.");
+        emit discoveryChanged();
+        return;
+    }
+    discovering_ = true;
+    discoveryStatus_ = QStringLiteral("Scanning…");
+    emit discoveryChanged();
+
+    std::string error;
+    candidates_ = discovery_->discover(timeoutMs, error);
+    discovering_ = false;
+    if (!error.empty()) {
+        candidates_.clear();
+        discoveryStatus_ = QStringLiteral("Discovery failed: ") +
+                           QString::fromStdString(error);
+        rebuildDiscovered();
+        return;
+    }
+    discoveryStatus_ = candidates_.empty()
+                           ? QStringLiteral("No ONVIF devices found on the LAN.")
+                           : QStringLiteral("Found %1 device(s).")
+                                 .arg(static_cast<int>(candidates_.size()));
+    rebuildDiscovered();
+}
+
+QString DeviceController::onboardDiscovered(const QString& endpointRef,
+                                            const QString& user,
+                                            const QString& password) {
+    if (!discovery_) {
+        lastError_ = QStringLiteral("discovery unavailable");
+        emit changed();
+        return lastError_;
+    }
+    // Locate the candidate by its stable endpoint reference.
+    const std::string epr = endpointRef.toStdString();
+    const DiscoveryCandidate* cand = nullptr;
+    for (const DiscoveryCandidate& c : candidates_)
+        if (c.endpointRef == epr) { cand = &c; break; }
+    if (!cand) {
+        lastError_ = QStringLiteral("discovered device is no longer in the scan");
+        emit changed();
+        return lastError_;
+    }
+
+    // Fetch its ONVIF media config (info + profiles + RTSP stream URIs).
+    OnvifDevice dev;
+    std::string error;
+    if (!discovery_->fetch(cand->xaddr, user.toStdString(),
+                           password.toStdString(), dev, error)) {
+        lastError_ = QStringLiteral("ONVIF fetch failed: ") +
+                     QString::fromStdString(error);
+        emit changed();
+        return lastError_;
+    }
+
+    // Map profiles -> credential-free Main/Sub RTSP URLs.
+    std::string mainUrl, subUrl;
+    chooseStreams(dev, mainUrl, subUrl);
+    if (mainUrl.empty()) {
+        lastError_ = QStringLiteral(
+            "device reported no usable H.264/H.265 stream");
+        emit changed();
+        return lastError_;
+    }
+
+    // Onboard atomically as a single-channel direct camera. Honest fallbacks
+    // for the display fields when a scope/info field is absent.
+    DeviceOnboard d;
+    d.id = deviceIdFromHost(cand->host.empty() ? cand->endpointRef : cand->host);
+    d.name = !dev.info.model.empty() ? dev.info.model
+             : !cand->name.empty()   ? cand->name
+                                     : d.id;
+    d.address = cand->host;
+    d.vendor = !dev.info.manufacturer.empty() ? dev.info.manufacturer
+                                              : cand->hardware;
+    d.kind = "camera";
+    d.credentialSecret =
+        (user + QStringLiteral(":") + password).toStdString();
+    CameraChannel c;
+    c.id = d.id;
+    c.name = d.name;
+    c.mainUrl = mainUrl;
+    c.subUrl = subUrl;
+    d.cameras.push_back(c);
+
+    const Error e = repo_->onboard(d);
+    lastError_ = e ? QString() : errMessage(e);
+    if (e) {
+        health_->add(d.id);
+        if (!dev.info.firmware.empty())
+            health_->setFirmware(d.id, dev.info.firmware);
+    }
+    rebuild();            // inventory changed
+    rebuildDiscovered();  // the just-onboarded candidate now shows as onboarded
+    return lastError_;
 }
