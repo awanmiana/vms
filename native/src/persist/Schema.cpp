@@ -94,6 +94,21 @@ std::vector<Migration> coreMigrations() {
         // metadata, not a new table — channels already live in `cameras`.
         {5, "device_kind",
          "ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'camera';"},
+
+        // v6 — per-channel disable (native increment 17, P2-05). A disabled
+        // channel STAYS in inventory (its stable id + operator name preserved)
+        // but is excluded from active use: the default device group holds only
+        // enabled channels. Forward-only additive column with a default so every
+        // existing channel stays enabled and the v1..v5 onboard paths are valid.
+        {6, "camera_disabled",
+         "ALTER TABLE cameras ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"},
+
+        // v7 — operator channel ordering (native increment 18, P2-05). An
+        // explicit sort key so the operator can reorder a device's channels;
+        // listing is ORDER BY sort_order, id, so a default of 0 preserves the
+        // prior by-id order until the operator rearranges. Forward-only additive.
+        {7, "camera_sort_order",
+         "ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;"},
     };
 }
 

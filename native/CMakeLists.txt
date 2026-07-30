@@ -319,8 +319,15 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # DeviceRepo (vms_persist) + HealthMonitor (vms_health) cores to QML.
         target_sources(vms_workspace PRIVATE
             src/workspace/DeviceController.cpp
-            src/workspace/DeviceController.h)
+            src/workspace/DeviceController.h
+            # inc 19: the device-health live feed (TCP reachability probe).
+            src/workspace/HealthProbe.cpp
+            src/workspace/HealthProbe.h)
         target_link_libraries(vms_workspace PRIVATE vms_health)
+        # inc 19: the live health probe does a TCP connect (Qt Network).
+        if(TARGET Qt6::Network)
+            target_link_libraries(vms_workspace PRIVATE Qt6::Network)
+        endif()
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_PERSIST)
         # inc 16 (discovery -> onboard UI): the Devices tab drives the ONVIF
         # WS-Discovery + media SOAP cores through DeviceController's injectable

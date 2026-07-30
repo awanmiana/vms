@@ -360,11 +360,30 @@ Item {
                 height: 52
                 color: "transparent"
                 Text {
+                    id: devicesTitle
                     anchors.left: parent.left
                     anchors.leftMargin: 20
                     anchors.verticalCenter: parent.verticalCenter
                     text: "Devices (" + devicesCtrl.deviceCount + ")"
                     color: "#e8ecf3"; font.pixelSize: 16; font.bold: true
+                }
+                // inc 19: whether health updates from a live reachability probe
+                // or only from manual/observed reports (honest either way).
+                Rectangle {
+                    anchors.left: devicesTitle.right
+                    anchors.leftMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: feedText.width + 16; height: 20; radius: 10
+                    color: "transparent"
+                    border.width: 1
+                    border.color: devicesCtrl.healthFeedAvailable ? "#37c871" : "#5b6472"
+                    Text {
+                        id: feedText; anchors.centerIn: parent
+                        text: devicesCtrl.healthFeedAvailable
+                              ? "● live health" : "○ manual health"
+                        color: devicesCtrl.healthFeedAvailable ? "#37c871" : "#8a93a3"
+                        font.pixelSize: 10
+                    }
                 }
                 Rectangle {
                     visible: devicesCtrl.attentionCount > 0
@@ -408,8 +427,15 @@ Item {
 
                     Repeater {
                         model: devicesCtrl.devices
-                        delegate: Rectangle {
+                        delegate: Column {
+                            id: devCard
                             width: cards.width
+                            spacing: 6
+                            property bool expanded: false
+                            property string devId: modelData.id
+
+                        Rectangle {
+                            width: parent.width
                             height: 92
                             radius: 8
                             color: Qt.rgba(1, 1, 1, 0.03)
@@ -490,10 +516,122 @@ Item {
                                         modelData.id, !modelData.health.inMaintenance)
                                 }
                                 PillButton {
+                                    label: (devCard.expanded ? "▾ " : "▸ ")
+                                           + "Channels (" + modelData.cameraCount + ")"
+                                    tone: "#3a6ea5"
+                                    onClicked: devCard.expanded = !devCard.expanded
+                                }
+                                PillButton {
                                     label: "Remove"; tone: "#e05a4e"
                                     onClicked: devicesCtrl.removeDevice(modelData.id)
                                 }
                             }
+                        }
+
+                        // --- expandable channel-management panel (inc 17, P2-05) ---
+                        Rectangle {
+                            width: parent.width
+                            visible: devCard.expanded
+                            height: visible ? chanCol.height + 20 : 0
+                            radius: 8
+                            color: Qt.rgba(1, 1, 1, 0.02)
+                            border.width: 1; border.color: "#232a36"
+
+                            Column {
+                                id: chanCol
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 10
+                                spacing: 6
+
+                                Text {
+                                    text: "Channels — rename, disable (leaves the "
+                                          + "default group), or remove"
+                                    color: "#8a93a3"; font.pixelSize: 11
+                                }
+                                Repeater {
+                                    model: modelData.channels
+                                    delegate: Rectangle {
+                                        width: chanCol.width; height: 40; radius: 6
+                                        color: "#11151c"
+                                        border.width: 1
+                                        border.color: modelData.disabled ? "#3a2530" : "#2a3240"
+                                        opacity: modelData.disabled ? 0.6 : 1.0
+
+                                        // editable channel name
+                                        Rectangle {
+                                            id: nameBox
+                                            anchors.left: parent.left; anchors.leftMargin: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 150; height: 26; radius: 4
+                                            color: "#0c0f14"
+                                            border.color: nameIn.activeFocus ? "#3a6ea5" : "#232a36"
+                                            border.width: 1
+                                            TextInput {
+                                                id: nameIn
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 7; anchors.rightMargin: 7
+                                                verticalAlignment: TextInput.AlignVCenter
+                                                color: "#e8ecf3"; font.pixelSize: 12
+                                                clip: true; selectByMouse: true
+                                                text: modelData.name
+                                                onEditingFinished:
+                                                    devicesCtrl.renameChannel(
+                                                        devCard.devId, modelData.id, text)
+                                            }
+                                        }
+                                        Text {
+                                            anchors.left: nameBox.right; anchors.leftMargin: 10
+                                            anchors.right: chanActions.left; anchors.rightMargin: 10
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: modelData.id
+                                                  + (modelData.width > 0
+                                                     ? ("   ·   " + modelData.width + "×"
+                                                        + modelData.height
+                                                        + (modelData.codec ? (" " + modelData.codec) : ""))
+                                                     : "")
+                                                  + (modelData.disabled ? "   ·   disabled" : "")
+                                            color: "#6f7a86"; font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                        }
+                                        Row {
+                                            id: chanActions
+                                            anchors.right: parent.right; anchors.rightMargin: 8
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 6
+                                            PillButton {
+                                                label: "▲"; tone: "#3a6ea5"
+                                                onClicked: devicesCtrl.moveChannel(
+                                                    devCard.devId, modelData.id, true)
+                                            }
+                                            PillButton {
+                                                label: "▼"; tone: "#3a6ea5"
+                                                onClicked: devicesCtrl.moveChannel(
+                                                    devCard.devId, modelData.id, false)
+                                            }
+                                            PillButton {
+                                                label: modelData.disabled ? "Enable" : "Disable"
+                                                tone: modelData.disabled ? "#37c871" : "#f2a33c"
+                                                onClicked: devicesCtrl.setChannelDisabled(
+                                                    devCard.devId, modelData.id,
+                                                    !modelData.disabled)
+                                            }
+                                            PillButton {
+                                                label: "Remove"; tone: "#e05a4e"
+                                                onClicked: devicesCtrl.removeChannel(
+                                                    devCard.devId, modelData.id)
+                                            }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    visible: modelData.channels.length === 0
+                                    text: "No channels."
+                                    color: "#5a6270"; font.pixelSize: 11
+                                }
+                            }
+                        }
                         }
                     }
                 }

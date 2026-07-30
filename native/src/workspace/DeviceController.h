@@ -35,6 +35,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "HealthProbe.h"             // DeviceHealthProbe (live-feed reachability)
 #include "health/HealthMonitor.h"
 #include "onvif/DiscoverySource.h"  // DiscoverySource + DiscoveryCandidate + OnvifDevice
 #include "persist/DeviceRepo.h"
@@ -69,11 +70,14 @@ class DeviceController : public QObject {
     Q_PROPERTY(QString discoveryStatus READ discoveryStatus NOTIFY discoveryChanged)
 
 public:
-    // `repo`, `health`, and `discovery` are owned by the caller (main) and must
-    // outlive this. `discovery` may be null (discovery then reports unavailable).
+    // `repo`, `health`, `discovery`, and `probe` are owned by the caller (main)
+    // and must outlive this. `discovery` may be null (discovery then reports
+    // unavailable); `probe` may be null (no live health feed — health stays
+    // Unknown until a dimension is reported).
     DeviceController(vms::persist::DeviceRepo* repo,
                      vms::health::HealthMonitor* health,
                      vms::onvif::DiscoverySource* discovery = nullptr,
+                     vms::health::DeviceHealthProbe* probe = nullptr,
                      QObject* parent = nullptr);
 
     QVariantList devices() const { return devices_; }
@@ -119,6 +123,26 @@ public:
     // its health record). Returns "" on success or a human-readable error.
     Q_INVOKABLE QString removeDevice(const QString& id);
 
+    // --- per-channel management (increment 17, P2-05) ---
+    // These operate on one camera channel of a device; the device model's
+    // `channels` list (rebuilt after each) is what the QML channel panel binds
+    // to. Each returns "" on success or a human-readable error (also lastError).
+
+    // Rename a channel's operator-facing name (stable id + URLs untouched).
+    Q_INVOKABLE QString renameChannel(const QString& deviceId,
+                                      const QString& cameraId, const QString& name);
+    // Enable/disable a channel: a disabled channel stays in inventory but leaves
+    // the device's default group (excluded from active use).
+    Q_INVOKABLE QString setChannelDisabled(const QString& deviceId,
+                                           const QString& cameraId, bool disabled);
+    // Remove a single channel from a device (not the whole device).
+    Q_INVOKABLE QString removeChannel(const QString& deviceId,
+                                      const QString& cameraId);
+    // Move a channel one position up (`up=true`) or down within its device's
+    // channel order (P2-05). A no-op at the ends.
+    Q_INVOKABLE QString moveChannel(const QString& deviceId,
+                                    const QString& cameraId, bool up);
+
     // Acknowledge the device's active exception (silences the alert; the
     // exception persists until the condition recovers).
     Q_INVOKABLE void acknowledge(const QString& id);
@@ -135,6 +159,18 @@ public:
     Q_INVOKABLE void reportStream(const QString& id, int level);
     Q_INVOKABLE void reportStorage(const QString& id, int level);
     Q_INVOKABLE void setFirmware(const QString& id, const QString& firmware);
+
+    // Whether a live health probe is wired (QML shows a "live" vs "manual"
+    // affordance; a build/run without a probe reports false).
+    Q_PROPERTY(bool healthFeedAvailable READ healthFeedAvailable CONSTANT)
+    bool healthFeedAvailable() const { return probe_ != nullptr; }
+
+    // Probe every onboarded device's reachability once and feed the result into
+    // the HealthMonitor (increment 19, P2-13 live feed). Reachable -> reach
+    // Online; unreachable -> reach Offline (raising an exception). Stream health
+    // is left as-is (reachability alone doesn't prove a stream). A no-op with no
+    // probe wired. main drives this on a timer; --devices-selftest calls it directly.
+    Q_INVOKABLE void pollHealth();
 
     // Scan the LAN for ONVIF devices (blocking up to `timeoutMs`) and rebuild
     // the discoveredDevices model, each candidate flagged alreadyOnboarded
@@ -156,8 +192,12 @@ public:
     // a fetched device's profiles/stream URIs — Main = the largest-resolution
     // H.264/H.265 profile with a stream URI, Sub = a smaller one, if any. Static
     // + exercised by --devices-selftest. `mainUrl` is empty when nothing usable.
+    // When `mainProf`/`subProf` are given they receive the chosen profiles (for
+    // stream-profile sync); `subProf` is left untouched when there is no sub.
     static void chooseStreams(const vms::onvif::OnvifDevice& dev,
-                              std::string& mainUrl, std::string& subUrl);
+                              std::string& mainUrl, std::string& subUrl,
+                              vms::onvif::MediaProfile* mainProf = nullptr,
+                              vms::onvif::MediaProfile* subProf = nullptr);
 
     // Pure: a stable, sanitized device id derived from a candidate's host
     // ("192.168.0.254" -> "onvif-192-168-0-254"). Static + testable.
@@ -175,6 +215,7 @@ private:
     vms::persist::DeviceRepo* repo_ = nullptr;
     vms::health::HealthMonitor* health_ = nullptr;
     vms::onvif::DiscoverySource* discovery_ = nullptr;
+    vms::health::DeviceHealthProbe* probe_ = nullptr;
     QVariantList devices_;
     QString lastError_;
 

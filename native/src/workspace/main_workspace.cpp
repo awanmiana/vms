@@ -41,10 +41,12 @@
 #include <string>
 
 #ifdef VMS_WITH_PERSIST
+#include <map>
 #include <memory>
 
 #include <QDir>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include "persist/Schema.h"
 #include "persist/Store.h"
@@ -198,6 +200,20 @@ int runPlaybackSelftest() {
     return 1;
 }
 
+// inc 19: a fixture reachability probe for --devices-selftest — scripted per
+// device (default reachable) so pollHealth() drives health with no socket.
+class FakeHealthProbe : public vms::health::DeviceHealthProbe {
+public:
+    std::map<std::string, bool> reachable;   // deviceId -> reachable
+    vms::health::ProbeResult probe(const vms::health::ProbeTarget& t) override {
+        vms::health::ProbeResult r;
+        r.deviceId = t.deviceId;
+        auto it = reachable.find(t.deviceId);
+        r.reachable = (it == reachable.end()) ? true : it->second;
+        return r;
+    }
+};
+
 // increment 14 (onboarding UI): headless check that DeviceController turns the
 // DeviceRepo + HealthMonitor cores into the honest model the Devices tab binds
 // to — onboard → Unknown-until-observed → Offline/Online derivation → exception
@@ -214,15 +230,16 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 5, "schema at v5 (device kind, inc 15)");
+    check(store.schemaVersion() == 7, "schema at v7 (channel sort_order, inc 18)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
+    FakeHealthProbe fakeProbe;
 #ifdef VMS_WITH_ONVIF
     FakeDiscoverySource fakeDisc;
-    DeviceController ctrl(&repo, &health, &fakeDisc);
+    DeviceController ctrl(&repo, &health, &fakeDisc, &fakeProbe);
 #else
-    DeviceController ctrl(&repo, &health);
+    DeviceController ctrl(&repo, &health, nullptr, &fakeProbe);
 #endif
 
     std::cout << "vms_workspace --devices-selftest\n";
@@ -322,6 +339,66 @@ int runDevicesSelftest() {
     check(ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt() == 6,
           "re-onboard to 6 channels is idempotent (device stays single, grows to 6)");
 
+    // inc 17: per-channel management (P2-05). The device model carries the
+    // channel list the panel binds to; rename/disable/remove operate on one
+    // channel and reconcile the default group (disabled/removed leave it).
+    auto nvrChannels = [&]() {
+        return ctrl.devices().first().toMap()
+            .value(QStringLiteral("channels")).toList();
+    };
+    auto groupCount = [&]() -> std::int64_t {
+        Result g;
+        store.query("SELECT COUNT(*) FROM camera_group_members WHERE group_id=?;",
+                    {DeviceRepo::defaultGroupId("nvr-1")}, g);
+        return g.rows.empty() ? -1 : std::get<std::int64_t>(g.rows[0][0]);
+    };
+    check(nvrChannels().size() == 6, "channel model lists all 6 channels");
+    check(groupCount() == 6, "default group holds all 6 enabled channels");
+
+    ctrl.renameChannel(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"),
+                       QStringLiteral("Front Cam"));
+    check(nvrChannels().first().toMap().value(QStringLiteral("name")).toString() ==
+              QLatin1String("Front Cam"),
+          "renameChannel updates the operator name, stable id preserved");
+
+    ctrl.setChannelDisabled(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"), true);
+    check(nvrChannels().first().toMap().value(QStringLiteral("disabled")).toBool(),
+          "setChannelDisabled marks the channel disabled");
+    check(nvrChannels().size() == 6,
+          "a disabled channel stays in inventory (still 6)");
+    check(groupCount() == 5,
+          "disabled channel is excluded from the default group (6 -> 5)");
+
+    QString rc = ctrl.removeChannel(QStringLiteral("nvr-1"),
+                                    QStringLiteral("nvr-1-ch2"));
+    check(rc.isEmpty(), "removeChannel succeeds");
+    check(ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt() == 5,
+          "removed channel leaves inventory (6 -> 5)");
+    check(groupCount() == 4,
+          "group now holds 4 (5 channels, 1 still disabled)");
+
+    ctrl.setChannelDisabled(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"), false);
+    check(groupCount() == 5, "re-enabling a channel restores it to the group");
+
+    // inc 18: channel reorder (P2-05). nvr-1's channels list order by sort_order
+    // then id — initially ch1, ch3, ch4, ch5, ch6 (ch2 was removed above).
+    auto chanIdAt = [&](int i) {
+        return nvrChannels().at(i).toMap().value(QStringLiteral("id")).toString();
+    };
+    check(chanIdAt(0) == QLatin1String("nvr-1-ch1") &&
+              chanIdAt(1) == QLatin1String("nvr-1-ch3"),
+          "initial channel order is by id");
+    ctrl.moveChannel(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"), false);
+    check(chanIdAt(0) == QLatin1String("nvr-1-ch3") &&
+              chanIdAt(1) == QLatin1String("nvr-1-ch1"),
+          "moveChannel down reorders ch1 below ch3");
+    ctrl.moveChannel(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"), true);
+    check(chanIdAt(0) == QLatin1String("nvr-1-ch1"),
+          "moveChannel up restores ch1 to the top");
+    ctrl.moveChannel(QStringLiteral("nvr-1"), QStringLiteral("nvr-1-ch1"), true);
+    check(chanIdAt(0) == QLatin1String("nvr-1-ch1"),
+          "moveChannel up at the top is a no-op");
+
 #ifdef VMS_WITH_ONVIF
     // inc 16: ONVIF discovery-as-a-source. The fixture-backed DiscoverySource
     // serves two candidates; the flow discovers, dedups against inventory, maps
@@ -392,7 +469,71 @@ int runDevicesSelftest() {
             dupFlagged = m.value(QStringLiteral("alreadyOnboarded")).toBool();
     }
     check(dupFlagged, "re-scan flags the onboarded device as already onboarded");
+
+    // inc 18: the discovered device's stream profile (resolution/codec) was
+    // synced from its ONVIF media profiles (fixture main = 1920x1080 H264).
+    QVariantMap onvifChan;
+    for (const QVariant& v : ctrl.devices()) {
+        const QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("id")).toString() ==
+            QLatin1String("onvif-192-168-0-77"))
+            onvifChan = m.value(QStringLiteral("channels")).toList()
+                            .first().toMap();
+    }
+    check(onvifChan.value(QStringLiteral("width")).toInt() == 1920 &&
+              onvifChan.value(QStringLiteral("height")).toInt() == 1080 &&
+              onvifChan.value(QStringLiteral("codec")).toString() ==
+                  QLatin1String("H264"),
+          "discovered channel's main stream profile synced (1920x1080 H264)");
 #endif  // VMS_WITH_ONVIF
+
+    // inc 19: device-health LIVE FEED. A fixture reachability probe drives
+    // health automatically via pollHealth(): Unknown -> Online/Offline, and
+    // recover when the probe reports reachable again.
+    check(ctrl.healthFeedAvailable(), "health feed available (probe wired)");
+    ctrl.onboard(QStringLiteral("h-up"), QStringLiteral("Reachable Cam"),
+                 QStringLiteral("192.168.9.10"), QStringLiteral("Acme"),
+                 QStringLiteral("u"), QStringLiteral("p"),
+                 QStringLiteral("rtsp://192.168.9.10/1"), QString());
+    ctrl.onboard(QStringLiteral("h-down"), QStringLiteral("Down Cam"),
+                 QStringLiteral("192.168.9.11"), QStringLiteral("Acme"),
+                 QStringLiteral("u"), QStringLiteral("p"),
+                 QStringLiteral("rtsp://192.168.9.11/1"), QString());
+    auto stateOf = [&](const QString& id) -> QString {
+        for (const QVariant& v : ctrl.devices()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("id")).toString() == id)
+                return m.value(QStringLiteral("health")).toMap()
+                    .value(QStringLiteral("state")).toString();
+        }
+        return QStringLiteral("<none>");
+    };
+    auto attentionOf = [&](const QString& id) -> bool {
+        for (const QVariant& v : ctrl.devices()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("id")).toString() == id)
+                return m.value(QStringLiteral("health")).toMap()
+                    .value(QStringLiteral("needsAttention")).toBool();
+        }
+        return false;
+    };
+    check(stateOf(QStringLiteral("h-up")) == QLatin1String("unknown"),
+          "a newly onboarded device is Unknown until the feed observes it");
+
+    fakeProbe.reachable[std::string("h-up")] = true;
+    fakeProbe.reachable[std::string("h-down")] = false;
+    ctrl.pollHealth();
+    check(stateOf(QStringLiteral("h-up")) == QLatin1String("online"),
+          "reachable device -> Online via the live feed");
+    check(stateOf(QStringLiteral("h-down")) == QLatin1String("offline"),
+          "unreachable device -> Offline via the live feed");
+    check(attentionOf(QStringLiteral("h-down")),
+          "a device the feed finds offline needs attention");
+
+    fakeProbe.reachable[std::string("h-down")] = true;   // came back
+    ctrl.pollHealth();
+    check(stateOf(QStringLiteral("h-down")) == QLatin1String("online"),
+          "device recovers to Online when the feed reports reachable again");
 
     if (failures == 0) {
         std::cout << "PASS: onboard -> honest health (Unknown/Offline/Online) -> "
@@ -914,6 +1055,8 @@ int main(int argc, char* argv[]) {
     int smokeMs = 0;                     // >0: load, run this long offscreen, quit
     int optIntervalSec = 2;              // optimizer health-sample cadence (inc 8)
     bool noOptimize = false;             // disable the live optimizer sampler
+    int healthIntervalSec = 15;          // device-health live-feed cadence (inc 19)
+    bool noHealthFeed = false;           // disable the live device-health probe
     double optFakeRamMb = -1.0;          // >=0: inject this free-RAM (test the loop)
     double optFakeBwKbps = -1.0;         // >=0: inject a link budget
 #ifdef VMS_WITH_GSTREAMER
@@ -952,6 +1095,10 @@ int main(int argc, char* argv[]) {
             optFakeRamMb = std::atof(argv[++i]);
         } else if (a == "--opt-fake-bw" && i + 1 < argc) {
             optFakeBwKbps = std::atof(argv[++i]);
+        } else if (a == "--health-interval" && i + 1 < argc) {
+            healthIntervalSec = std::atoi(argv[++i]);
+        } else if (a == "--no-health-feed") {
+            noHealthFeed = true;
         } else if (a == "--count" && i + 1 < argc) {
             count = std::atoi(argv[++i]);
         } else if (a == "--sweep-interval" && i + 1 < argc) {
@@ -1114,9 +1261,28 @@ int main(int argc, char* argv[]) {
             discSource = liveSource.get();
         }
 #endif
+        // inc 19: the device-health LIVE FEED. A real run wires the live TCP
+        // reachability probe; --devices-demo leaves it off so the scripted demo
+        // health stands (a live probe would just find the fake IPs offline).
+        static std::unique_ptr<vms::health::DeviceHealthProbe> healthProbe;
+        vms::health::DeviceHealthProbe* probeSource = nullptr;
+        if (!devicesDemo && !noHealthFeed) {
+            healthProbe = vms::health::MakeTcpHealthProbe(800);
+            probeSource = healthProbe.get();
+        }
         devices = new DeviceController(deviceRepo.get(), &deviceHealth,
-                                       discSource, &app);
+                                       discSource, probeSource, &app);
         devicesCtrl = devices;
+
+        // Poll device reachability now and on a timer so the Devices tab health
+        // tracks the world without an operator action (a no-op with no probe).
+        if (probeSource && healthIntervalSec > 0) {
+            devices->pollHealth();
+            auto* healthTimer = new QTimer(&app);
+            QObject::connect(healthTimer, &QTimer::timeout, devices,
+                             [devices]() { devices->pollHealth(); });
+            healthTimer->start(healthIntervalSec * 1000);
+        }
 
         if (devicesDemo) {
             struct Demo { const char* id; const char* name; const char* addr;

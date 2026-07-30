@@ -15,6 +15,7 @@ using vms::persist::DeviceRepo;
 using vms::persist::DeviceOnboard;
 using vms::persist::DeviceSummary;
 using vms::persist::CameraChannel;
+using vms::persist::ChannelSummary;
 using vms::persist::Error;
 using vms::onvif::DiscoverySource;
 using vms::onvif::DiscoveryCandidate;
@@ -78,8 +79,11 @@ QString errMessage(const Error& e) {
 }  // namespace
 
 DeviceController::DeviceController(DeviceRepo* repo, HealthMonitor* health,
-                                   DiscoverySource* discovery, QObject* parent)
-    : QObject(parent), repo_(repo), health_(health), discovery_(discovery) {
+                                   DiscoverySource* discovery,
+                                   vms::health::DeviceHealthProbe* probe,
+                                   QObject* parent)
+    : QObject(parent), repo_(repo), health_(health), discovery_(discovery),
+      probe_(probe) {
     refresh();
 }
 
@@ -126,6 +130,25 @@ void DeviceController::rebuild() {
                                                        : d.kind));
         m.insert(QStringLiteral("cameraCount"), d.cameraCount);
         m.insert(QStringLiteral("health"), healthMap(d.id));
+        // The device's channels (increment 17): the channel-management panel
+        // binds to this, so it refreshes with the model on every mutation.
+        QVariantList channels;
+        std::vector<ChannelSummary> chans;
+        if (Error ce = repo_->listChannels(d.id, chans); ce) {
+            for (const ChannelSummary& c : chans) {
+                QVariantMap cm;
+                cm.insert(QStringLiteral("id"), QString::fromStdString(c.id));
+                cm.insert(QStringLiteral("name"), QString::fromStdString(c.name));
+                cm.insert(QStringLiteral("mainUrl"), QString::fromStdString(c.mainUrl));
+                cm.insert(QStringLiteral("subUrl"), QString::fromStdString(c.subUrl));
+                cm.insert(QStringLiteral("disabled"), c.disabled);
+                cm.insert(QStringLiteral("width"), c.mainWidth);
+                cm.insert(QStringLiteral("height"), c.mainHeight);
+                cm.insert(QStringLiteral("codec"), QString::fromStdString(c.mainCodec));
+                channels.push_back(cm);
+            }
+        }
+        m.insert(QStringLiteral("channels"), channels);
         devices_.push_back(m);
     }
     emit changed();
@@ -239,6 +262,35 @@ QString DeviceController::removeDevice(const QString& id) {
     return lastError_;
 }
 
+QString DeviceController::renameChannel(const QString& /*deviceId*/,
+                                        const QString& cameraId,
+                                        const QString& name) {
+    const Error e =
+        repo_->renameChannel(cameraId.toStdString(), name.trimmed().toStdString());
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
+QString DeviceController::setChannelDisabled(const QString& deviceId,
+                                             const QString& cameraId,
+                                             bool disabled) {
+    const Error e = repo_->setChannelDisabled(deviceId.toStdString(),
+                                              cameraId.toStdString(), disabled);
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
+QString DeviceController::removeChannel(const QString& deviceId,
+                                        const QString& cameraId) {
+    const Error e = repo_->removeChannel(deviceId.toStdString(),
+                                         cameraId.toStdString());
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
 void DeviceController::acknowledge(const QString& id) {
     health_->acknowledge(id.toStdString());
     rebuild();
@@ -284,6 +336,43 @@ void DeviceController::setFirmware(const QString& id, const QString& firmware) {
     rebuild();
 }
 
+namespace {
+// Split a device address into host + port, defaulting to RTSP 554. Only a
+// trailing ":<digits>" is treated as a port (so a bare IPv4/host, or an IPv6
+// literal with multiple colons, keeps the whole string as the host and 554).
+void splitHostPort(const std::string& address, std::string& host, int& port) {
+    host = address;
+    port = 554;
+    const auto pos = address.rfind(':');
+    if (pos == std::string::npos || pos + 1 >= address.size()) return;
+    const std::string tail = address.substr(pos + 1);
+    if (address.find(':') != pos) return;   // more than one ':' -> not host:port
+    for (char c : tail)
+        if (!std::isdigit(static_cast<unsigned char>(c))) return;
+    host = address.substr(0, pos);
+    port = std::stoi(tail);
+}
+}  // namespace
+
+void DeviceController::pollHealth() {
+    if (!probe_) return;
+    std::vector<DeviceSummary> list;
+    if (Error e = repo_->listDevices(list); !e) return;
+    for (const DeviceSummary& d : list) {
+        // A device with no address can't be probed — leave its health as-is
+        // (honest: no observation rather than a false Offline).
+        if (d.address.empty()) continue;
+        vms::health::ProbeTarget t;
+        t.deviceId = d.id;
+        splitHostPort(d.address, t.host, t.port);
+        const vms::health::ProbeResult r = probe_->probe(t);
+        // Reachable -> Online; unreachable -> Offline (raises an exception).
+        // Stream is left as-is: reachability alone doesn't prove a stream.
+        health_->reportReachable(d.id, r.reachable);
+    }
+    rebuild();
+}
+
 // ---- ONVIF discovery-as-a-source (increment 16, P2-03/P2-14) ---------------
 
 std::string DeviceController::deviceIdFromHost(const std::string& host) {
@@ -301,13 +390,14 @@ std::string DeviceController::deviceIdFromHost(const std::string& host) {
 }
 
 void DeviceController::chooseStreams(const OnvifDevice& dev, std::string& mainUrl,
-                                     std::string& subUrl) {
+                                     std::string& subUrl, MediaProfile* mainProf,
+                                     MediaProfile* subProf) {
     mainUrl.clear();
     subUrl.clear();
     // A usable profile: a video encoding we handle (H.264/H.265) with a
     // non-empty RTSP URI (streamUris is parallel to profiles). JPEG-only or
     // URI-less profiles are ignored.
-    struct Usable { long long px; std::string uri; };
+    struct Usable { long long px; std::string uri; MediaProfile prof; };
     std::vector<Usable> usable;
     const std::size_t n =
         std::min(dev.profiles.size(), dev.streamUris.size());
@@ -316,15 +406,18 @@ void DeviceController::chooseStreams(const OnvifDevice& dev, std::string& mainUr
         const std::string& uri = dev.streamUris[i];
         if (uri.empty()) continue;
         if (p.encoding != "H264" && p.encoding != "H265") continue;
-        usable.push_back({static_cast<long long>(p.width) * p.height, uri});
+        usable.push_back({static_cast<long long>(p.width) * p.height, uri, p});
     }
     if (usable.empty()) return;
     // Main = largest resolution; Sub = smallest resolution distinct from Main.
     std::sort(usable.begin(), usable.end(),
               [](const Usable& a, const Usable& b) { return a.px > b.px; });
     mainUrl = usable.front().uri;
-    if (usable.size() > 1 && usable.back().uri != mainUrl)
+    if (mainProf) *mainProf = usable.front().prof;
+    if (usable.size() > 1 && usable.back().uri != mainUrl) {
         subUrl = usable.back().uri;
+        if (subProf) *subProf = usable.back().prof;
+    }
 }
 
 void DeviceController::rebuildDiscovered() {
@@ -407,9 +500,11 @@ QString DeviceController::onboardDiscovered(const QString& endpointRef,
         return lastError_;
     }
 
-    // Map profiles -> credential-free Main/Sub RTSP URLs.
+    // Map profiles -> credential-free Main/Sub RTSP URLs (+ the chosen profiles,
+    // for stream-profile sync below).
     std::string mainUrl, subUrl;
-    chooseStreams(dev, mainUrl, subUrl);
+    MediaProfile mainProf, subProf;
+    chooseStreams(dev, mainUrl, subUrl, &mainProf, &subProf);
     if (mainUrl.empty()) {
         lastError_ = QStringLiteral(
             "device reported no usable H.264/H.265 stream");
@@ -443,8 +538,50 @@ QString DeviceController::onboardDiscovered(const QString& endpointRef,
         health_->add(d.id);
         if (!dev.info.firmware.empty())
             health_->setFirmware(d.id, dev.info.firmware);
+        // Sync the discovered stream profiles (resolution/codec) for the channel
+        // (P2-05 stream-profile sync from a discovery source). Best-effort: an
+        // onboarded device is not un-onboarded if only the profile write fails.
+        repo_->setStreamProfile(c.id, "main", mainProf.width, mainProf.height,
+                                mainProf.encoding);
+        if (!subUrl.empty())
+            repo_->setStreamProfile(c.id, "sub", subProf.width, subProf.height,
+                                    subProf.encoding);
     }
     rebuild();            // inventory changed
     rebuildDiscovered();  // the just-onboarded candidate now shows as onboarded
+    return lastError_;
+}
+
+QString DeviceController::moveChannel(const QString& deviceId,
+                                      const QString& cameraId, bool up) {
+    // Compute the new order from the current persisted order, then persist it.
+    std::vector<ChannelSummary> chans;
+    if (Error le = repo_->listChannels(deviceId.toStdString(), chans); !le) {
+        lastError_ = errMessage(le);
+        emit changed();
+        return lastError_;
+    }
+    std::vector<std::string> ids;
+    ids.reserve(chans.size());
+    for (const ChannelSummary& c : chans) ids.push_back(c.id);
+    const std::string cid = cameraId.toStdString();
+    auto it = std::find(ids.begin(), ids.end(), cid);
+    if (it == ids.end()) {
+        lastError_ = QStringLiteral("unknown channel");
+        emit changed();
+        return lastError_;
+    }
+    const std::size_t i = static_cast<std::size_t>(it - ids.begin());
+    if (up && i > 0)
+        std::swap(ids[i], ids[i - 1]);
+    else if (!up && i + 1 < ids.size())
+        std::swap(ids[i], ids[i + 1]);
+    else {
+        lastError_.clear();   // already at the end — a no-op, not an error
+        return lastError_;
+    }
+    const Error e = repo_->reorderChannels(deviceId.toStdString(), ids);
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
     return lastError_;
 }
