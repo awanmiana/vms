@@ -119,6 +119,10 @@ public:
                                         const QString& mainTemplate,
                                         const QString& subTemplate);
 
+    // Rename a device, preserving all associations (P2-06). Returns "" on
+    // success or a human-readable error.
+    Q_INVOKABLE QString renameDevice(const QString& id, const QString& name);
+
     // Remove a device and everything it owns (cameras, group, credential, and
     // its health record). Returns "" on success or a human-readable error.
     Q_INVOKABLE QString removeDevice(const QString& id);

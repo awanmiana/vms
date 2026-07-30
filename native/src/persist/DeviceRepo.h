@@ -96,6 +96,12 @@ public:
                        const std::vector<CameraChannel>& cameras,
                        bool allowRemoval);
 
+    // Rename a device (P2-06): updates the device's operator-facing name and
+    // refreshes its default group's display name, while PRESERVING every
+    // association — camera channels + their stable ids and operator names, group
+    // membership, and the credential are untouched. Honest NotFound on a bad id.
+    Error renameDevice(const std::string& deviceId, const std::string& newName);
+
     // Remove a device and everything owned by it (cameras, group, credential).
     Error remove(const std::string& deviceId);
 

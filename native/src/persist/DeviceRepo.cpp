@@ -208,6 +208,29 @@ Error DeviceRepo::syncChannels(const std::string& deviceId,
     return tx.commit();
 }
 
+Error DeviceRepo::renameDevice(const std::string& deviceId,
+                               const std::string& newName) {
+    if (deviceId.empty() || newName.empty())
+        return {Status::Misuse, "device id and name required"};
+    Result r;
+    if (Error e = store_.query("SELECT 1 FROM devices WHERE id=?;", {deviceId}, r);
+        !e)
+        return e;
+    if (r.rows.empty()) return {Status::NotFound, "unknown device " + deviceId};
+
+    Store::Tx tx(store_);
+    if (Error e = tx.begin(); !e) return e;
+    if (Error e = store_.exec(
+            "UPDATE devices SET name=?, updated_at=datetime('now') WHERE id=?;",
+            {newName, deviceId});
+        !e)
+        return e;
+    // Refresh only the default group's display name; membership + camera rows
+    // (ids, operator names, urls) and the credential are untouched.
+    if (Error e = reconcileGroup(deviceId, newName); !e) return e;
+    return tx.commit();
+}
+
 Error DeviceRepo::remove(const std::string& deviceId) {
     if (deviceId.empty()) return {Status::Misuse, "empty deviceId"};
     const std::string ref = CredentialRepo::mintRef(deviceId);

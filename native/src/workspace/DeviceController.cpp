@@ -255,6 +255,19 @@ QString DeviceController::onboardRecorder(
     return lastError_;
 }
 
+QString DeviceController::renameDevice(const QString& id, const QString& name) {
+    if (name.trimmed().isEmpty()) {
+        lastError_ = QStringLiteral("device name is required");
+        emit changed();
+        return lastError_;
+    }
+    const Error e =
+        repo_->renameDevice(id.toStdString(), name.trimmed().toStdString());
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
 QString DeviceController::removeDevice(const QString& id) {
     const Error e = repo_->remove(id.toStdString());
     lastError_ = e ? QString() : errMessage(e);

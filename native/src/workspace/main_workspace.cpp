@@ -399,6 +399,32 @@ int runDevicesSelftest() {
     check(chanIdAt(0) == QLatin1String("nvr-1-ch1"),
           "moveChannel up at the top is a no-op");
 
+    // inc 20: device rename (P2-06) preserves every association.
+    const int camsBefore =
+        ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt();
+    QString ren = ctrl.renameDevice(QStringLiteral("nvr-1"),
+                                    QStringLiteral("Main Lobby Recorder"));
+    check(ren.isEmpty(), "renameDevice succeeds");
+    check(ctrl.devices().first().toMap().value(QStringLiteral("name")).toString() ==
+              QLatin1String("Main Lobby Recorder"),
+          "device name updated");
+    check(ctrl.devices().first().toMap().value(QStringLiteral("cameraCount")).toInt()
+              == camsBefore,
+          "rename preserves the channels (associations intact)");
+    check(groupCount() == camsBefore,
+          "rename preserves the default group membership");
+    {
+        Result gn;
+        store.query("SELECT name FROM camera_groups WHERE id=?;",
+                    {DeviceRepo::defaultGroupId("nvr-1")}, gn);
+        check(!gn.rows.empty() &&
+                  std::get<std::string>(gn.rows[0][0]) == "Main Lobby Recorder (default)",
+              "rename refreshes the default group's display name");
+    }
+    check(!ctrl.renameDevice(QStringLiteral("no-such-device"),
+                             QStringLiteral("X")).isEmpty(),
+          "renaming an unknown device is an honest error");
+
 #ifdef VMS_WITH_ONVIF
     // inc 16: ONVIF discovery-as-a-source. The fixture-backed DiscoverySource
     // serves two candidates; the flow discovers, dedups against inventory, maps

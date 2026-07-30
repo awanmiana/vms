@@ -432,6 +432,8 @@ Item {
                             width: cards.width
                             spacing: 6
                             property bool expanded: false
+                            property bool renaming: false          // inc 20 (P2-06)
+                            property bool confirmingRemove: false  // inc 20 (P2-06)
                             property string devId: modelData.id
 
                         Rectangle {
@@ -463,10 +465,39 @@ Item {
                                 anchors.right: actions.left
                                 anchors.rightMargin: 12
                                 spacing: 2
-                                Text {
-                                    text: modelData.name + "   ·   " + modelData.health.stateText
-                                    color: "#e8ecf3"; font.pixelSize: 14; font.bold: true
-                                    elide: Text.ElideRight; width: parent.width
+                                Item {
+                                    width: parent.width; height: 22
+                                    // display mode
+                                    Text {
+                                        visible: !devCard.renaming
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: parent.width
+                                        text: modelData.name + "   ·   " + modelData.health.stateText
+                                        color: "#e8ecf3"; font.pixelSize: 14; font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+                                    // rename mode (inc 20, P2-06): associations preserved
+                                    Rectangle {
+                                        visible: devCard.renaming
+                                        anchors.left: parent.left
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 190; height: 24; radius: 4
+                                        color: "#0c0f14"
+                                        border.color: "#3a6ea5"; border.width: 1
+                                        TextInput {
+                                            id: devNameIn
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 7; anchors.rightMargin: 7
+                                            verticalAlignment: TextInput.AlignVCenter
+                                            color: "#e8ecf3"; font.pixelSize: 13
+                                            clip: true; selectByMouse: true
+                                            text: modelData.name
+                                            onEditingFinished: {
+                                                devicesCtrl.renameDevice(devCard.devId, text)
+                                                devCard.renaming = false
+                                            }
+                                        }
+                                    }
                                 }
                                 Text {
                                     text: root.kindLabel(modelData.kind)
@@ -503,12 +534,20 @@ Item {
                                 spacing: 8
 
                                 PillButton {
-                                    visible: modelData.health.exceptionActive
+                                    visible: !devCard.confirmingRemove
+                                             && modelData.health.exceptionActive
                                              && !modelData.health.exceptionAcknowledged
                                     label: "Acknowledge"; tone: "#f2a33c"
                                     onClicked: devicesCtrl.acknowledge(modelData.id)
                                 }
                                 PillButton {
+                                    visible: !devCard.confirmingRemove
+                                    label: devCard.renaming ? "Cancel rename" : "Rename"
+                                    tone: "#3a6ea5"
+                                    onClicked: devCard.renaming = !devCard.renaming
+                                }
+                                PillButton {
+                                    visible: !devCard.confirmingRemove
                                     label: modelData.health.inMaintenance
                                             ? "End maint." : "Maintenance"
                                     tone: "#3a6ea5"
@@ -516,14 +555,33 @@ Item {
                                         modelData.id, !modelData.health.inMaintenance)
                                 }
                                 PillButton {
+                                    visible: !devCard.confirmingRemove
                                     label: (devCard.expanded ? "▾ " : "▸ ")
                                            + "Channels (" + modelData.cameraCount + ")"
                                     tone: "#3a6ea5"
                                     onClicked: devCard.expanded = !devCard.expanded
                                 }
+                                // Destructive remove requires confirmation (P2-06).
                                 PillButton {
+                                    visible: !devCard.confirmingRemove
                                     label: "Remove"; tone: "#e05a4e"
+                                    onClicked: devCard.confirmingRemove = true
+                                }
+                                Text {
+                                    visible: devCard.confirmingRemove
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "Remove this device and its channels?"
+                                    color: "#e05a4e"; font.pixelSize: 12
+                                }
+                                PillButton {
+                                    visible: devCard.confirmingRemove
+                                    label: "Confirm remove"; tone: "#e05a4e"
                                     onClicked: devicesCtrl.removeDevice(modelData.id)
+                                }
+                                PillButton {
+                                    visible: devCard.confirmingRemove
+                                    label: "Cancel"; tone: "#5b6472"
+                                    onClicked: devCard.confirmingRemove = false
                                 }
                             }
                         }
