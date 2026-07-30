@@ -230,7 +230,7 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 7, "schema at v7 (channel sort_order, inc 18)");
+    check(store.schemaVersion() == 8, "schema at v8 (device attach/detach, inc 21)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
@@ -560,6 +560,40 @@ int runDevicesSelftest() {
     ctrl.pollHealth();
     check(stateOf(QStringLiteral("h-down")) == QLatin1String("online"),
           "device recovers to Online when the feed reports reachable again");
+
+    // inc 21: device attach/detach (P2-06). A detached device keeps its config
+    // (channels preserved) but empties its default group and is skipped by the
+    // health poll.
+    auto deviceMap = [&](const QString& id) -> QVariantMap {
+        for (const QVariant& v : ctrl.devices()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("id")).toString() == id) return m;
+        }
+        return QVariantMap{};
+    };
+    const int nvrCamsBefore =
+        deviceMap(QStringLiteral("nvr-1")).value(QStringLiteral("cameraCount")).toInt();
+    check(groupCount() == nvrCamsBefore, "nvr-1 group holds its channels while attached");
+
+    ctrl.setDeviceDisabled(QStringLiteral("nvr-1"), true);
+    check(deviceMap(QStringLiteral("nvr-1")).value(QStringLiteral("disabled")).toBool(),
+          "setDeviceDisabled detaches the device");
+    check(groupCount() == 0, "a detached device's default group is emptied");
+    check(deviceMap(QStringLiteral("nvr-1")).value(QStringLiteral("cameraCount")).toInt()
+              == nvrCamsBefore,
+          "detach preserves the channels (config intact)");
+
+    // The poll must skip a detached device: mark it unreachable and confirm a
+    // poll does NOT flip it Offline.
+    const QString nvrStateBefore = stateOf(QStringLiteral("nvr-1"));
+    fakeProbe.reachable[std::string("nvr-1")] = false;
+    ctrl.pollHealth();
+    check(stateOf(QStringLiteral("nvr-1")) == nvrStateBefore,
+          "the health poll skips a detached device (health unchanged)");
+
+    ctrl.setDeviceDisabled(QStringLiteral("nvr-1"), false);
+    check(groupCount() == nvrCamsBefore,
+          "re-attaching restores the default group to its enabled channels");
 
     if (failures == 0) {
         std::cout << "PASS: onboard -> honest health (Unknown/Offline/Online) -> "

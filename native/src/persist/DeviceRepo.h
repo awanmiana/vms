@@ -58,6 +58,7 @@ struct DeviceSummary {
     std::string vendor;
     std::string kind;       // "camera" | "nvr" | "dvr" | "hybrid"
     int cameraCount = 0;
+    bool disabled = false;  // detached from active use (P2-06); config preserved
 };
 
 // A read-only summary of one camera channel for the channel-management UI
@@ -95,6 +96,12 @@ public:
     Error syncChannels(const std::string& deviceId,
                        const std::vector<CameraChannel>& cameras,
                        bool allowRemoval);
+
+    // Attach/detach a device (P2-06). A detached device keeps all its rows,
+    // channels, and credential but is excluded from active use: its default
+    // group is emptied (and restored to its enabled channels on re-attach).
+    // Honest NotFound on a bad id.
+    Error setDeviceDisabled(const std::string& deviceId, bool disabled);
 
     // Rename a device (P2-06): updates the device's operator-facing name and
     // refreshes its default group's display name, while PRESERVING every

@@ -109,6 +109,13 @@ std::vector<Migration> coreMigrations() {
         // prior by-id order until the operator rearranges. Forward-only additive.
         {7, "camera_sort_order",
          "ALTER TABLE cameras ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;"},
+
+        // v8 — device attach/detach (native increment 21, P2-06). A detached
+        // device stays fully configured (rows, channels, credential preserved)
+        // but is excluded from active use: its default group empties and the
+        // health poll skips it. Forward-only additive, default 0 (attached).
+        {8, "device_disabled",
+         "ALTER TABLE devices ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"},
     };
 }
 

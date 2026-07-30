@@ -33,7 +33,7 @@ Error DeviceRepo::listDevices(std::vector<DeviceSummary>& out) {
     Result r;
     if (Error e = store_.query(
             "SELECT d.id, d.name, d.address, d.vendor, d.kind, "
-            "(SELECT COUNT(*) FROM cameras c WHERE c.device_id = d.id) "
+            "(SELECT COUNT(*) FROM cameras c WHERE c.device_id = d.id), d.disabled "
             "FROM devices d ORDER BY d.id;",
             {}, r);
         !e)
@@ -46,6 +46,7 @@ Error DeviceRepo::listDevices(std::vector<DeviceSummary>& out) {
         s.vendor = textOrEmpty(row[3]);
         s.kind = textOrEmpty(row[4]);
         s.cameraCount = static_cast<int>(std::get<std::int64_t>(row[5]));
+        s.disabled = std::get<std::int64_t>(row[6]) != 0;
         out.push_back(std::move(s));
     }
     return Error::success();
@@ -67,6 +68,16 @@ Error DeviceRepo::reconcileGroup(const std::string& deviceId,
                               {gid});
         !e)
         return e;
+    // A detached device (P2-06) has an empty default group — it is excluded from
+    // active use while keeping all its configuration.
+    Result dd;
+    if (Error e = store_.query("SELECT disabled FROM devices WHERE id=?;",
+                               {deviceId}, dd);
+        !e)
+        return e;
+    const bool deviceDetached =
+        !dd.rows.empty() && std::get<std::int64_t>(dd.rows[0][0]) != 0;
+    if (deviceDetached) return Error::success();
     Result r;
     if (Error e = store_.query(
             "SELECT id FROM cameras WHERE device_id=? AND disabled=0 ORDER BY id;",
@@ -205,6 +216,28 @@ Error DeviceRepo::syncChannels(const std::string& deviceId,
     // and a disabled one is excluded — no in-memory id juggling needed.
     if (Error e = reconcileGroup(deviceId, deviceName); !e) return e;
 
+    return tx.commit();
+}
+
+Error DeviceRepo::setDeviceDisabled(const std::string& deviceId, bool disabled) {
+    if (deviceId.empty()) return {Status::Misuse, "empty deviceId"};
+    Result r;
+    if (Error e = store_.query("SELECT name FROM devices WHERE id=?;", {deviceId}, r);
+        !e)
+        return e;
+    if (r.rows.empty()) return {Status::NotFound, "unknown device " + deviceId};
+    const std::string deviceName = std::get<std::string>(r.rows[0][0]);
+
+    Store::Tx tx(store_);
+    if (Error e = tx.begin(); !e) return e;
+    if (Error e = store_.exec(
+            "UPDATE devices SET disabled=?, updated_at=datetime('now') WHERE id=?;",
+            {Value{static_cast<std::int64_t>(disabled ? 1 : 0)}, deviceId});
+        !e)
+        return e;
+    // reconcileGroup empties the group when the device is detached and restores
+    // it to the enabled channels on re-attach.
+    if (Error e = reconcileGroup(deviceId, deviceName); !e) return e;
     return tx.commit();
 }
 

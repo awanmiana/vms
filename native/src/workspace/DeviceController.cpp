@@ -129,6 +129,7 @@ void DeviceController::rebuild() {
                  QString::fromStdString(d.kind.empty() ? std::string("camera")
                                                        : d.kind));
         m.insert(QStringLiteral("cameraCount"), d.cameraCount);
+        m.insert(QStringLiteral("disabled"), d.disabled);
         m.insert(QStringLiteral("health"), healthMap(d.id));
         // The device's channels (increment 17): the channel-management panel
         // binds to this, so it refreshes with the model on every mutation.
@@ -268,6 +269,14 @@ QString DeviceController::renameDevice(const QString& id, const QString& name) {
     return lastError_;
 }
 
+QString DeviceController::setDeviceDisabled(const QString& id, bool disabled) {
+    const Error e =
+        repo_->setDeviceDisabled(id.toStdString(), disabled);
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
 QString DeviceController::removeDevice(const QString& id) {
     const Error e = repo_->remove(id.toStdString());
     lastError_ = e ? QString() : errMessage(e);
@@ -372,9 +381,10 @@ void DeviceController::pollHealth() {
     std::vector<DeviceSummary> list;
     if (Error e = repo_->listDevices(list); !e) return;
     for (const DeviceSummary& d : list) {
-        // A device with no address can't be probed — leave its health as-is
-        // (honest: no observation rather than a false Offline).
-        if (d.address.empty()) continue;
+        // A detached device (P2-06) is not being managed — don't probe it, and
+        // a device with no address can't be probed. Leave health as-is either
+        // way (honest: no observation rather than a false Offline).
+        if (d.disabled || d.address.empty()) continue;
         vms::health::ProbeTarget t;
         t.deviceId = d.id;
         splitHostPort(d.address, t.host, t.port);

@@ -123,6 +123,11 @@ public:
     // success or a human-readable error.
     Q_INVOKABLE QString renameDevice(const QString& id, const QString& name);
 
+    // Attach/detach a device (P2-06): a detached device keeps its config but is
+    // excluded from active use (empty default group) and skipped by the health
+    // poll. Returns "" on success or a human-readable error.
+    Q_INVOKABLE QString setDeviceDisabled(const QString& id, bool disabled);
+
     // Remove a device and everything it owns (cameras, group, credential, and
     // its health record). Returns "" on success or a human-readable error.
     Q_INVOKABLE QString removeDevice(const QString& id);

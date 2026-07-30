@@ -444,6 +444,9 @@ Item {
                             border.width: 1
                             border.color: modelData.health.needsAttention
                                           ? "#e05a4e" : "#232a36"
+                            // A detached device (P2-06) is dimmed — configured
+                            // but excluded from active use.
+                            opacity: modelData.disabled ? 0.55 : 1.0
 
                             // health dot
                             Rectangle {
@@ -505,6 +508,7 @@ Item {
                                           + (modelData.address ? ("   ·   " + modelData.address) : "")
                                           + (modelData.vendor ? ("   ·   " + modelData.vendor) : "")
                                           + "   ·   " + modelData.cameraCount + " channel(s)"
+                                          + (modelData.disabled ? "   ·   ⏸ detached" : "")
                                     color: "#8a93a3"; font.pixelSize: 11
                                     elide: Text.ElideRight; width: parent.width
                                 }
@@ -553,6 +557,13 @@ Item {
                                     tone: "#3a6ea5"
                                     onClicked: devicesCtrl.setMaintenance(
                                         modelData.id, !modelData.health.inMaintenance)
+                                }
+                                PillButton {
+                                    visible: !devCard.confirmingRemove
+                                    label: modelData.disabled ? "Attach" : "Detach"
+                                    tone: modelData.disabled ? "#37c871" : "#f2a33c"
+                                    onClicked: devicesCtrl.setDeviceDisabled(
+                                        modelData.id, !modelData.disabled)
                                 }
                                 PillButton {
                                     visible: !devCard.confirmingRemove
