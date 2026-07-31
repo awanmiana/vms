@@ -187,6 +187,16 @@ public:
     // when no DiscoverySource is wired.
     Q_INVOKABLE void startDiscovery(int timeoutMs = 3000);
 
+    // Rescan a direct camera from discovery (P2-06): re-fetch its ONVIF media
+    // profiles from the discovered device matching its address (host) in the
+    // last scan, and reconcile its channel via syncChannels — refreshing the
+    // stream URLs + stream profile while PRESERVING the operator's customized
+    // channel name and stable id. `user`/`password` authenticate the fetch.
+    // Honestly refuses a recorder (its channels come from templates) or a device
+    // with no matching discovered device. Returns "" on success or an error.
+    Q_INVOKABLE QString rescanDevice(const QString& id, const QString& user,
+                                     const QString& password);
+
     // Onboard a discovered candidate (by endpointRef): fetch its ONVIF media
     // profiles + RTSP stream URIs, map the highest-resolution stream to Main and
     // a lower one to Sub, and onboard it atomically via DeviceRepo (kind

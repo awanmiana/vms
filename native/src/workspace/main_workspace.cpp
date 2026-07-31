@@ -511,6 +511,35 @@ int runDevicesSelftest() {
               onvifChan.value(QStringLiteral("codec")).toString() ==
                   QLatin1String("H264"),
           "discovered channel's main stream profile synced (1920x1080 H264)");
+
+    // inc 22: rescan a discovered camera re-fetches its ONVIF streams and
+    // reconciles the channel, PRESERVING the operator-customized name.
+    ctrl.renameChannel(QStringLiteral("onvif-192-168-0-77"),
+                       QStringLiteral("onvif-192-168-0-77"),
+                       QStringLiteral("Operator Name"));
+    const QString rescanErr = ctrl.rescanDevice(
+        QStringLiteral("onvif-192-168-0-77"),
+        QStringLiteral("admin"), QStringLiteral("onvifpw"));
+    check(rescanErr.isEmpty(), "rescanDevice re-fetches + reconciles the camera");
+    {
+        QVariantList chs;
+        for (const QVariant& v : ctrl.devices()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("id")).toString() ==
+                QLatin1String("onvif-192-168-0-77"))
+                chs = m.value(QStringLiteral("channels")).toList();
+        }
+        check(chs.size() == 1, "rescan keeps the single channel");
+        check(chs.first().toMap().value(QStringLiteral("name")).toString() ==
+                  QLatin1String("Operator Name"),
+              "rescan preserves the operator-customized channel name");
+        check(chs.first().toMap().value(QStringLiteral("mainUrl")).toString() ==
+                  QLatin1String("rtsp://192.168.0.77:554/Streaming/Channels/101"),
+              "rescan refreshed the channel's main stream URL from the device");
+    }
+    check(!ctrl.rescanDevice(QStringLiteral("nvr-1"), QStringLiteral("a"),
+                             QStringLiteral("b")).isEmpty(),
+          "rescan honestly refuses a recorder (not a direct camera)");
 #endif  // VMS_WITH_ONVIF
 
     // inc 19: device-health LIVE FEED. A fixture reachability probe drives

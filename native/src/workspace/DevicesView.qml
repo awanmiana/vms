@@ -565,6 +565,17 @@ Item {
                                     onClicked: devicesCtrl.setDeviceDisabled(
                                         modelData.id, !modelData.disabled)
                                 }
+                                // Rescan a direct camera from discovery (P2-06),
+                                // using the credentials in the Discover panel.
+                                PillButton {
+                                    visible: !devCard.confirmingRemove
+                                             && devicesCtrl.discoveryAvailable
+                                             && modelData.kind === "camera"
+                                             && !modelData.disabled
+                                    label: "Rescan"; tone: "#3a6ea5"
+                                    onClicked: devicesCtrl.rescanDevice(
+                                        modelData.id, dUser.text, dPass.text)
+                                }
                                 PillButton {
                                     visible: !devCard.confirmingRemove
                                     label: (devCard.expanded ? "▾ " : "▸ ")

@@ -575,6 +575,97 @@ QString DeviceController::onboardDiscovered(const QString& endpointRef,
     return lastError_;
 }
 
+QString DeviceController::rescanDevice(const QString& id, const QString& user,
+                                       const QString& password) {
+    if (!discovery_) {
+        lastError_ = QStringLiteral("discovery unavailable");
+        emit changed();
+        return lastError_;
+    }
+    const std::string devId = id.toStdString();
+
+    // The device's kind + address (rescan applies to a direct camera).
+    std::vector<DeviceSummary> devs;
+    repo_->listDevices(devs);
+    const DeviceSummary* ds = nullptr;
+    for (const DeviceSummary& d : devs)
+        if (d.id == devId) { ds = &d; break; }
+    if (!ds) {
+        lastError_ = QStringLiteral("unknown device");
+        emit changed();
+        return lastError_;
+    }
+    if (ds->kind != "camera") {
+        lastError_ = QStringLiteral(
+            "rescan is for a direct camera — a recorder's channels come from its "
+            "URL templates");
+        emit changed();
+        return lastError_;
+    }
+    if (ds->address.empty()) {
+        lastError_ = QStringLiteral("device has no address to match a discovered device");
+        emit changed();
+        return lastError_;
+    }
+
+    // Match a discovered candidate (from the last scan) by host.
+    const DiscoveryCandidate* cand = nullptr;
+    for (const DiscoveryCandidate& c : candidates_)
+        if (!c.host.empty() && c.host == ds->address) { cand = &c; break; }
+    if (!cand) {
+        lastError_ = QStringLiteral("no discovered device at ") +
+                     QString::fromStdString(ds->address) +
+                     QStringLiteral(" — run Discover first");
+        emit changed();
+        return lastError_;
+    }
+
+    // Fetch + map to Main/Sub (+ profiles for the stream-profile re-sync).
+    OnvifDevice dev;
+    std::string err;
+    if (!discovery_->fetch(cand->xaddr, user.toStdString(),
+                           password.toStdString(), dev, err)) {
+        lastError_ = QStringLiteral("ONVIF fetch failed: ") +
+                     QString::fromStdString(err);
+        emit changed();
+        return lastError_;
+    }
+    std::string mainUrl, subUrl;
+    MediaProfile mainProf, subProf;
+    chooseStreams(dev, mainUrl, subUrl, &mainProf, &subProf);
+    if (mainUrl.empty()) {
+        lastError_ = QStringLiteral("device reported no usable H.264/H.265 stream");
+        emit changed();
+        return lastError_;
+    }
+
+    // Reconcile the single channel — syncChannels preserves its stable id and
+    // operator name, refreshing only the technical URLs.
+    std::vector<ChannelSummary> chans;
+    repo_->listChannels(devId, chans);
+    if (chans.size() != 1) {
+        lastError_ = QStringLiteral("rescan expects a single-channel camera");
+        emit changed();
+        return lastError_;
+    }
+    CameraChannel c;
+    c.id = chans.front().id;
+    c.name = chans.front().name;
+    c.mainUrl = mainUrl;
+    c.subUrl = subUrl;
+    const Error e = repo_->syncChannels(devId, {c}, /*allowRemoval=*/false);
+    if (e) {
+        repo_->setStreamProfile(c.id, "main", mainProf.width, mainProf.height,
+                                mainProf.encoding);
+        if (!subUrl.empty())
+            repo_->setStreamProfile(c.id, "sub", subProf.width, subProf.height,
+                                    subProf.encoding);
+    }
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
 QString DeviceController::moveChannel(const QString& deviceId,
                                       const QString& cameraId, bool up) {
     // Compute the new order from the current persisted order, then persist it.
