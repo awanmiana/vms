@@ -51,7 +51,7 @@ int main() {
         check(static_cast<bool>(s.open(dbFile)), "open database file");
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "apply canonical migrations");
-        check(s.schemaVersion() == 8, "schema at version 8");
+        check(s.schemaVersion() == 10, "schema at version 10");
 
         // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
@@ -84,7 +84,7 @@ int main() {
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 8, "schema still at version 8 after reopen");
+        check(s.schemaVersion() == 10, "schema still at version 10 after reopen");
         check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
         check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
@@ -92,8 +92,8 @@ int main() {
 
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 8,
-              "exactly eight migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 10,
+              "exactly ten migrations recorded (not duplicated)");
 
         {
             Store::Tx tx(s);
@@ -111,7 +111,9 @@ int main() {
         WorkspaceRepo repo(s);
         InstanceState in;
         in.tileCount = 9;
-        in.tiles = {TilePref{0, 3, 3}, TilePref{5, 1, 2}};  // tile0 Main/High, tile5 Thumb/Med
+        // tile0 Main/High at a dragged spatial position (v9); tile5 Thumb/Med
+        // with the -1 "unset" default (falls back to the grid placement).
+        in.tiles = {TilePref{0, 3, 3, 512.5, 380.0}, TilePref{5, 1, 2}};
         check(static_cast<bool>(repo.save("live", in)), "save workspace layout");
     }
     {
@@ -127,6 +129,9 @@ int main() {
                   out.tiles[0].desiredTier == 3 && out.tiles[0].priority == 3 &&
                   out.tiles[1].id == 5 && out.tiles[1].desiredTier == 1,
               "restored per-tile overrides");
+        check(out.tiles.size() == 2 && out.tiles[0].posX == 512.5 &&
+                  out.tiles[0].posY == 380.0 && out.tiles[1].posX == -1.0,
+              "restored spatial positions (dragged + unset default)");
 
         // save again (atomic replace) — still one instance row, new tiles.
         InstanceState in2;

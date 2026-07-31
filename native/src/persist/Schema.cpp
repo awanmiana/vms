@@ -116,6 +116,31 @@ std::vector<Migration> coreMigrations() {
         // health poll skips it. Forward-only additive, default 0 (attached).
         {8, "device_disabled",
          "ALTER TABLE devices ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;"},
+
+        // v9 — spatial canvas tile positions (native increment 24, P3-15/P3-01).
+        // Each workspace tile can carry an operator-dragged world position on
+        // the spatial canvas. Forward-only additive; the -1 default means
+        // "unset", so existing layouts fall back to the default grid placement.
+        {9, "workspace_tile_pos",
+         "ALTER TABLE workspace_tile ADD COLUMN pos_x REAL NOT NULL DEFAULT -1;"
+         "ALTER TABLE workspace_tile ADD COLUMN pos_y REAL NOT NULL DEFAULT -1;"},
+
+        // v10 — durable audit history (native increment 28, P1-06). One row per
+        // command-envelope attempt, refusals included. Append-only by contract
+        // (AuditRepo exposes no update/delete); each row hash-chains to its
+        // predecessor so editing or deleting any row breaks the chain from
+        // that point (tamper evidence). Forward-only additive.
+        {10, "audit_log",
+         "CREATE TABLE audit_log ("
+         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "  time_utc TEXT NOT NULL,"
+         "  source TEXT NOT NULL,"      // 'palette' | 'api' | 'ui'
+         "  command TEXT NOT NULL,"
+         "  args TEXT NOT NULL,"
+         "  outcome TEXT NOT NULL,"
+         "  message TEXT NOT NULL,"
+         "  prev_hash TEXT NOT NULL,"
+         "  row_hash TEXT NOT NULL);"},
     };
 }
 

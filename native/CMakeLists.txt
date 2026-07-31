@@ -97,6 +97,46 @@ endif()
 add_test(NAME health_selfcheck COMMAND vms_healthtest)
 
 # ---------------------------------------------------------------------------
+# Native increment 25 (P1-12/A0) — the unified command envelope. Pure core: one
+# validated gate (spec validation -> capability -> dangerous confirm -> execute
+# -> deterministic result + audit) every action flows through. No deps.
+# ---------------------------------------------------------------------------
+add_library(vms_command STATIC
+    src/command/CommandRegistry.cpp
+    src/command/CoverageCheck.cpp)
+target_include_directories(vms_command PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_command PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_cmdtest src/command/main_cmdtest.cpp)
+target_link_libraries(vms_cmdtest PRIVATE vms_command)
+if(WIN32)
+    target_compile_definitions(vms_cmdtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME command_selfcheck COMMAND vms_cmdtest)
+
+# ---------------------------------------------------------------------------
+# Native increment 27 (P6-03/P6-07) — event rules & alarm lifecycle. Pure
+# decision core: events -> rules -> deduplicated, accountable alarms. It
+# notifies, never actuates (automated linkage is the separately-gated P6-05).
+# ---------------------------------------------------------------------------
+add_library(vms_events STATIC src/events/AlarmEngine.cpp)
+target_include_directories(vms_events PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_events PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_eventtest src/events/main_eventtest.cpp)
+target_link_libraries(vms_eventtest PRIVATE vms_events)
+if(WIN32)
+    target_compile_definitions(vms_eventtest PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME event_selfcheck COMMAND vms_eventtest)
+
+# ---------------------------------------------------------------------------
 # Native increment 11 (P2-03/P2-14) — ONVIF WS-Discovery. Standards-exact device
 # discovery source for DeviceRepo: a pure Probe build + ProbeMatch parse (Qt6
 # Core: XML/URL) and a UDP multicast transport (Qt6 Network). Self-verifying
@@ -156,6 +196,7 @@ if(WIN32)
         src/persist/CredentialRepo.cpp
         src/persist/SegmentIndex.cpp
         src/persist/DeviceRepo.cpp
+        src/persist/AuditRepo.cpp
     )
     target_include_directories(vms_persist PUBLIC src)
     # winsqlite3: the SQLite bundled with Windows (winsqlite/winsqlite3.h +
@@ -315,6 +356,36 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # inc 7c: the Playback availability model over the recording SegmentIndex
         # (needs vms_persist, so Windows-only alongside it).
         target_sources(vms_workspace PRIVATE src/workspace/PlaybackController.cpp)
+        # P3-05 inc 23: instant playback from live — a look-back overlay that
+        # reuses PlaybackController + PlaybackPipeline over the recording index.
+        target_sources(vms_workspace PRIVATE
+            src/workspace/InstantReplayController.cpp
+            src/workspace/InstantReplayController.h)
+        # P3-15/P3-01 inc 24: the spatial-canvas viewport policy (pure header).
+        target_sources(vms_workspace PRIVATE src/workspace/SpatialPolicy.h)
+        # P1-12/A0 inc 25: the command envelope's Qt bridge + palette.
+        target_sources(vms_workspace PRIVATE
+            src/workspace/CommandController.cpp
+            src/workspace/CommandController.h)
+        target_link_libraries(vms_workspace PRIVATE vms_command)
+        # P6-03/P6-07 inc 27: the alarm surface (engine bridge + health feed).
+        target_sources(vms_workspace PRIVATE
+            src/workspace/AlarmController.cpp
+            src/workspace/AlarmController.h)
+        target_link_libraries(vms_workspace PRIVATE vms_events)
+        # P1-13/A0 inc 26: the external control API (loopback HTTP over the
+        # same envelope). Requires the Qt HttpServer module.
+        find_package(Qt6 COMPONENTS HttpServer QUIET)
+        if(TARGET Qt6::HttpServer)
+            message(STATUS "vms_workspace: Qt HttpServer found, enabling --api-port (inc 26)")
+            target_sources(vms_workspace PRIVATE
+                src/workspace/CommandServer.cpp
+                src/workspace/CommandServer.h)
+            target_link_libraries(vms_workspace PRIVATE Qt6::HttpServer)
+            target_compile_definitions(vms_workspace PRIVATE VMS_WITH_API)
+        else()
+            message(STATUS "vms_workspace: Qt HttpServer NOT found; --api-port disabled")
+        endif()
         # inc 14 (onboarding UI): the Devices tab's DeviceController bridges the
         # DeviceRepo (vms_persist) + HealthMonitor (vms_health) cores to QML.
         target_sources(vms_workspace PRIVATE

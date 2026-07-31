@@ -24,6 +24,17 @@ Item {
     property string selectedKind: "camera"
     readonly property bool isRecorder: selectedKind !== "camera"
 
+    // EVERY state-changing action on this tab goes through the A0 command
+    // envelope (P1-13): validated, capability-checked, confirm-gated for
+    // destructive verbs, and durably audited. No direct-controller fallback —
+    // --coverage-check fails on a bypass. Returns { ok, outcome, message }.
+    function cmd(id, args, confirm) {
+        if (typeof commander === "undefined" || !commander)
+            return { ok: false, outcome: "unavailable",
+                     message: "command envelope unavailable" }
+        return commander.invoke(id, args || ({}), confirm === true)
+    }
+
     // Short human label for a device kind badge.
     function kindLabel(k) {
         switch (k) {
@@ -155,7 +166,8 @@ Item {
                                 anchors.fill: parent
                                 enabled: !devicesCtrl.discovering
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: devicesCtrl.startDiscovery(3000)
+                                onClicked: root.cmd("device.discover",
+                                                    { "timeoutMs": 3000 })
                             }
                         }
                         Text {
@@ -220,8 +232,11 @@ Item {
                                         MouseArea {
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: devicesCtrl.onboardDiscovered(
-                                                modelData.endpointRef, dUser.text, dPass.text)
+                                            onClicked: root.cmd(
+                                                "device.onboardDiscovered",
+                                                { "endpoint": modelData.endpointRef,
+                                                  "user": dUser.text,
+                                                  "password": dPass.text })
                                         }
                                     }
                                 }
@@ -315,18 +330,26 @@ Item {
                         MouseArea {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                var err
+                                var res
                                 if (root.isRecorder) {
-                                    err = devicesCtrl.onboardRecorder(
-                                        fId.text, fName.text, fAddress.text, fVendor.text,
-                                        root.selectedKind, fUser.text, fPass.text,
-                                        parseInt(fCount.text) || 0, fMainTpl.text, fSubTpl.text)
+                                    res = root.cmd("device.onboardRecorder", {
+                                        "id": fId.text, "name": fName.text,
+                                        "address": fAddress.text,
+                                        "vendor": fVendor.text,
+                                        "kind": root.selectedKind,
+                                        "user": fUser.text, "password": fPass.text,
+                                        "channels": parseInt(fCount.text) || 0,
+                                        "mainTemplate": fMainTpl.text,
+                                        "subTemplate": fSubTpl.text })
                                 } else {
-                                    err = devicesCtrl.onboard(
-                                        fId.text, fName.text, fAddress.text, fVendor.text,
-                                        fUser.text, fPass.text, fMain.text, fSub.text)
+                                    res = root.cmd("device.onboard", {
+                                        "id": fId.text, "name": fName.text,
+                                        "address": fAddress.text,
+                                        "vendor": fVendor.text,
+                                        "user": fUser.text, "password": fPass.text,
+                                        "mainUrl": fMain.text, "subUrl": fSub.text })
                                 }
-                                if (err === "") {
+                                if (res.ok) {
                                     fId.text = ""; fName.text = ""; fAddress.text = ""
                                     fVendor.text = ""; fUser.text = ""; fPass.text = ""
                                     fMain.text = ""; fSub.text = ""
@@ -496,7 +519,9 @@ Item {
                                             clip: true; selectByMouse: true
                                             text: modelData.name
                                             onEditingFinished: {
-                                                devicesCtrl.renameDevice(devCard.devId, text)
+                                                root.cmd("device.rename",
+                                                         { "id": devCard.devId,
+                                                           "name": text })
                                                 devCard.renaming = false
                                             }
                                         }
@@ -542,7 +567,8 @@ Item {
                                              && modelData.health.exceptionActive
                                              && !modelData.health.exceptionAcknowledged
                                     label: "Acknowledge"; tone: "#f2a33c"
-                                    onClicked: devicesCtrl.acknowledge(modelData.id)
+                                    onClicked: root.cmd("device.acknowledge",
+                                                        { "id": modelData.id })
                                 }
                                 PillButton {
                                     visible: !devCard.confirmingRemove
@@ -555,15 +581,21 @@ Item {
                                     label: modelData.health.inMaintenance
                                             ? "End maint." : "Maintenance"
                                     tone: "#3a6ea5"
-                                    onClicked: devicesCtrl.setMaintenance(
-                                        modelData.id, !modelData.health.inMaintenance)
+                                    // One command covers both the device window
+                                    // and the alarm suppression that follows it.
+                                    onClicked: root.cmd(
+                                        "device.maintenance",
+                                        { "id": modelData.id,
+                                          "on": !modelData.health.inMaintenance })
                                 }
                                 PillButton {
                                     visible: !devCard.confirmingRemove
                                     label: modelData.disabled ? "Attach" : "Detach"
                                     tone: modelData.disabled ? "#37c871" : "#f2a33c"
-                                    onClicked: devicesCtrl.setDeviceDisabled(
-                                        modelData.id, !modelData.disabled)
+                                    onClicked: root.cmd(
+                                        "device.detach",
+                                        { "id": modelData.id,
+                                          "detached": !modelData.disabled })
                                 }
                                 // Rescan a direct camera from discovery (P2-06),
                                 // using the credentials in the Discover panel.
@@ -573,8 +605,10 @@ Item {
                                              && modelData.kind === "camera"
                                              && !modelData.disabled
                                     label: "Rescan"; tone: "#3a6ea5"
-                                    onClicked: devicesCtrl.rescanDevice(
-                                        modelData.id, dUser.text, dPass.text)
+                                    onClicked: root.cmd(
+                                        "device.rescan",
+                                        { "id": modelData.id, "user": dUser.text,
+                                          "password": dPass.text })
                                 }
                                 PillButton {
                                     visible: !devCard.confirmingRemove
@@ -598,7 +632,11 @@ Item {
                                 PillButton {
                                     visible: devCard.confirmingRemove
                                     label: "Confirm remove"; tone: "#e05a4e"
-                                    onClicked: devicesCtrl.removeDevice(modelData.id)
+                                    // The UI's own two-step gate has been
+                                    // passed, so this is the explicit confirm
+                                    // the dangerous command requires.
+                                    onClicked: root.cmd("device.remove",
+                                                        { "id": modelData.id }, true)
                                 }
                                 PillButton {
                                     visible: devCard.confirmingRemove
@@ -657,8 +695,10 @@ Item {
                                                 clip: true; selectByMouse: true
                                                 text: modelData.name
                                                 onEditingFinished:
-                                                    devicesCtrl.renameChannel(
-                                                        devCard.devId, modelData.id, text)
+                                                    root.cmd("channel.rename",
+                                                             { "device": devCard.devId,
+                                                               "camera": modelData.id,
+                                                               "name": text })
                                             }
                                         }
                                         Text {
@@ -682,25 +722,37 @@ Item {
                                             spacing: 6
                                             PillButton {
                                                 label: "▲"; tone: "#3a6ea5"
-                                                onClicked: devicesCtrl.moveChannel(
-                                                    devCard.devId, modelData.id, true)
+                                                onClicked: root.cmd(
+                                                    "channel.move",
+                                                    { "device": devCard.devId,
+                                                      "camera": modelData.id,
+                                                      "up": true })
                                             }
                                             PillButton {
                                                 label: "▼"; tone: "#3a6ea5"
-                                                onClicked: devicesCtrl.moveChannel(
-                                                    devCard.devId, modelData.id, false)
+                                                onClicked: root.cmd(
+                                                    "channel.move",
+                                                    { "device": devCard.devId,
+                                                      "camera": modelData.id,
+                                                      "up": false })
                                             }
                                             PillButton {
                                                 label: modelData.disabled ? "Enable" : "Disable"
                                                 tone: modelData.disabled ? "#37c871" : "#f2a33c"
-                                                onClicked: devicesCtrl.setChannelDisabled(
-                                                    devCard.devId, modelData.id,
-                                                    !modelData.disabled)
+                                                onClicked: root.cmd(
+                                                    "channel.disable",
+                                                    { "device": devCard.devId,
+                                                      "camera": modelData.id,
+                                                      "disabled": !modelData.disabled })
                                             }
                                             PillButton {
                                                 label: "Remove"; tone: "#e05a4e"
-                                                onClicked: devicesCtrl.removeChannel(
-                                                    devCard.devId, modelData.id)
+                                                // Destructive: the command
+                                                // demands an explicit confirm.
+                                                onClicked: root.cmd(
+                                                    "channel.remove",
+                                                    { "device": devCard.devId,
+                                                      "camera": modelData.id }, true)
                                             }
                                         }
                                     }

@@ -44,7 +44,9 @@
 #include <map>
 #include <memory>
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -56,7 +58,23 @@
 #include "persist/SecretStore.h"
 #include "health/HealthMonitor.h"
 #include "PlaybackController.h"
+#include "InstantReplayController.h"
 #include "DeviceController.h"
+#include "SpatialPolicy.h"
+#include "CommandController.h"
+#include "AlarmController.h"
+#include "command/CoverageCheck.h"
+#ifdef VMS_WITH_API
+#include <QEventLoop>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QRandomGenerator>
+#include "CommandServer.h"
+#endif
 
 #ifdef VMS_WITH_ONVIF
 #include "onvif/DiscoverySource.h"
@@ -119,6 +137,9 @@ void restoreInstance(vms::persist::Store& store, const std::string& name,
         for (const auto& t : st.tiles) {
             c.setDesiredTier(t.id, t.desiredTier);
             c.setPriority(t.id, t.priority);
+            // Spatial position (v9): -1 = unset, keep the default placement.
+            if (t.posX >= 0.0 && t.posY >= 0.0)
+                c.setTilePos(t.id, t.posX, t.posY);
         }
     }
 }
@@ -130,7 +151,8 @@ void saveInstance(vms::persist::Store& store, const std::string& name,
     vms::persist::InstanceState st;
     st.tileCount = c.tileCount();
     for (int i = 0; i < c.tileCount(); ++i)
-        st.tiles.push_back({i, c.desiredTierOf(i), c.priorityOf(i)});
+        st.tiles.push_back({i, c.desiredTierOf(i), c.priorityOf(i),
+                            c.tilePosX(i), c.tilePosY(i)});
     repo.save(name, st);
 }
 
@@ -200,6 +222,740 @@ int runPlaybackSelftest() {
     return 1;
 }
 
+// P3-05 / inc 23: headless check that InstantReplayController turns a look-back
+// on a recorded camera into an honest replay window over the SegmentIndex —
+// clamping to available footage, never presenting requested time as recorded on
+// an unrecorded camera, and returning cleanly to live. No window, no camera.
+int runInstantSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+
+    Store store;
+    check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+    check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+    SegmentIndex idx(store);
+    auto add = [&](const char* cam, const char* s, const char* e, const char* p) {
+        Segment seg;
+        seg.cameraId = cam; seg.startUtc = s; seg.endUtc = e;
+        seg.path = p; seg.codec = "h264"; seg.bytes = 1000;
+        std::int64_t id = 0; idx.add(seg, id);
+    };
+    // cam-1: 90s of contiguous footage ending at 09:01:30 (the live edge).
+    add("cam-1", "2026-07-29 09:00:00", "2026-07-29 09:00:30", "a.mp4");
+    add("cam-1", "2026-07-29 09:00:30", "2026-07-29 09:01:00", "b.mp4");
+    add("cam-1", "2026-07-29 09:01:00", "2026-07-29 09:01:30", "c.mp4");
+
+    std::cout << "vms_workspace --instant-selftest\n";
+
+    InstantReplayController ir(&idx, QStringLiteral("cam-1"));
+    check(!ir.active(), "starts inactive (operator is on the live wall)");
+
+    long long earliest = 0, edge = 0;
+    check(ir.footageExtent(earliest, edge), "footage extent found for a recorded camera");
+    check(edge == ParseUtcSeconds(QStringLiteral("2026-07-29 09:01:30")),
+          "live edge is the latest recorded moment");
+
+    // 1) Look back 30s from the live edge -> plays real footage.
+    ir.replay(30);
+    check(ir.active(), "replay(30) opens the overlay");
+    check(ir.available(), "footage available for the last 30s");
+    check(ir.lookbackSec() == 30, "look-back is 30s");
+    check(ir.pb()->rangeEnd() == QLatin1String("2026-07-29 09:01:30"),
+          "window ends at the live edge");
+    check(ir.pb()->rangeStart() == QLatin1String("2026-07-29 09:01:00"),
+          "window starts 30s before the edge");
+    check(ir.pb()->onFootage(),
+          "playhead opens ON recorded footage (never a frozen live frame)");
+    check(ir.pb()->playing(), "replay auto-plays");
+    check(!ir.pb()->segmentAtPlayhead().value(QStringLiteral("path"))
+               .toString().isEmpty(),
+          "a recorded file backs the playhead");
+
+    // 2) Look back further than the footage -> clamps, honest actual look-back.
+    ir.replay(600);
+    check(ir.available(), "clamped replay still available");
+    check(ir.pb()->rangeStart() == QLatin1String("2026-07-29 09:00:00"),
+          "window clamps to the earliest recorded moment");
+    check(ir.lookbackSec() == 90,
+          "actual look-back reported honestly (90s, not the requested 600)");
+
+    // 3) Return to live.
+    ir.returnToLive();
+    check(!ir.active(), "returnToLive() closes the overlay");
+    check(!ir.pb()->playing(), "decode paused on return to live");
+
+    // 4) A camera with NO local recording -> honest unavailable, no fake footage.
+    InstantReplayController ir2(&idx, QStringLiteral("cam-none"));
+    ir2.replay(30);
+    check(ir2.active(), "replay on an unrecorded camera still opens the overlay");
+    check(!ir2.available(), "unrecorded camera is honestly unavailable");
+    check(!ir2.pb()->onFootage(), "no requested time is presented as recorded");
+    check(ir2.pb()->spans().isEmpty(), "no availability spans fabricated");
+
+    if (failures == 0) {
+        std::cout << "PASS: instant-replay look-back, clamp-to-available, honest "
+                     "no-footage, and return-to-live verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// P3-15/P3-01 / inc 24: headless check of the spatial-canvas policy (the
+// prototype-exact zones / zoom levels / tier caps / anti-flap dwell) and its
+// governor integration (one batched re-plan; culled tiles honestly
+// paused-offscreen; dragged positions persisted). No window, no camera.
+int runSpatialSelftest() {
+    using namespace vms::spatial;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --spatial-selftest\n";
+
+    // --- 1) The pure policy, prototype-exact -------------------------------
+    check(ZoomLevelFor(0.3) == ZoomLevel::Site &&
+              ZoomLevelFor(0.5) == ZoomLevel::Wing &&
+              ZoomLevelFor(1.0) == ZoomLevel::Room,
+          "zoom levels: <0.4 site, <0.9 wing, else room");
+
+    // Zones on a 1280x800 view (minDim 800: focus <=192, peripheral <=440).
+    const double hw = kTileW / 2.0, hh = kTileH / 2.0;
+    check(ZoneFor(640, 400, 1280, 800, hw, hh) == Zone::Focus,
+          "screen center is the focus zone");
+    check(ZoneFor(640 + 300, 400, 1280, 800, hw, hh) == Zone::Peripheral,
+          "mid-distance is peripheral");
+    check(ZoneFor(1280 + hw + 100, 400, 1280, 800, hw, hh) == Zone::Prewarm,
+          "just off-screen inside the 240px margin pre-warms");
+    check(ZoneFor(1280 + hw + 500, 400, 1280, 800, hw, hh) == Zone::Culled,
+          "beyond the margin is culled");
+
+    check(ResolveTierByZone(Zone::Focus, ZoomLevel::Room, false) == 3,
+          "focus zone at room zoom -> main");
+    check(ResolveTierByZone(Zone::Peripheral, ZoomLevel::Room, false) == 1,
+          "peripheral at room zoom -> thumb");
+    check(ResolveTierByZone(Zone::Focus, ZoomLevel::Wing, false) == 1,
+          "wing zoom caps the focus zone to thumb");
+    check(ResolveTierByZone(Zone::Peripheral, ZoomLevel::Site, false) == 0,
+          "site zoom caps everything to paused");
+    check(ResolveTierByZone(Zone::Peripheral, ZoomLevel::Site, true) == 3,
+          "a focused camera is always main (bypasses the cap, as the prototype)");
+    check(ResolveTierByZone(Zone::Culled, ZoomLevel::Room, false) == 0 &&
+              ResolveTierByZone(Zone::Prewarm, ZoomLevel::Room, false) == 1,
+          "culled -> paused, prewarm -> thumb");
+
+    check(!ShouldApplyTierChange(2, 2, kSettleMs), "no-op tier never applies");
+    check(ShouldApplyTierChange(3, 1, 0),
+          "a downgrade applies immediately (mid-pan)");
+    check(!ShouldApplyTierChange(1, 3, 0),
+          "a promotion is held while the viewport is unsettled");
+    check(ShouldApplyTierChange(1, 3, kSettleMs),
+          "a promotion applies once settled (300ms dwell)");
+
+    check([] {
+        double x = 0, y = 0;
+        GridWorldPos(1, 16, x, y);
+        return x == kTileW + kTileW / 2.0 && y == kTileH / 2.0;
+    }(), "default world layout matches the prototype grid placement");
+
+    // --- 2) The governor integration ---------------------------------------
+    WorkspaceController c(vms::DevBoxProfile(), 16);
+    int rePlans = 0;
+    QObject::connect(&c, &WorkspaceController::planChanged,
+                     [&rePlans]() { ++rePlans; });
+
+    // Default positions flow into the model.
+    const QVariantMap t1 = c.tiles()[1].toMap();
+    check(t1.value(QStringLiteral("px")).toDouble() == kTileW + kTileW / 2.0,
+          "tile model carries the default spatial position");
+
+    // Drag repositions without a re-plan (presentation only).
+    c.setTilePos(15, 99999.0, 99999.0);
+    check(rePlans == 0, "a tile drag alone never re-plans the governor");
+    check(c.tiles()[15].toMap().value(QStringLiteral("px")).toDouble() == 99999.0,
+          "dragged position lands in the model");
+
+    // One settled viewport pass: tile 15 (dragged far away) must be culled ->
+    // honestly paused-offscreen (visible=false, truly not decoding); the whole
+    // batch costs exactly ONE re-plan.
+    c.updateSpatialViewport(1280, 800, 1.0, 0, 0, /*settled=*/true);
+    check(rePlans == 1, "a viewport pass applies as ONE batched re-plan");
+    {
+        const QVariantMap t15 = c.tiles()[15].toMap();
+        check(t15.value(QStringLiteral("state")).toString() ==
+                  QLatin1String("paused-offscreen"),
+              "a culled tile is honestly paused-offscreen (no decode)");
+        check(c.tiles()[0].toMap().value(QStringLiteral("tier")).toString() ==
+                  QLatin1String("MAIN"),
+              "the focused tile holds MAIN in the spatial plan");
+    }
+
+    // An identical pass changes nothing -> no re-plan (no flicker at rest).
+    c.updateSpatialViewport(1280, 800, 1.0, 0, 0, /*settled=*/true);
+    check(rePlans == 1, "an unchanged viewport pass does not re-plan");
+
+    // Promotion dwell through the controller: bring tile 15 back to center
+    // while the viewport is UNSETTLED -> its promotion must wait; settling
+    // applies it.
+    c.setTilePos(15, 640.0, 400.0);
+    c.updateSpatialViewport(1280, 800, 1.0, 0, 0, /*settled=*/false);
+    check(c.tiles()[15].toMap().value(QStringLiteral("state")).toString() ==
+              QLatin1String("paused-offscreen"),
+          "promotion held while panning (anti-flap)");
+    c.updateSpatialViewport(1280, 800, 1.0, 0, 0, /*settled=*/true);
+    check(c.tiles()[15].toMap().value(QStringLiteral("tier")).toString() !=
+              QLatin1String("PAUSED"),
+          "promotion applies once the viewport settles");
+
+    // Zooming out to site level pauses non-focused on-screen tiles at once.
+    c.updateSpatialViewport(1280, 800, 0.2, 0, 0, /*settled=*/true);
+    check(c.tiles()[5].toMap().value(QStringLiteral("tier")).toString() ==
+              QLatin1String("PAUSED"),
+          "site-level zoom pauses a non-focused tile (immediate downgrade)");
+    check(c.tiles()[0].toMap().value(QStringLiteral("tier")).toString() ==
+              QLatin1String("MAIN"),
+          "the focused tile survives the site-level cap");
+
+    check(c.zoomLevelName(0.2) == QLatin1String("site") &&
+              c.zoomLevelName(1.0) == QLatin1String("room"),
+          "zoomLevelName is single-sourced from the policy");
+
+#ifdef VMS_WITH_PERSIST
+    // --- 3) Positions persist (schema v9) ----------------------------------
+    {
+        using namespace vms::persist;
+        Store store;
+        check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+        check(static_cast<bool>(store.migrate(coreMigrations())),
+              "migrate schema");
+        check(store.schemaVersion() == 10, "schema at v10 (audit log)");
+
+        WorkspaceController a(vms::DevBoxProfile(), 4);
+        a.setTilePos(2, 777.0, 888.0);
+        saveInstance(store, "live", a);
+
+        WorkspaceController b(vms::DevBoxProfile(), 16);
+        restoreInstance(store, "live", b);
+        check(b.tileCount() == 4, "restore applies the saved tile count");
+        check(b.tilePosX(2) == 777.0 && b.tilePosY(2) == 888.0,
+              "a dragged spatial position survives save/restore");
+    }
+#endif
+
+    if (failures == 0) {
+        std::cout << "PASS: spatial policy (prototype-exact), batched governor "
+                     "integration, honest culling, anti-flap, and persisted "
+                     "positions verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// P1-12/A0 / inc 25: headless check that the command envelope drives the REAL
+// workspace — text lines through CommandController::run() move the live
+// working set, refusals are typed and audited, dangerous commands demand
+// confirm, and the catalog is machine-readable. (The pure-registry contract is
+// vms_cmdtest; this verifies the wiring.) No window, no camera.
+int runCommandSelftest() {
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --command-selftest\n";
+
+    WorkspaceController live(vms::DevBoxProfile(), 16);
+    CommandController cmd(&live, /*instant=*/nullptr, /*devices=*/nullptr);
+
+    // Catalog + palette hints.
+    const QString cat = cmd.catalogJson();
+    check(cat.contains(QLatin1String("\"id\":\"workspace.focus\"")) &&
+              cat.contains(QLatin1String("\"id\":\"device.remove\"")) &&
+              cat.contains(QLatin1String("\"dangerous\":true")),
+          "catalog lists the native verbs and marks the dangerous one");
+    check(!cmd.commandHints().isEmpty(), "palette hints populated");
+
+    // Text commands drive the real controller.
+    QString r = cmd.run(QStringLiteral("focus 5"));
+    check(r.startsWith(QLatin1String("ok")) && live.focusIndex() == 5,
+          "'focus 5' moves the real working set");
+    r = cmd.run(QStringLiteral("quality 3 thumb"));
+    check(r.startsWith(QLatin1String("ok")) && live.desiredTierOf(3) == 1,
+          "'quality 3 thumb' caps the real tier");
+    r = cmd.run(QStringLiteral("priority 2 high"));
+    check(r.startsWith(QLatin1String("ok")) && live.priorityOf(2) == 3,
+          "'priority 2 high' sets the real priority");
+    r = cmd.run(QStringLiteral("layout 9"));
+    check(r.startsWith(QLatin1String("ok")) && live.tileCount() == 9,
+          "'layout 9' resizes the real wall");
+    live.startAutoSweep(60000);
+    r = cmd.run(QStringLiteral("sweep off"));
+    check(r.startsWith(QLatin1String("ok")) && !live.autoSweeping(),
+          "'sweep off' stops the real auto sweep");
+
+    // Typed refusals out of the same gate.
+    check(cmd.run(QStringLiteral("focus abc"))
+              .startsWith(QLatin1String("bad-param")),
+          "non-integer arg -> bad-param");
+    check(cmd.run(QStringLiteral("bogus 1"))
+              .startsWith(QLatin1String("unknown-command")),
+          "unknown verb -> unknown-command");
+    check(cmd.run(QStringLiteral("focus 99"))
+              .startsWith(QLatin1String("failed")),
+          "a valid call the workspace cannot honor fails honestly");
+    check(cmd.run(QStringLiteral("replay.start 30"))
+              .startsWith(QLatin1String("failed")),
+          "replay without a recording DB refuses honestly");
+
+    // The dangerous gate through the text leg.
+    check(cmd.run(QStringLiteral("device.remove cam-1"))
+              .startsWith(QLatin1String("needs-confirm")),
+          "'device.remove' without confirm -> needs-confirm");
+    check(cmd.run(QStringLiteral("device.remove cam-1 confirm"))
+              .startsWith(QLatin1String("failed")),
+          "confirmed remove without a device store fails honestly (not silently)");
+
+    // Capability membership is enforced (empty grant set -> denied).
+    const vms::command::CommandResult denied = cmd.registry().invoke(
+        "workspace.focus", {{"tile", std::int64_t{1}}}, {});
+    check(denied.outcome == vms::command::Outcome::CapabilityDenied,
+          "no capability -> capability-denied (permission-ready)");
+
+    // The UI-state verb round-trips through a signal (QML owns the mode).
+    bool spatialOn = false;
+    QObject::connect(&cmd, &CommandController::spatialModeRequested,
+                     [&spatialOn](bool on) { spatialOn = on; });
+    r = cmd.run(QStringLiteral("spatial on"));
+    check(r.startsWith(QLatin1String("ok")) && spatialOn,
+          "'spatial on' requests the QML mode switch");
+
+    // Audit: every attempt above landed in the session trail, refusals too.
+    const QVariantList log = cmd.auditLog();
+    check(log.size() >= 13, "every attempt audited (refusals included)");
+    int refused = 0, okd = 0;
+    for (const QVariant& v : log) {
+        if (v.toMap().value(QStringLiteral("ok")).toBool()) ++okd;
+        else ++refused;
+    }
+    check(okd >= 6 && refused >= 6,
+          "audit trail carries both executed and refused outcomes");
+    check(log.first().toMap().value(QStringLiteral("command")).toString() ==
+              QLatin1String("workspace.spatial"),
+          "audit trail is newest-first");
+
+    if (failures == 0) {
+        std::cout << "PASS: the command envelope drives the real workspace — "
+                     "validated text leg, typed refusals, dangerous confirm, "
+                     "capability gate, and full audit verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// P1-06 / inc 28: headless check of the durable audit log — every envelope
+// attempt lands one hash-chained row that survives a reopen, the chain
+// verifies on an untouched log, and a direct-UPDATE tamper is DETECTED at the
+// exact row. No window, no camera.
+int runAuditSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --audit-selftest\n";
+
+    const QString dbf = QDir::tempPath() + QStringLiteral("/vms_audit_st.sqlite");
+    for (const QString& f : {dbf, dbf + QStringLiteral("-wal"),
+                             dbf + QStringLiteral("-shm")})
+        QDir().remove(f);
+
+    {
+        Store store;
+        check(static_cast<bool>(store.open(dbf.toStdString())), "open store file");
+        check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+        check(store.schemaVersion() == 10, "schema at v10 (audit_log)");
+        AuditRepo repo(store);
+
+        WorkspaceController live(vms::DevBoxProfile(), 4);
+        CommandController cmd(&live, nullptr, nullptr, nullptr);
+        cmd.setAuditStore(&repo);
+
+        // One executed, one refused — both must land durably.
+        check(cmd.run(QStringLiteral("focus 2"))
+                  .startsWith(QLatin1String("ok")), "run an executed command");
+        check(cmd.run(QStringLiteral("focus abc"))
+                  .startsWith(QLatin1String("bad-param")), "run a refused command");
+        std::int64_t n = 0;
+        check(static_cast<bool>(repo.count(n)) && n == 2,
+              "both attempts landed as durable rows (refusal included)");
+
+        std::vector<AuditEntry> rows;
+        check(static_cast<bool>(repo.list(0, rows)) && rows.size() == 2 &&
+                  rows[0].outcome == "bad-param" && rows[1].outcome == "ok",
+              "rows list newest-first with honest outcomes");
+        check(rows[0].source == "palette" && rows[1].source == "palette",
+              "text-leg attempts attributed to the palette");
+        check(rows[1].prevHash.empty() && !rows[1].rowHash.empty() &&
+                  rows[0].prevHash == rows[1].rowHash,
+              "rows hash-chain to their predecessors (genesis is empty)");
+
+        // API attribution through the same sink.
+        cmd.setSource(QStringLiteral("api"));
+        cmd.registry().invoke("workspace.focus", {{"tile", std::int64_t{1}}},
+                              cmd.capabilities());
+        check(static_cast<bool>(repo.list(1, rows)) && rows.size() == 1 &&
+                  rows[0].source == "api",
+              "API attempts attributed to 'api'");
+
+        std::int64_t broken = -1;
+        check(static_cast<bool>(repo.verifyChain(Sha256HexHash(), broken)) &&
+                  broken == 0,
+              "the untouched chain verifies end-to-end");
+
+        AuditEntry bad;
+        check(repo.append(bad, nullptr).status == Status::Misuse,
+              "append without a hash function is a typed misuse");
+    }
+
+    // Durability + tamper evidence across a reopen.
+    {
+        Store store;
+        check(static_cast<bool>(store.open(dbf.toStdString())), "reopen store");
+        AuditRepo repo(store);
+        std::int64_t n = 0;
+        check(static_cast<bool>(repo.count(n)) && n == 3,
+              "audit rows survive the reopen (durable)");
+
+        // Simulated tamper: a direct UPDATE behind the repo's back.
+        check(static_cast<bool>(store.exec(
+                  "UPDATE audit_log SET message='forged' WHERE id=1;", {})),
+              "tamper with row 1 directly (bypassing the repo)");
+        std::int64_t broken = 0;
+        check(static_cast<bool>(repo.verifyChain(Sha256HexHash(), broken)) &&
+                  broken == 1,
+              "the tamper is DETECTED at exactly the forged row");
+
+        // The log keeps working; the historical break stays visible.
+        AuditEntry e;
+        e.timeUtc = "2026-07-31 12:00:00";
+        e.source = "ui";
+        e.command = "workspace.sweep";
+        e.args = "on=false";
+        e.outcome = "ok";
+        e.message = "post-tamper append";
+        check(static_cast<bool>(repo.append(e, Sha256HexHash())) && e.id == 4,
+              "appending after the tamper still works");
+        check(static_cast<bool>(repo.verifyChain(Sha256HexHash(), broken)) &&
+                  broken == 1,
+              "the historical break remains evident after new appends");
+    }
+
+    for (const QString& f : {dbf, dbf + QStringLiteral("-wal"),
+                             dbf + QStringLiteral("-shm")})
+        QDir().remove(f);
+
+    if (failures == 0) {
+        std::cout << "PASS: durable hash-chained audit — persistence across "
+                     "reopen, source attribution, refusals recorded, and "
+                     "tamper detection verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// P1-13 / inc 29: the command-coverage check. Scans the SHIPPED QML (read from
+// the Qt resource, so it inspects exactly what ships) for direct controller
+// calls and fails if any state-changing UI action bypasses the envelope.
+// Returns the report so both --coverage-check and --coverage-selftest use one
+// code path.
+vms::command::CoverageReport computeCoverage(
+    const std::vector<vms::command::MutatorSpec>& declared) {
+    std::vector<std::pair<std::string, std::string>> files;
+    for (const char* path : {":/Workspace.qml", ":/DevicesView.qml"}) {
+        QFile f(QString::fromLatin1(path));
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        files.emplace_back(std::string(path + 2),   // strip ":/"
+                           f.readAll().toStdString());
+    }
+    return vms::command::CheckCoverage(files, declared);
+}
+
+int runCoverageCheck() {
+    const vms::command::CoverageReport r =
+        computeCoverage(vms::command::DeclaredMutators());
+    std::cout << vms::command::FormatCoverageReport(r);
+    if (r.filesScanned == 0) {
+        std::cerr << "coverage: no QML found in the resource bundle\n";
+        return 2;
+    }
+    return r.ok() ? 0 : 1;   // non-zero on a bypass: CI-gateable
+}
+
+// P1-13 / inc 29: prove the checker itself — the shipped UI is clean AND an
+// injected bypass is detected (a check that cannot fail is not a check).
+int runCoverageSelftest() {
+    using namespace vms::command;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --coverage-selftest\n";
+
+    const std::vector<MutatorSpec> declared = DeclaredMutators();
+    check(declared.size() >= 30, "a declared mutator surface exists");
+
+    // 1) The shipped UI is clean.
+    const CoverageReport shipped = computeCoverage(declared);
+    check(shipped.filesScanned == 2, "both shipped QML files were scanned");
+    if (!shipped.ok()) std::cout << FormatCoverageReport(shipped);
+    check(shipped.ok(),
+          "every state-changing UI action routes through the envelope");
+    check(!shipped.notes.empty(),
+          "declared exemptions are found and reported (no silent skips)");
+
+    // 2) The checker DETECTS a bypass (negative test).
+    const std::vector<std::pair<std::string, std::string>> bypass = {
+        {"Injected.qml",
+         "MouseArea {\n"
+         "    onClicked: devicesCtrl.removeDevice(modelData.id)\n"
+         "}\n"}};
+    const CoverageReport bad = CheckCoverage(bypass, declared);
+    check(!bad.ok() && bad.violations.size() == 1,
+          "an injected direct-controller call is detected as a violation");
+    if (bad.violations.size() == 1) {
+        check(bad.violations[0].method == "removeDevice" &&
+                  bad.violations[0].line == 2,
+              "the violation names the method and the exact line");
+    }
+
+    // 3) Exempt calls are NOT violations, but ARE reported.
+    const std::vector<std::pair<std::string, std::string>> exempt = {
+        {"Exempt.qml",
+         "Text { text: governor.zoomLevelName(spatialView.zoom) }\n"
+         "onWheel: governor.updateSpatialViewport(w, h, z, x, y, false)\n"}};
+    const CoverageReport ex = CheckCoverage(exempt, declared);
+    check(ex.ok() && ex.notes.size() == 2,
+          "pure reads and continuous-viewport calls are exempt, not violations");
+    check(FormatCoverageReport(ex).find("continuous-viewport") != std::string::npos,
+          "the report prints each exemption's category");
+
+    // 4) A comment mentioning a call is not a call site.
+    const std::vector<std::pair<std::string, std::string>> comment = {
+        {"Comment.qml", "// calls devicesCtrl.removeDevice(id) historically\n"}};
+    check(CheckCoverage(comment, declared).ok(),
+          "a commented-out mention is not counted as a bypass");
+
+    // 5) A longer identifier ending in a declared object does not match.
+    const std::vector<std::pair<std::string, std::string>> lookalike = {
+        {"Lookalike.qml", "myGovernor.focusTile(3)\n"}};
+    check(CheckCoverage(lookalike, declared).ok(),
+          "identifier-boundary respected (myGovernor != governor)");
+
+    if (failures == 0) {
+        std::cout << "PASS: the shipped UI is fully routed through the command "
+                     "envelope, and the checker detects an injected bypass\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+// P1-06 / inc 28: print the most recent audit rows + the chain verdict (the
+// operator/compliance read of the durable log).
+int runAuditDump(int argc, char** argv, std::string dbPath, int limit) {
+    QCoreApplication app(argc, argv);   // resolves the default AppData path
+    using namespace vms::persist;
+    if (dbPath.empty()) {
+        const QString dir =
+            QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        dbPath = (dir + QStringLiteral("/workspace.sqlite")).toStdString();
+    }
+    Store store;
+    if (Error e = store.open(dbPath); !e) {
+        std::cerr << "audit: cannot open " << dbPath << ": " << e.message << "\n";
+        return 1;
+    }
+    if (Error e = store.migrate(coreMigrations()); !e) {
+        std::cerr << "audit: migrate failed: " << e.message << "\n";
+        return 1;
+    }
+    AuditRepo repo(store);
+    std::int64_t total = 0, broken = 0;
+    repo.count(total);
+    repo.verifyChain(Sha256HexHash(), broken);
+    std::vector<AuditEntry> rows;
+    repo.list(limit, rows);
+
+    std::cout << "audit log: " << dbPath << "\n"
+              << "rows: " << total << "   chain: "
+              << (broken == 0 ? "intact"
+                              : ("BROKEN at row #" + std::to_string(broken)))
+              << "\n";
+    for (const AuditEntry& e : rows)
+        std::cout << "  #" << e.id << "  " << e.timeUtc << "  [" << e.source
+                  << "]  " << e.command << (e.args.empty() ? "" : " ")
+                  << e.args << "  -> " << e.outcome
+                  << (e.message.empty() ? "" : (": " + e.message)) << "\n";
+    return broken == 0 ? 0 : 1;
+}
+
+#ifdef VMS_WITH_API
+// P1-13/A0 / inc 26: headless check of the external control API — a real HTTP
+// client drives the loopback server and every request flows through the SAME
+// envelope gate as the palette (auth -> validation -> capability -> dangerous
+// confirm -> audit), with the deterministic status mapping. No window.
+int runApiSelftest(int argc, char** argv) {
+    QCoreApplication app(argc, argv);   // the server + client need an event loop
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --api-selftest\n";
+
+    WorkspaceController live(vms::DevBoxProfile(), 16);
+    CommandController cmd(&live, nullptr, nullptr);
+    CommandServer server(&cmd, QStringLiteral("test-token-123"));
+    QString err;
+    check(server.listen(0, err), "server binds a loopback ephemeral port");
+    const quint16 port = server.port();
+    check(port != 0, "ephemeral port assigned");
+
+    QNetworkAccessManager nam;
+    const QString base = QStringLiteral("http://127.0.0.1:%1").arg(port);
+    // One synchronous round-trip: returns the HTTP status + parsed JSON.
+    auto http = [&](const char* method, const QString& path,
+                    const QString& token, const QByteArray& body,
+                    int& status) -> QJsonDocument {
+        QNetworkRequest req{QUrl(base + path)};
+        if (!token.isEmpty())
+            req.setRawHeader("Authorization", "Bearer " + token.toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader,
+                      QStringLiteral("application/json"));
+        QNetworkReply* rep = (qstrcmp(method, "GET") == 0)
+                                 ? nam.get(req) : nam.post(req, body);
+        QEventLoop loop;
+        QObject::connect(rep, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+        status = rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QJsonDocument doc = QJsonDocument::fromJson(rep->readAll());
+        rep->deleteLater();
+        return doc;
+    };
+    auto invoke = [&](const QJsonObject& body, int& status) {
+        return http("POST", QStringLiteral("/v1/invoke"), QStringLiteral("test-token-123"),
+                    QJsonDocument(body).toJson(QJsonDocument::Compact), status);
+    };
+
+    int st = 0;
+    // 1) Authentication gate.
+    http("GET", QStringLiteral("/v1/commands"), QString(), {}, st);
+    check(st == 401, "no bearer token -> 401 (nothing served)");
+    http("GET", QStringLiteral("/v1/commands"), QStringLiteral("wrong"), {}, st);
+    check(st == 401, "wrong bearer token -> 401");
+
+    // 2) Discovery: the machine-readable catalog.
+    QJsonDocument cat = http("GET", QStringLiteral("/v1/commands"),
+                             QStringLiteral("test-token-123"), {}, st);
+    check(st == 200 && cat.isArray() && !cat.array().isEmpty(),
+          "catalog served to an authenticated agent");
+    bool hasFocus = false;
+    for (const QJsonValue& v : cat.array())
+        if (v.toObject().value(QStringLiteral("id")).toString() ==
+            QLatin1String("workspace.focus"))
+            hasFocus = true;
+    check(hasFocus, "catalog carries the drivable command specs");
+
+    // 3) A valid invocation moves the REAL workspace.
+    QJsonObject body;
+    body.insert(QStringLiteral("command"), QStringLiteral("workspace.focus"));
+    body.insert(QStringLiteral("args"), QJsonObject{{QStringLiteral("tile"), 5}});
+    QJsonDocument r = invoke(body, st);
+    check(st == 200 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("ok"),
+          "POST /v1/invoke workspace.focus -> 200 ok");
+    check(live.focusIndex() == 5, "the API call moved the real working set");
+
+    body = QJsonObject();
+    body.insert(QStringLiteral("command"), QStringLiteral("workspace.quality"));
+    body.insert(QStringLiteral("args"),
+                QJsonObject{{QStringLiteral("tile"), 3},
+                            {QStringLiteral("tier"), QStringLiteral("thumb")}});
+    invoke(body, st);
+    check(st == 200 && live.desiredTierOf(3) == 1,
+          "typed JSON args bind (int + enum) and apply");
+
+    // 4) Deterministic refusal mapping over the wire.
+    body = QJsonObject{{QStringLiteral("command"), QStringLiteral("no.such")}};
+    r = invoke(body, st);
+    check(st == 404 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("unknown-command"),
+          "unknown command -> 404 unknown-command");
+    body = QJsonObject{{QStringLiteral("command"), QStringLiteral("workspace.focus")}};
+    r = invoke(body, st);
+    check(st == 400 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("missing-param"),
+          "missing param -> 400 missing-param");
+    body = QJsonObject();
+    body.insert(QStringLiteral("command"), QStringLiteral("device.remove"));
+    body.insert(QStringLiteral("args"),
+                QJsonObject{{QStringLiteral("id"), QStringLiteral("cam-1")}});
+    r = invoke(body, st);
+    check(st == 409 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("needs-confirm"),
+          "dangerous without confirm -> 409, nothing executed");
+    body.insert(QStringLiteral("confirm"), true);
+    r = invoke(body, st);
+    check(st == 500 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("failed"),
+          "confirmed remove without a device store -> honest 500 failed");
+
+    // 5) Malformed transport input.
+    QNetworkRequest bad{QUrl(base + QStringLiteral("/v1/invoke"))};
+    bad.setRawHeader("Authorization", "Bearer test-token-123");
+    QNetworkReply* rep = nam.post(bad, QByteArray("{not json"));
+    {
+        QEventLoop loop;
+        QObject::connect(rep, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    check(rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 400,
+          "malformed JSON body -> 400");
+    rep->deleteLater();
+    http("GET", QStringLiteral("/nope"), QStringLiteral("test-token-123"), {}, st);
+    check(st == 404, "unknown route -> honest JSON 404");
+
+    // 6) The same audit trail as the palette, refusals included.
+    int okd = 0, refused = 0;
+    for (const QVariant& v : cmd.auditLog()) {
+        if (v.toMap().value(QStringLiteral("ok")).toBool()) ++okd;
+        else ++refused;
+    }
+    check(okd >= 2 && refused >= 3,
+          "API attempts audited through the same trail (refusals included)");
+
+    if (failures == 0) {
+        std::cout << "PASS: loopback external control API verified — bearer "
+                     "auth, catalog discovery, real invocation, deterministic "
+                     "refusal mapping, dangerous confirm over the wire, and "
+                     "shared audit\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+#endif // VMS_WITH_API
+
 // inc 19: a fixture reachability probe for --devices-selftest — scripted per
 // device (default reachable) so pollHealth() drives health with no socket.
 class FakeHealthProbe : public vms::health::DeviceHealthProbe {
@@ -217,6 +973,124 @@ public:
 // increment 14 (onboarding UI): headless check that DeviceController turns the
 // DeviceRepo + HealthMonitor cores into the honest model the Devices tab binds
 // to — onboard → Unknown-until-observed → Offline/Online derivation → exception
+// P6-03/P6-07 / inc 27: headless check of the alarm surface end-to-end — a
+// REAL device stack (repo + health monitor + fake probe + DeviceController)
+// feeds health transitions into the AlarmEngine over the same signal wiring
+// the app uses, and the lifecycle verbs run THROUGH the command envelope
+// (alarm.ack / alarm.escalate / alarm.clear), audited. No window, no camera.
+int runAlarmsSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool c, const std::string& what) {
+        std::cout << (c ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!c) ++failures;
+    };
+    std::cout << "vms_workspace --alarms-selftest\n";
+
+    // The same mini device stack the devices selftest uses.
+    Store store;
+    check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+    check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+    InMemorySecretStore secrets;
+    DeviceRepo repo(store, secrets);
+    vms::health::HealthMonitor health;
+    FakeHealthProbe fakeProbe;
+#ifdef VMS_WITH_ONVIF
+    FakeDiscoverySource fakeDisc;
+    DeviceController devices(&repo, &health, &fakeDisc, &fakeProbe);
+#else
+    DeviceController devices(&repo, &health, nullptr, &fakeProbe);
+#endif
+    check(devices.onboard(QStringLiteral("cam-1"), QStringLiteral("Front Door"),
+                          QStringLiteral("192.168.0.11"), QStringLiteral("Acme"),
+                          QStringLiteral("admin"), QStringLiteral("pw"),
+                          QStringLiteral("rtsp://192.168.0.11:554/1"),
+                          QString()).isEmpty(),
+          "onboard a device");
+
+    AlarmController alarms;
+    QObject::connect(&devices, &DeviceController::healthTransition,
+                     &alarms, &AlarmController::onHealthEvent);
+    check(alarms.alarms().isEmpty() && alarms.needsAttention() == 0,
+          "no alarms before any event");
+
+    // The device goes unreachable: the live feed's transition must raise the
+    // default High alarm through the real signal path.
+    fakeProbe.reachable["cam-1"] = false;
+    devices.pollHealth();
+    check(alarms.alarms().size() == 1, "offline transition raises one alarm");
+    const QVariantMap a0 = alarms.alarms().isEmpty()
+                               ? QVariantMap() : alarms.alarms()[0].toMap();
+    check(a0.value(QStringLiteral("priority")).toString() ==
+                  QLatin1String("high") &&
+              a0.value(QStringLiteral("state")).toString() ==
+                  QLatin1String("new") &&
+              a0.value(QStringLiteral("device")).toString() ==
+                  QLatin1String("cam-1"),
+          "alarm is High · New · for the offline device");
+    check(alarms.needsAttention() == 1, "alarm demands attention");
+
+    // Steady state does not spam: polling again (still offline) changes nothing
+    // (the transition already happened; HealthMonitor state is unchanged).
+    devices.pollHealth();
+    check(alarms.alarms().size() == 1 &&
+              alarms.alarms()[0].toMap().value(QStringLiteral("count")) == 1,
+          "steady offline state raises nothing new (transitions only)");
+
+    // Lifecycle through the ENVELOPE: the panel, palette, and API share this.
+    WorkspaceController live(vms::DevBoxProfile(), 4);
+    CommandController cmd(&live, nullptr, &devices, &alarms);
+    const int alarmId =
+        static_cast<int>(a0.value(QStringLiteral("id")).toDouble());
+    QString r = cmd.run(QStringLiteral("alarm.ack %1").arg(alarmId));
+    check(r.startsWith(QLatin1String("ok")) &&
+              alarms.alarms()[0].toMap().value(QStringLiteral("state"))
+                      .toString() == QLatin1String("acknowledged"),
+          "'alarm.ack' through the envelope acknowledges (audited)");
+    check(alarms.needsAttention() == 0, "acknowledged no longer demands attention");
+    r = cmd.run(QStringLiteral("alarm.escalate %1").arg(alarmId));
+    check(r.startsWith(QLatin1String("ok")) && alarms.needsAttention() == 1,
+          "'alarm.escalate' re-raises attention");
+    check(cmd.run(QStringLiteral("alarm.ack 9999"))
+              .startsWith(QLatin1String("failed")),
+          "an unknown alarm id fails honestly through the envelope");
+
+    // Recovery auto-clears via the same live feed.
+    fakeProbe.reachable["cam-1"] = true;
+    devices.pollHealth();
+    check(alarms.alarms().isEmpty(),
+          "device recovery auto-clears the alarm (active list empty)");
+    check(alarms.needsAttention() == 0, "nothing demands attention after recovery");
+
+    // A fresh outage is a FRESH alarm, and maintenance suppresses notification.
+    alarms.setDeviceMaintenance(QStringLiteral("cam-1"), true);
+    fakeProbe.reachable["cam-1"] = false;
+    devices.pollHealth();
+    check(alarms.alarms().size() == 1 &&
+              static_cast<int>(alarms.alarms()[0].toMap()
+                                   .value(QStringLiteral("id")).toDouble()) !=
+                  alarmId,
+          "a new outage after recovery raises a fresh alarm (new id)");
+    check(alarms.needsAttention() == 0 &&
+              alarms.alarms()[0].toMap().value(QStringLiteral("suppressed"))
+                  .toBool(),
+          "maintenance suppresses notification, never the alarm itself");
+
+    // The alarm verbs are in the machine-readable catalog (palette + API).
+    check(cmd.catalogJson().contains(QLatin1String("\"id\":\"alarm.ack\"")),
+          "alarm verbs discoverable in the command catalog");
+
+    if (failures == 0) {
+        std::cout << "PASS: health transitions raise deduplicated alarms end-"
+                     "to-end, the lifecycle runs through the audited command "
+                     "envelope, recovery auto-clears, and maintenance "
+                     "suppresses honestly\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
 // raise / acknowledge / auto-clear → remove — with the credential stored only
 // via the SecretStore (never exposed). No window, no camera.
 int runDevicesSelftest() {
@@ -230,7 +1104,7 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 8, "schema at v8 (device attach/detach, inc 21)");
+    check(store.schemaVersion() == 10, "schema at v10 (audit log, inc 28)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
@@ -774,6 +1648,13 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
     }
     focusIndex_ = 0;
 
+    // Spatial default: the prototype's grid placement (inc 24). Operator drags
+    // and the persisted layout (v9) override these per tile.
+    posX_.resize(count);
+    posY_.resize(count);
+    for (int i = 0; i < count; ++i)
+        vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
+
     columns_ = std::max(1, static_cast<int>(std::ceil(std::sqrt(
                                static_cast<double>(count)))));
     rows_ = std::max(1, static_cast<int>(std::ceil(
@@ -816,6 +1697,11 @@ void WorkspaceController::rebuildModel(bool isLayoutChange) {
                  requests_[i].desired == vms::Tier::Paused
                      ? QStringLiteral("off")
                      : QString::fromLatin1(vms::TierName(requests_[i].desired)));
+        // Spatial-canvas world position (inc 24) — presentation only.
+        m.insert(QStringLiteral("px"), i < static_cast<int>(posX_.size())
+                                           ? posX_[i] : 0.0);
+        m.insert(QStringLiteral("py"), i < static_cast<int>(posY_.size())
+                                           ? posY_[i] : 0.0);
         tiles_.push_back(m);
     }
 
@@ -935,9 +1821,97 @@ void WorkspaceController::setTileCount(int count) {
     rows_ = std::max(1, static_cast<int>(std::ceil(
                             static_cast<double>(count) / columns_)));
 
+    // A new working set gets fresh default spatial positions (dragged spots
+    // belong to the previous layout's tiles).
+    posX_.resize(count);
+    posY_.resize(count);
+    for (int i = 0; i < count; ++i)
+        vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
+
     session_.reset();   // a new working set: re-plan from scratch, no stale state
     plan_ = session_.update(requests_);
     rebuildModel(/*isLayoutChange=*/true);
+}
+
+// --- Spatial canvas (inc 24, P3-15/P3-01) ------------------------------------
+
+void WorkspaceController::setTilePos(int id, double x, double y) {
+    if (id < 0 || id >= static_cast<int>(posX_.size())) return;
+    if (posX_[id] == x && posY_[id] == y) return;
+    posX_[id] = x;
+    posY_[id] = y;
+    // Presentation-only: patch the model in place (no re-plan, no planChanged —
+    // the video pipeline must not be poked by a drag).
+    if (id < tiles_.size()) {
+        QVariantMap m = tiles_[id].toMap();
+        m.insert(QStringLiteral("px"), x);
+        m.insert(QStringLiteral("py"), y);
+        tiles_[id] = m;
+    }
+    emit changed();
+}
+
+double WorkspaceController::tilePosX(int id) const {
+    return (id >= 0 && id < static_cast<int>(posX_.size())) ? posX_[id] : -1.0;
+}
+double WorkspaceController::tilePosY(int id) const {
+    return (id >= 0 && id < static_cast<int>(posY_.size())) ? posY_[id] : -1.0;
+}
+
+QString WorkspaceController::zoomLevelName(double zoom) const {
+    return QString::fromLatin1(
+        vms::spatial::ZoomLevelName(vms::spatial::ZoomLevelFor(zoom)));
+}
+
+void WorkspaceController::updateSpatialViewport(double viewW, double viewH,
+                                                double zoom, double offX,
+                                                double offY, bool settled) {
+    using namespace vms::spatial;
+    const int n = static_cast<int>(requests_.size());
+    if (n == 0 || viewW <= 0 || viewH <= 0 || zoom <= 0) return;
+
+    const ZoomLevel level = ZoomLevelFor(zoom);
+    const double halfW = (kTileW / 2.0) * zoom;
+    const double halfH = (kTileH / 2.0) * zoom;
+    // The QML settle timer owns the dwell clock: settled=true means the
+    // viewport has been still for kSettleMs, so promotions may apply.
+    const int msSinceSettled = settled ? kSettleMs : 0;
+
+    bool anyChange = false;
+    for (int i = 0; i < n; ++i) {
+        const double sx = posX_[i] * zoom + offX;
+        const double sy = posY_[i] * zoom + offY;
+        const Zone zone = ZoneFor(sx, sy, viewW, viewH, halfW, halfH);
+        const int proposed =
+            ResolveTierByZone(zone, level, requests_[i].focused);
+
+        // Current effective level: culled/paused count as 0.
+        const int current =
+            (!requests_[i].visible || requests_[i].desired == vms::Tier::Paused)
+                ? 0
+                : static_cast<int>(requests_[i].desired);
+        if (!ShouldApplyTierChange(current, proposed, msSinceSettled)) continue;
+
+        if (proposed == 0) {
+            // Culled: honestly off-screen (visible=false -> PausedOffscreen, no
+            // decode at all). A zoom-capped on-screen pause (site level) keeps
+            // visible=true with desired=Paused so its state reads as intended.
+            if (zone == Zone::Culled) {
+                requests_[i].visible = false;
+            } else {
+                requests_[i].visible = true;
+                requests_[i].desired = vms::Tier::Paused;
+            }
+        } else {
+            requests_[i].visible = true;
+            requests_[i].desired = static_cast<vms::Tier>(proposed);
+        }
+        anyChange = true;
+    }
+
+    if (!anyChange) return;   // nothing crossed a threshold: no re-plan
+    plan_ = session_.update(requests_);
+    rebuildModel();
 }
 
 void WorkspaceController::applyOptimizedProfile(const vms::CapacityProfile& p,
@@ -1134,6 +2108,20 @@ int main(int argc, char* argv[]) {
     int sweepIntervalSec = 4;
     bool selftest = false;
     bool playbackSelftest = false;
+    bool instantSelftest = false;        // headless InstantReplayController check (inc 23)
+    bool spatialSelftest = false;        // headless spatial-canvas check (inc 24)
+    bool spatial = false;                // start the Live tab in spatial mode
+    bool commandSelftest = false;        // headless command-envelope check (inc 25)
+    bool printCommands = false;          // print the machine-readable catalog
+    bool apiSelftest = false;            // headless control-API check (inc 26)
+    bool alarmsSelftest = false;         // headless alarm-surface check (inc 27)
+    bool auditSelftest = false;          // headless durable-audit check (inc 28)
+    bool coverageCheck = false;          // P1-13 UI-bypass gate (inc 29)
+    bool coverageSelftest = false;
+    bool auditDump = false;              // print the durable audit log
+    int auditDumpLimit = 20;
+    int apiPort = -1;                    // >=0: serve the loopback control API
+    std::string apiToken;                // override the generated bearer token
     bool devicesSelftest = false;        // headless DeviceController check (inc 14)
     bool devicesDemo = false;            // seed demo devices for the Devices tab
     bool video = false;
@@ -1160,6 +2148,34 @@ int main(int argc, char* argv[]) {
             selftest = true;
         } else if (a == "--playback-selftest") {
             playbackSelftest = true;
+        } else if (a == "--instant-selftest") {
+            instantSelftest = true;
+        } else if (a == "--spatial-selftest") {
+            spatialSelftest = true;
+        } else if (a == "--spatial") {
+            spatial = true;
+        } else if (a == "--command-selftest") {
+            commandSelftest = true;
+        } else if (a == "--commands") {
+            printCommands = true;
+        } else if (a == "--api-selftest") {
+            apiSelftest = true;
+        } else if (a == "--alarms-selftest") {
+            alarmsSelftest = true;
+        } else if (a == "--audit-selftest") {
+            auditSelftest = true;
+        } else if (a == "--coverage-check") {
+            coverageCheck = true;
+        } else if (a == "--coverage-selftest") {
+            coverageSelftest = true;
+        } else if (a == "--audit-dump") {
+            auditDump = true;
+            if (i + 1 < argc && std::atoi(argv[i + 1]) > 0)
+                auditDumpLimit = std::atoi(argv[++i]);
+        } else if (a == "--api-port" && i + 1 < argc) {
+            apiPort = std::atoi(argv[++i]);
+        } else if (a == "--api-token" && i + 1 < argc) {
+            apiToken = argv[++i];
         } else if (a == "--devices-selftest") {
             devicesSelftest = true;
         } else if (a == "--devices-demo") {
@@ -1204,18 +2220,59 @@ int main(int argc, char* argv[]) {
                 "  --video              render live video under the state chrome\n"
                 "                       (slice 2; needs the GStreamer build)\n"
                 "  --selftest           headless plan check, no window\n"
+                "  --instant-selftest   headless instant-replay check (inc 23)\n"
+                "  --spatial            start the Live tab on the spatial canvas\n"
+                "  --spatial-selftest   headless spatial-canvas check (inc 24)\n"
+                "  --commands           print the machine-readable command catalog\n"
+                "  --command-selftest   headless command-envelope check (inc 25)\n"
+                "  --api-port N         serve the loopback control API (inc 26;\n"
+                "                       prints the bearer token; off by default)\n"
+                "  --api-selftest       headless control-API check (inc 26)\n"
+                "  --alarms-selftest    headless alarm-surface check (inc 27)\n"
+                "  --audit-dump [N]     print the durable audit log + chain verdict\n"
+                "  --audit-selftest     headless durable-audit check (inc 28)\n"
+                "  --coverage-check     fail if any UI action bypasses the\n"
+                "                       command envelope (P1-13; non-zero exit)\n"
+                "  --coverage-selftest  headless coverage-checker check (inc 29)\n"
                 "  --devices-selftest   headless onboarding/health check (inc 14)\n"
                 "  --devices-demo       seed demo devices in the Devices tab\n";
             return 0;
         }
     }
 
+#ifdef VMS_WITH_API
+    if (apiSelftest) return runApiSelftest(argc, argv);
+#else
+    if (apiSelftest || apiPort >= 0) {
+        std::cerr << "the control API needs the Qt HttpServer build.\n";
+        return 2;
+    }
+#endif
 #ifdef VMS_WITH_PERSIST
     if (playbackSelftest) return runPlaybackSelftest();
+    if (instantSelftest) return runInstantSelftest();
+    if (spatialSelftest) return runSpatialSelftest();
+    if (commandSelftest) return runCommandSelftest();
+    if (alarmsSelftest) return runAlarmsSelftest();
+    if (auditSelftest) return runAuditSelftest();
+    if (coverageCheck) return runCoverageCheck();
+    if (coverageSelftest) return runCoverageSelftest();
+    if (auditDump) return runAuditDump(argc, argv, dbPathArg, auditDumpLimit);
+    if (printCommands) {
+        // The machine-readable command catalog (P1-13's discovery seed).
+        WorkspaceController live(vms::DevBoxProfile(), 16);
+        CommandController cmd(&live, nullptr, nullptr);
+        std::cout << cmd.catalogJson().toStdString() << std::endl;
+        return 0;
+    }
     if (devicesSelftest) return runDevicesSelftest();
 #else
     if (playbackSelftest) {
         std::cerr << "--playback-selftest needs the persistence build.\n";
+        return 2;
+    }
+    if (instantSelftest) {
+        std::cerr << "--instant-selftest needs the persistence build.\n";
         return 2;
     }
     if (devicesSelftest) {
@@ -1445,6 +2502,76 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+    // P3-05 / inc 23: instant playback from live. The Live overlay's controller
+    // shares the same recording index/camera as the Playback tab but keeps its own
+    // (independent) look-back timeline, so an instant replay never disturbs the
+    // Playback tab's range. Null on a build/run without a recording DB.
+    InstantReplayController* instant = nullptr;
+#ifdef VMS_WITH_PERSIST
+    if (recIndex)
+        instant = new InstantReplayController(
+            recIndex, QString::fromStdString(recCamera), &app);
+#endif
+
+    // inc 25 (P1-12/A0): the command envelope. Every operator verb is one
+    // validated command over the live controllers; the palette (and later the
+    // external agent API, P1-13) invokes through this single gate. Controllers
+    // it lacks (no recording DB / no device store) refuse honestly.
+    // inc 27 (P6-03/P6-07): the alarm surface. Device health transitions are
+    // the first event source; the engine notifies, never actuates (P6-05 is
+    // its own gate).
+    auto* alarmsCtrl = new AlarmController(&app);
+#ifdef VMS_WITH_PERSIST
+    if (devices) {
+        QObject::connect(devices, &DeviceController::healthTransition,
+                         alarmsCtrl, &AlarmController::onHealthEvent);
+    }
+#endif
+
+    CommandController* commander = nullptr;
+#ifdef VMS_WITH_PERSIST
+    commander = new CommandController(&liveController, instant, devices,
+                                      alarmsCtrl, &app);
+    // inc 28 (P1-06): durable audit — from here on, every envelope attempt
+    // (palette, API, panel; refusals included) also lands one hash-chained,
+    // append-only row in the standalone store. Read it back: --audit-dump.
+    if (commander && persisting) {
+        auto* auditRepo = new vms::persist::AuditRepo(store);
+        commander->setAuditStore(auditRepo);
+        std::cout << "audit: durable hash-chained log in " << dbPath
+                  << " (--audit-dump to read)" << std::endl;
+    }
+#endif
+
+#ifdef VMS_WITH_API
+    // inc 26 (P1-13/A0): the external control API — loopback-only, OFF unless
+    // --api-port is given, bearer-authenticated with a per-session token. An
+    // external agent drives the SAME envelope (validation, capability,
+    // dangerous confirm, audit) the palette uses.
+    if (commander && apiPort >= 0) {
+        QString token = QString::fromStdString(apiToken);
+        if (token.isEmpty()) {
+            // A fresh random session token, printed once below (the console is
+            // the deployer-controlled handoff channel for this first slice).
+            token = QStringLiteral("%1%2")
+                        .arg(QRandomGenerator::system()->generate64(), 16, 16,
+                             QLatin1Char('0'))
+                        .arg(QRandomGenerator::system()->generate64(), 16, 16,
+                             QLatin1Char('0'));
+        }
+        auto* apiServer = new CommandServer(commander, token, &app);
+        QString apiErr;
+        if (!apiServer->listen(static_cast<quint16>(apiPort), apiErr)) {
+            std::cerr << "api: failed to listen on 127.0.0.1:" << apiPort
+                      << ": " << apiErr.toStdString() << std::endl;
+            return 1;
+        }
+        std::cout << "api: http://127.0.0.1:" << apiServer->port()
+                  << "  (GET /v1/commands · POST /v1/invoke · bearer token: "
+                  << token.toStdString() << ")" << std::endl;
+    }
+#endif
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("liveCtrl"),
                                               &liveController);
@@ -1453,12 +2580,26 @@ int main(int argc, char* argv[]) {
     // `playback` is the recording-backed controller (or null on a build without
     // persistence); the QML guards every use with `playback &&`.
     engine.rootContext()->setContextProperty(QStringLiteral("playback"), playback);
+    // `instant` is the InstantReplayController for the Live look-back overlay (or
+    // null without a recording DB); the Live QML guards its use with `instant &&`.
+    engine.rootContext()->setContextProperty(QStringLiteral("instant"), instant);
     // `devicesCtrl` is the DeviceController (or null on a build without
     // persistence); the Devices-tab QML guards its use behind a null check.
     engine.rootContext()->setContextProperty(QStringLiteral("devicesCtrl"),
                                               devicesCtrl);
     engine.rootContext()->setContextProperty(QStringLiteral("videoActive"),
                                               video);
+    // inc 24: start the Live tab on the spatial canvas (also lets the offscreen
+    // smoke exercise the spatial bindings).
+    engine.rootContext()->setContextProperty(QStringLiteral("spatialDefault"),
+                                              spatial);
+    // inc 25: the command envelope (null on a build without persistence); the
+    // palette QML guards every use with `commander &&`.
+    engine.rootContext()->setContextProperty(QStringLiteral("commander"),
+                                              commander);
+    // inc 27: the alarm surface (always present; empty until events arrive).
+    engine.rootContext()->setContextProperty(QStringLiteral("alarmsCtrl"),
+                                              alarmsCtrl);
     engine.load(QUrl(QStringLiteral("qrc:/Workspace.qml")));
     if (engine.rootObjects().isEmpty()) {
         std::cerr << "Failed to load qrc:/Workspace.qml\n";
@@ -1599,6 +2740,66 @@ int main(int argc, char* argv[]) {
             pbPoll.start(150);
         }
     }
+
+    // P3-05 / inc 23: the instant-replay overlay decodes into its OWN VideoItem,
+    // driven by its own PlaybackController (instant->pb()) — the same intent→video
+    // wiring as the Playback tab above, but independent of it, so a look-back over
+    // the Live wall never moves the Playback tab's playhead. Pauses when the
+    // operator returns to live.
+    PlaybackPipeline* irPipe = nullptr;
+    QTimer irPoll;
+    long long irSegStartAbs = 0;
+    bool irInternal = false;
+    // Hoisted to function scope (not the if-block) so the lambdas below, which
+    // outlive this scope, capture a live reference — mirrors pbPipe above.
+    PlaybackController* ipb = instant ? instant->pb() : nullptr;
+    if (instant && ipb) {
+        VideoItem* irItem = engine.rootObjects().first()->findChild<VideoItem*>(
+            QStringLiteral("instantVideoOut"));
+        if (irItem) {
+            irPipe = new PlaybackPipeline(irItem);
+
+            auto irSync = [&]() {
+                const QVariantMap seg = ipb->segmentAtPlayhead();
+                const QString path = seg.value(QStringLiteral("path")).toString();
+                const double off = seg.value(QStringLiteral("offsetSec")).toDouble();
+                if (path.isEmpty()) { if (irPipe) irPipe->pause(); return; }  // gap
+                std::string e;
+                if (irPipe && !irPipe->openFile(path.toStdString(), off, e))
+                    std::cerr << "instant video: " << e << std::endl;
+                irSegStartAbs = ipb->playheadAbs() - static_cast<long long>(off);
+            };
+
+            QObject::connect(ipb, &PlaybackController::playheadChanged,
+                             [&]() { if (!irInternal) irSync(); });
+            QObject::connect(ipb, &PlaybackController::transportChanged, [&]() {
+                if (!irPipe) return;
+                irPipe->setRate(ipb->speed());
+                if (ipb->playing()) { irSync(); irPipe->play(); }
+                else irPipe->pause();
+            });
+            QObject::connect(&irPoll, &QTimer::timeout, [&]() {
+                std::string e;
+                if (irPipe && !irPipe->pumpBus(e))
+                    std::cerr << "instant video: " << e << std::endl;
+                if (!irPipe || !ipb->playing()) return;
+                const double pos = irPipe->positionSec();
+                if (pos < 0) return;
+                irInternal = true;
+                ipb->setPlayheadAbs(irSegStartAbs + static_cast<long long>(pos));
+                irInternal = false;
+                const QVariantMap seg = ipb->segmentAtPlayhead();
+                if (seg.value(QStringLiteral("path")).toString().toStdString() !=
+                    irPipe->currentFile())
+                    irSync();   // crossed into a new segment (or a gap)
+            });
+            // Returning to live pauses the decode (the overlay hides the video).
+            QObject::connect(instant, &InstantReplayController::changed, [&]() {
+                if (instant && !instant->active() && irPipe) irPipe->pause();
+            });
+            irPoll.start(150);
+        }
+    }
 #endif // VMS_WITH_GSTREAMER && VMS_WITH_PERSIST
 
 #ifdef VMS_WITH_OPTIMIZE
@@ -1684,6 +2885,18 @@ int main(int argc, char* argv[]) {
                           << (pbPipe ? pbPipe->framesPulled() : 0) << std::endl;
             });
         }
+        // P3-05 / inc 23: trigger an instant replay so the overlay binds and the
+        // instant decode pulls real frames (proves the look-back path offscreen).
+        if (irPipe && instant) {
+            instant->replay(30);
+            QObject::connect(&app, &QGuiApplication::aboutToQuit, [&]() {
+                std::cout << "smoke: instant available="
+                          << (instant->available() ? "yes" : "no")
+                          << " look-back=" << instant->lookbackSec() << "s"
+                          << " frames pulled=" << (irPipe ? irPipe->framesPulled() : 0)
+                          << std::endl;
+            });
+        }
 #endif
 #ifdef VMS_WITH_OPTIMIZE
         QObject::connect(&app, &QGuiApplication::aboutToQuit, [&liveController]() {
@@ -1700,6 +2913,7 @@ int main(int argc, char* argv[]) {
 #endif
 #if defined(VMS_WITH_GSTREAMER) && defined(VMS_WITH_PERSIST)
     delete pbPipe;
+    delete irPipe;
 #endif
     return rc;
 }

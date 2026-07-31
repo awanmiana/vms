@@ -29,6 +29,59 @@ Window {
     // Workspace UI state (P3-14 layered panels).
     property bool showBrowser: true
     property string cameraSearch: ""
+    // Spatial canvas mode (inc 24, P3-15/P3-01): the Live grid becomes a
+    // pannable/zoomable canvas of draggable camera tiles; media cost follows
+    // the viewport. --spatial starts in this mode.
+    property bool spatialMode: (typeof spatialDefault !== "undefined")
+                               ? spatialDefault : false
+
+    // Command palette (inc 25, P1-12/A0): every operator verb as one validated
+    // text command through the envelope (Ctrl+K or the ⌘ toolbar button).
+    property bool showPalette: false
+    // Alarm surface (inc 27, P6-03/P6-07).
+    property bool showAlarms: false
+
+    // EVERY state-changing UI action goes through the command envelope
+    // (A0 / P1-13): one validated, capability-checked, confirm-gated, audited
+    // gate for clicks, palette lines, and the external API alike. There is
+    // deliberately NO direct-controller fallback — a bypass would be an action
+    // with no audit row, and --coverage-check fails the build on one.
+    // Returns { ok, outcome, message }.
+    function cmd(id, args, confirm) {
+        if (typeof commander === "undefined" || !commander)
+            return { ok: false, outcome: "unavailable",
+                     message: "command envelope unavailable" }
+        return commander.invoke(id, args || ({}), confirm === true)
+    }
+    property bool commandsAvailable: (typeof commander !== "undefined")
+                                     && commander !== null
+
+    function alarmAction(verb, id) {
+        root.cmd("alarm." + verb, { "id": id })
+    }
+
+    Shortcut {
+        sequence: "Ctrl+K"
+        onActivated: root.showPalette = !root.showPalette
+    }
+
+    // The envelope owns actions; UI state (like the spatial mode) stays in QML,
+    // so the workspace.spatial command round-trips through this signal.
+    Connections {
+        target: (typeof commander !== "undefined") ? commander : null
+        // UI state follows the command (the command itself stops the sweep).
+        function onSpatialModeRequested(on) { root.spatialMode = on }
+    }
+
+    // The prototype's spatial tier labels (Idle / Preview / Live-SD / Live-HD).
+    function spatialTierLabel(t) {
+        switch (t) {
+        case "MAIN":  return "Live · HD";
+        case "SUB":   return "Live · SD";
+        case "THUMB": return "Preview";
+        }
+        return "Idle";
+    }
 
     function stateColor(s) {
         switch (s) {
@@ -148,13 +201,37 @@ Window {
                         }
                         MouseArea {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                            onClicked: governor.setTileCount(modelData)
+                            onClicked: root.cmd("workspace.layout",
+                                                { "count": modelData })
                         }
                     }
                 }
 
                 Rectangle { width: 1; height: 24; color: "#2a3240"
                     anchors.verticalCenter: parent.verticalCenter }
+
+                // Spatial canvas toggle (inc 24) — Live tab only. Entering
+                // spatial mode stops the auto sweep: the viewport, not a sweep,
+                // owns the working set there.
+                Rectangle {
+                    visible: root.tabIndex === 0
+                    width: spatialBtnText.width + 22; height: 28; radius: 6
+                    color: root.spatialMode ? "#2a3446" : "#1a1f28"
+                    border.color: root.spatialMode ? "#3a6ea5" : "#333c4c"
+                    border.width: 1
+                    Text {
+                        id: spatialBtnText; anchors.centerIn: parent
+                        text: root.spatialMode ? "⊞ Grid" : "⌖ Spatial"
+                        color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        // The command flips the mode (via spatialModeRequested)
+                        // and stops the sweep; QML never touches the controller.
+                        onClicked: root.cmd("workspace.spatial",
+                                            { "on": !root.spatialMode })
+                    }
+                }
 
                 Rectangle {
                     width: camBtnText.width + 22; height: 28; radius: 6
@@ -169,6 +246,44 @@ Window {
                         onClicked: root.showBrowser = !root.showBrowser
                     }
                 }
+                // Alarms chip (inc 27): honest attention count, red when
+                // something unacknowledged demands an operator.
+                Rectangle {
+                    property int attn: (typeof alarmsCtrl !== "undefined" && alarmsCtrl)
+                                       ? alarmsCtrl.needsAttention : 0
+                    visible: (typeof alarmsCtrl !== "undefined") && alarmsCtrl !== null
+                    width: alarmBtnText.width + 22; height: 28; radius: 6
+                    color: attn > 0 ? "#4a1f1f" : (root.showAlarms ? "#2a3446" : "#1a1f28")
+                    border.color: attn > 0 ? "#e05a4e"
+                                           : (root.showAlarms ? "#3a6ea5" : "#333c4c")
+                    border.width: 1
+                    Text {
+                        id: alarmBtnText; anchors.centerIn: parent
+                        text: "🔔 Alarms" + (parent.attn > 0 ? " (" + parent.attn + ")" : "")
+                        color: parent.attn > 0 ? "#f0b8b0" : "#cbd3df"
+                        font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showAlarms = !root.showAlarms
+                    }
+                }
+                // Command palette (inc 25): one validated gate for every verb.
+                Rectangle {
+                    visible: (typeof commander !== "undefined") && commander !== null
+                    width: cmdBtnText.width + 22; height: 28; radius: 6
+                    color: root.showPalette ? "#2a3446" : "#1a1f28"
+                    border.color: root.showPalette ? "#3a6ea5" : "#333c4c"
+                    border.width: 1
+                    Text {
+                        id: cmdBtnText; anchors.centerIn: parent
+                        text: "⌘ Command"; color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showPalette = !root.showPalette
+                    }
+                }
                 Rectangle {
                     width: autoBtnText.width + 22; height: 28; radius: 6
                     color: governor.autoSweeping ? "#243a2c" : "#1a1f28"
@@ -180,7 +295,8 @@ Window {
                     }
                     MouseArea {
                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                        onClicked: governor.setAutoSweep(!governor.autoSweeping)
+                        onClicked: root.cmd("workspace.sweep",
+                                            { "on": !governor.autoSweeping })
                     }
                 }
             }
@@ -205,8 +321,11 @@ Window {
                 Text {
                     text: governor.overflow
                           ? "⚠ over capacity: some visible tiles are capacity-paused"
-                          : "focus on tile " + governor.focusIndex
-                            + "  ·  " + governor.columns + "×" + governor.rows + " grid"
+                          : (root.spatialMode && root.tabIndex === 0
+                             ? "spatial canvas · " + governor.zoomLevelName(spatialView.zoom)
+                               + " level · wheel zooms, drag a tile to place it, drag space to pan"
+                             : "focus on tile " + governor.focusIndex
+                               + "  ·  " + governor.columns + "×" + governor.rows + " grid")
                     color: governor.overflow ? "#e05a4e" : "#6f7a86"
                     font.pixelSize: 13
                 }
@@ -278,7 +397,10 @@ Window {
                 anchors.fill: parent
                 // The pipeline follows the Live instance; on the Playback tab
                 // there is no recorded footage yet, so the video is hidden.
-                visible: videoActive && root.tabIndex === 0
+                // Hidden on the spatial canvas too: the d3d11 compositor's
+                // fixed grid no longer matches the free tile positions (video
+                // under the spatial tiles is a later media slice).
+                visible: videoActive && root.tabIndex === 0 && !root.spatialMode
             }
 
             // Recorded video for the Playback tab (inc 7c-3): a second VideoItem
@@ -295,6 +417,9 @@ Window {
             }
 
             Grid {
+                // The fixed grid yields to the spatial canvas on the Live tab
+                // (inc 24); Playback keeps the classic grid.
+                visible: !(root.spatialMode && root.tabIndex === 0)
                 anchors.fill: parent
                 anchors.margins: gridArea.spacingPx
                 columns: gridArea.cols
@@ -390,8 +515,188 @@ Window {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: governor.focusTile(modelData.id)
+                            onClicked: root.cmd("workspace.focus",
+                                                { "tile": modelData.id })
                         }
+                    }
+                }
+            }
+
+            // Spatial camera canvas (inc 24, P3-15/P3-01): a pannable, zoomable
+            // world of draggable camera tiles. The viewport drives the governor
+            // (WorkspaceController::updateSpatialViewport, the prototype-exact
+            // policy): tiles near center earn Main, peripheral ones Thumb,
+            // culled ones truly stop decoding. Wheel zooms toward the cursor;
+            // dragging empty space pans; dragging a tile repositions it
+            // (persisted); a click focuses, exactly like the grid.
+            Item {
+                id: spatialView
+                visible: root.spatialMode && root.tabIndex === 0
+                anchors.fill: parent
+                clip: true
+
+                property real zoom: 1.0
+                property real offX: 0
+                property real offY: 0
+
+                // The 300ms promote-dwell (SpatialPolicy): interactions apply
+                // downgrades at once (settled=false); the timer firing applies
+                // the held promotions (settled=true).
+                function markUnsettled() {
+                    settleTimer.restart()
+                    governor.updateSpatialViewport(width, height, zoom,
+                                                   offX, offY, false)
+                }
+                Timer {
+                    id: settleTimer
+                    interval: 300
+                    onTriggered: governor.updateSpatialViewport(
+                                     spatialView.width, spatialView.height,
+                                     spatialView.zoom, spatialView.offX,
+                                     spatialView.offY, true)
+                }
+
+                function fitToView() {
+                    var tiles = governor.tiles
+                    if (!tiles.length || width <= 0 || height <= 0) return
+                    var minX = 1e12, minY = 1e12, maxX = -1e12, maxY = -1e12
+                    for (var i = 0; i < tiles.length; i++) {
+                        minX = Math.min(minX, tiles[i].px - 160)
+                        maxX = Math.max(maxX, tiles[i].px + 160)
+                        minY = Math.min(minY, tiles[i].py - 95)
+                        maxY = Math.max(maxY, tiles[i].py + 95)
+                    }
+                    var z = Math.min(width / Math.max(1, maxX - minX),
+                                     height / Math.max(1, maxY - minY)) * 0.92
+                    zoom = Math.max(0.15, Math.min(6, z))
+                    offX = (width - (minX + maxX) * zoom) / 2
+                    offY = (height - (minY + maxY) * zoom) / 2
+                    markUnsettled()
+                }
+                onVisibleChanged: if (visible) fitToView()
+                onWidthChanged: if (visible) markUnsettled()
+                onHeightChanged: if (visible) markUnsettled()
+
+                // Background: pan by dragging empty space; wheel zooms toward
+                // the cursor (0.15–6×), exactly the prototype's interaction.
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                    property real lastX: 0
+                    property real lastY: 0
+                    onPressed: (mouse) => { lastX = mouse.x; lastY = mouse.y }
+                    onPositionChanged: (mouse) => {
+                        if (!pressed) return
+                        spatialView.offX += mouse.x - lastX
+                        spatialView.offY += mouse.y - lastY
+                        lastX = mouse.x; lastY = mouse.y
+                        spatialView.markUnsettled()
+                    }
+                    onWheel: (wheel) => {
+                        var f = wheel.angleDelta.y > 0 ? 1.1 : 0.9
+                        var nz = Math.max(0.15, Math.min(6, spatialView.zoom * f))
+                        f = nz / spatialView.zoom
+                        if (f === 1) return
+                        spatialView.offX = wheel.x - (wheel.x - spatialView.offX) * f
+                        spatialView.offY = wheel.y - (wheel.y - spatialView.offY) * f
+                        spatialView.zoom = nz
+                        spatialView.markUnsettled()
+                    }
+                }
+
+                Repeater {
+                    // Bound only while visible so the hidden canvas costs nothing.
+                    model: spatialView.visible ? governor.tiles : []
+                    delegate: Rectangle {
+                        id: sTile
+                        width: 320 * spatialView.zoom
+                        height: 190 * spatialView.zoom
+                        x: modelData.px * spatialView.zoom + spatialView.offX - width / 2
+                        y: modelData.py * spatialView.zoom + spatialView.offY - height / 2
+                        radius: 6 * Math.min(1, spatialView.zoom * 2)
+                        color: "#171a21"
+                        border.color: root.stateColor(modelData.state)
+                        border.width: modelData.focused ? 3 : 1.5
+
+                        // Honest chrome, scaled with the zoom: camera id, the
+                        // prototype's spatial tier label, and the true state.
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: 2
+                            visible: spatialView.zoom > 0.28
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: "Cam " + modelData.id
+                                      + (modelData.priority === "high" ? " ★" : "")
+                                color: "#e8ecf3"
+                                font.pixelSize: Math.max(9, 15 * spatialView.zoom)
+                                font.bold: modelData.focused
+                            }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: root.spatialTierLabel(modelData.tier)
+                                color: root.stateColor(modelData.state)
+                                font.pixelSize: Math.max(8, 12 * spatialView.zoom)
+                            }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: spatialView.zoom > 0.5
+                                text: modelData.stateText
+                                color: "#8a93a3"
+                                font.pixelSize: Math.max(8, 10 * spatialView.zoom)
+                            }
+                        }
+                        // Zoomed far out (site level) a tile is just a dot-like
+                        // pin — the prototype's "map pin" reading.
+                        Rectangle {
+                            anchors.centerIn: parent
+                            visible: spatialView.zoom <= 0.28
+                            width: 8; height: 8; radius: 4
+                            color: root.stateColor(modelData.state)
+                        }
+
+                        // Drag repositions the camera on the canvas (P3-01's
+                        // drag verb, persisted); a plain click focuses it. The
+                        // drag threshold keeps the two distinct, and a completed
+                        // drag suppresses the click.
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            drag.target: sTile
+                            drag.threshold: 3
+                            onReleased: {
+                                if (!drag.active) return
+                                var wx = (sTile.x + sTile.width / 2
+                                          - spatialView.offX) / spatialView.zoom
+                                var wy = (sTile.y + sTile.height / 2
+                                          - spatialView.offY) / spatialView.zoom
+                                // The COMMITTED drag is one audited command
+                                // (the per-frame motion is not — see the
+                                // coverage check's documented exemptions).
+                                root.cmd("workspace.place",
+                                         { "tile": modelData.id, "x": wx, "y": wy })
+                                spatialView.markUnsettled()
+                            }
+                            onClicked: root.cmd("workspace.focus",
+                                                { "tile": modelData.id })
+                        }
+                    }
+                }
+
+                // Canvas control: fit everything back into view.
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 14
+                    width: fitText.width + 22; height: 26; radius: 6
+                    color: "#1a1f28"; border.color: "#333c4c"; border.width: 1
+                    Text {
+                        id: fitText; anchors.centerIn: parent
+                        text: "⤢ Fit"; color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: spatialView.fitToView()
                     }
                 }
             }
@@ -403,9 +708,11 @@ Window {
                 property var sel: (governor.focusIndex >= 0
                                    && governor.tiles.length > governor.focusIndex)
                                   ? governor.tiles[governor.focusIndex] : null
+                property bool showInstant: root.tabIndex === 0
+                                           && (typeof instant !== "undefined") && instant
                 visible: sel !== null
                 width: 288
-                height: 182
+                height: showInstant ? 214 : 182
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 anchors.margins: 16
@@ -463,8 +770,10 @@ Window {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: governor.setDesiredTier(governor.focusIndex,
-                                                                       modelData.lvl)
+                                    onClicked: root.cmd(
+                                        "workspace.quality",
+                                        { "tile": governor.focusIndex,
+                                          "tier": modelData.key })
                                 }
                             }
                         }
@@ -502,8 +811,43 @@ Window {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: governor.setPriority(governor.focusIndex,
-                                                                    modelData.lvl)
+                                    onClicked: root.cmd(
+                                        "workspace.priority",
+                                        { "tile": governor.focusIndex,
+                                          "level": modelData.key })
+                                }
+                            }
+                        }
+                    }
+                    // Instant replay (P3-05 / inc 23): jump back N seconds on the
+                    // recording-backed camera and watch, then return to live. Only
+                    // on the Live tab and only when a recording index is present.
+                    Row {
+                        spacing: 6
+                        visible: infoPanel.showInstant
+                        Text {
+                            text: "replay"
+                            color: "#9aa4b4"; font.pixelSize: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Repeater {
+                            model: [ { label: "10s", s: 10 },
+                                     { label: "30s", s: 30 },
+                                     { label: "60s", s: 60 } ]
+                            delegate: Rectangle {
+                                width: 44; height: 22; radius: 5
+                                color: "#25324a"
+                                border.color: "#3a6ea5"; border.width: 1
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    color: "#cfe0f2"; font.pixelSize: 11
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.cmd("replay.start",
+                                                        { "seconds": modelData.s })
                                 }
                             }
                         }
@@ -511,6 +855,449 @@ Window {
                     Text {
                         text: "click a tile to focus · set priority to pin importance"
                         color: "#6b7482"; font.pixelSize: 11
+                    }
+                }
+            }
+
+            // Layered instant-replay overlay (P3-05 / inc 23): floats over the
+            // live wall — which keeps running behind it (P3-14 layering) — showing
+            // the look-back footage with a compact transport and a return-to-live
+            // control. Honest when the camera has no local recording.
+            Rectangle {
+                id: replayOverlay
+                property var ir: (typeof instant !== "undefined") ? instant : null
+                property var ipb: ir ? ir.pb : null
+                visible: ir && ir.active && root.tabIndex === 0
+                z: 60
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 80, 900)
+                height: Math.min(parent.height - 80, 560)
+                radius: 12
+                color: Qt.rgba(0.043, 0.051, 0.063, 0.97)
+                border.width: 2
+                border.color: (ir && ir.available) ? "#3a6ea5" : "#e0785a"
+
+                function spanColor(s) {
+                    switch (s) {
+                    case "available":   return "#37c871";
+                    case "overlapping": return "#f2a33c";
+                    }
+                    return "#2a303c";   // missing gap
+                }
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 10
+
+                    // Header: title + honest status + return-to-live.
+                    Item {
+                        width: parent.width
+                        height: 26
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Instant replay"
+                            color: "#e8ecf3"; font.pixelSize: 16; font.bold: true
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            text: replayOverlay.ir ? replayOverlay.ir.status : ""
+                            color: (replayOverlay.ir && replayOverlay.ir.available)
+                                   ? "#9aa4b4" : "#e0785a"
+                            font.pixelSize: 13
+                        }
+                        Rectangle {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: liveBackText.width + 24; height: 26; radius: 6
+                            color: "#25324a"; border.color: "#3a6ea5"; border.width: 1
+                            Text {
+                                id: liveBackText; anchors.centerIn: parent
+                                text: "⟵ Live"; color: "#cfe0f2"; font.pixelSize: 13
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.cmd("replay.live", {})
+                            }
+                        }
+                    }
+
+                    // Video slot: the decoded replay, or an honest no-footage note.
+                    Rectangle {
+                        id: instantVideoSlot
+                        width: parent.width
+                        height: parent.height - 120
+                        color: "#0b0d11"
+                        radius: 8
+                        clip: true
+
+                        VideoItem {
+                            objectName: "instantVideoOut"
+                            anchors.fill: parent
+                            visible: replayOverlay.ir && replayOverlay.ir.available
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            visible: !(replayOverlay.ir && replayOverlay.ir.available)
+                            text: "No local recording for this camera"
+                            color: "#e0785a"; font.pixelSize: 15
+                        }
+                    }
+
+                    // Availability bar + draggable playhead (bound to instant.pb),
+                    // the same honest timeline the Playback tab uses.
+                    Rectangle {
+                        id: replayTrack
+                        width: parent.width
+                        height: 12
+                        radius: 6
+                        color: "#171a21"
+                        visible: replayOverlay.ir && replayOverlay.ir.available
+
+                        Repeater {
+                            model: replayOverlay.ipb ? replayOverlay.ipb.spans : []
+                            delegate: Rectangle {
+                                height: parent.height
+                                y: 0
+                                x: modelData.startFrac * replayTrack.width
+                                width: Math.max(1, (modelData.endFrac - modelData.startFrac)
+                                                    * replayTrack.width)
+                                color: replayOverlay.spanColor(modelData.state)
+                            }
+                        }
+                        Rectangle {   // playhead
+                            width: 3; height: parent.height + 6; y: -3
+                            x: (replayOverlay.ipb ? replayOverlay.ipb.playheadFrac : 0)
+                               * replayTrack.width - 1.5
+                            color: replayOverlay.ipb && replayOverlay.ipb.onFootage
+                                   ? "#e8ecf3" : "#e05a4e"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onPressed: (mouse) => { if (replayOverlay.ipb)
+                                replayOverlay.ipb.seekFrac(mouse.x / replayTrack.width) }
+                            onPositionChanged: (mouse) => { if (replayOverlay.ipb)
+                                replayOverlay.ipb.seekFrac(Math.max(0, Math.min(1,
+                                    mouse.x / replayTrack.width))) }
+                        }
+                    }
+
+                    // Transport: restart · play/pause · speed. Bound to instant.pb.
+                    Row {
+                        spacing: 8
+                        visible: replayOverlay.ir && replayOverlay.ir.available
+                        Repeater {
+                            model: [ { label: "⏮", act: 0 },
+                                     { label: "play", act: 1 },
+                                     { label: "1×", act: 2, v: 1 },
+                                     { label: "2×", act: 2, v: 2 },
+                                     { label: "4×", act: 2, v: 4 } ]
+                            delegate: Rectangle {
+                                property bool active: modelData.act === 1
+                                    ? (replayOverlay.ipb && replayOverlay.ipb.playing)
+                                    : (modelData.act === 2 && replayOverlay.ipb
+                                       && replayOverlay.ipb.speed === modelData.v)
+                                width: 46; height: 26; radius: 6
+                                color: active ? "#2a4258" : "#1a1f28"
+                                border.color: active ? "#3a6ea5" : "#333c4c"
+                                border.width: 1
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.act === 1
+                                          ? (replayOverlay.ipb && replayOverlay.ipb.playing
+                                             ? "⏸" : "▶")
+                                          : modelData.label
+                                    color: active ? "#e8ecf3" : "#9aa4b4"
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (!replayOverlay.ipb) return
+                                        if (modelData.act === 0) replayOverlay.ipb.seekFrac(0)
+                                        else if (modelData.act === 1)
+                                            replayOverlay.ipb.playing
+                                                ? replayOverlay.ipb.pause()
+                                                : replayOverlay.ipb.play()
+                                        else if (modelData.act === 2)
+                                            replayOverlay.ipb.setSpeed(modelData.v)
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: replayOverlay.ipb
+                                  ? (replayOverlay.ipb.playheadUtc + " UTC") : ""
+                            color: "#9aa4b4"; font.pixelSize: 12
+                        }
+                    }
+                }
+            }
+
+            // Command palette (inc 25, P1-12/A0), layered over the grid: type a
+            // command ("focus 5", "quality 3 thumb", "device.remove cam-1
+            // confirm"), it flows through the ONE validated gate, and the
+            // deterministic result + the session audit trail (refusals
+            // included) show right here.
+            Rectangle {
+                id: palette
+                property var cc: (typeof commander !== "undefined") ? commander : null
+                visible: root.showPalette && cc !== null
+                z: 70
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: 18
+                width: Math.min(parent.width - 60, 660)
+                height: 320
+                radius: 10
+                color: Qt.rgba(0.043, 0.051, 0.063, 0.97)
+                border.color: "#3a6ea5"; border.width: 1.5
+
+                property string result: ""
+
+                onVisibleChanged: if (visible) cmdInput.forceActiveFocus()
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 8
+
+                    Item {
+                        width: parent.width; height: 22
+                        Text {
+                            anchors.left: parent.left
+                            text: "Command"
+                            color: "#e8ecf3"; font.pixelSize: 14; font.bold: true
+                        }
+                        Text {
+                            anchors.right: parent.right
+                            text: "every action · one validated, audited gate (A0)"
+                            color: "#6b7482"; font.pixelSize: 11
+                        }
+                    }
+
+                    Rectangle {
+                        width: parent.width; height: 30; radius: 6
+                        color: "#10141b"; border.color: "#333c4c"; border.width: 1
+                        TextInput {
+                            id: cmdInput
+                            anchors.fill: parent
+                            anchors.margins: 7
+                            color: "#e8ecf3"; font.pixelSize: 13
+                            font.family: "Consolas"
+                            clip: true
+                            onAccepted: {
+                                if (!palette.cc || text.trim().length === 0) return
+                                palette.result = palette.cc.run(text)
+                                text = ""
+                            }
+                            Text {
+                                anchors.fill: parent
+                                visible: cmdInput.text.length === 0
+                                text: "focus 5 · quality 3 thumb · layout 16 · replay.start 30 …"
+                                color: "#4a5261"; font.pixelSize: 12
+                            }
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        visible: palette.result.length > 0
+                        text: palette.result
+                        color: palette.result.startsWith("ok") ? "#37c871" : "#e0785a"
+                        font.pixelSize: 12
+                        font.family: "Consolas"
+                        elide: Text.ElideRight
+                    }
+
+                    // The catalog (machine-discoverable; human-skimmable here).
+                    Text {
+                        text: "commands"
+                        color: "#6b7482"; font.pixelSize: 11
+                    }
+                    Flickable {
+                        width: parent.width
+                        height: 74
+                        contentHeight: hintCol.height
+                        clip: true
+                        Column {
+                            id: hintCol
+                            Repeater {
+                                model: palette.cc ? palette.cc.commandHints : []
+                                delegate: Text {
+                                    text: modelData
+                                    color: "#8a93a3"; font.pixelSize: 11
+                                    font.family: "Consolas"
+                                }
+                            }
+                        }
+                    }
+
+                    // The session audit trail — refused attempts included.
+                    Text {
+                        text: "audit (this session)"
+                        color: "#6b7482"; font.pixelSize: 11
+                    }
+                    Column {
+                        width: parent.width
+                        Repeater {
+                            model: palette.cc
+                                   ? palette.cc.auditLog.slice(0, 4) : []
+                            delegate: Text {
+                                width: parent.width
+                                text: modelData.time + "  " + modelData.command
+                                      + (modelData.args.length ? " " + modelData.args : "")
+                                      + " → " + modelData.outcome
+                                color: modelData.ok ? "#9aa4b4" : "#e0785a"
+                                font.pixelSize: 11
+                                font.family: "Consolas"
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Alarms panel (inc 27, P6-07), layered over the grid: the
+            // deduplicated, accountable alarm list. Every lifecycle button
+            // routes through the command envelope (alarm.ack / escalate /
+            // clear) so the panel, the palette, and the API are one audited
+            // verb. Maintenance-suppressed alarms stay visible (state never
+            // hidden), only their notification is silenced.
+            Rectangle {
+                id: alarmsPanel
+                property var ac: (typeof alarmsCtrl !== "undefined") ? alarmsCtrl : null
+                visible: root.showAlarms && ac !== null
+                z: 65
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 16
+                width: Math.min(parent.width - 60, 460)
+                height: Math.min(parent.height - 60, 380)
+                radius: 10
+                color: Qt.rgba(0.043, 0.051, 0.063, 0.97)
+                border.color: (ac && ac.needsAttention > 0) ? "#e05a4e" : "#333c4c"
+                border.width: 1.5
+
+                function prioColor(p) {
+                    switch (p) {
+                    case "high":   return "#e05a4e";
+                    case "medium": return "#f2a33c";
+                    }
+                    return "#5b6472";
+                }
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 8
+
+                    Item {
+                        width: parent.width; height: 22
+                        Text {
+                            anchors.left: parent.left
+                            text: "Alarms"
+                            color: "#e8ecf3"; font.pixelSize: 14; font.bold: true
+                        }
+                        Text {
+                            anchors.right: parent.right
+                            text: alarmsPanel.ac
+                                  ? (alarmsPanel.ac.needsAttention > 0
+                                     ? alarmsPanel.ac.needsAttention + " need attention"
+                                     : "all quiet")
+                                  : ""
+                            color: alarmsPanel.ac && alarmsPanel.ac.needsAttention > 0
+                                   ? "#e0785a" : "#6b7482"
+                            font.pixelSize: 11
+                        }
+                    }
+
+                    Text {
+                        visible: alarmsPanel.ac && alarmsPanel.ac.alarms.length === 0
+                        text: "No active alarms."
+                        color: "#6b7482"; font.pixelSize: 12
+                    }
+
+                    Flickable {
+                        width: parent.width
+                        height: parent.height - 40
+                        contentHeight: alarmCol.height
+                        clip: true
+                        Column {
+                            id: alarmCol
+                            width: parent.width
+                            spacing: 6
+                            Repeater {
+                                model: alarmsPanel.ac ? alarmsPanel.ac.alarms : []
+                                delegate: Rectangle {
+                                    id: alarmRow
+                                    // The inner buttons' Repeater shadows
+                                    // modelData; capture the alarm's id here.
+                                    property double alarmId: modelData.id
+                                    width: alarmCol.width
+                                    height: 62
+                                    radius: 8
+                                    color: "#10141b"
+                                    border.color: alarmsPanel.prioColor(modelData.priority)
+                                    border.width: 1
+                                    opacity: modelData.suppressed ? 0.55 : 1.0
+
+                                    Column {
+                                        anchors.left: parent.left
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: 10
+                                        spacing: 3
+                                        Text {
+                                            text: "#" + modelData.id + "  " + modelData.device
+                                                  + "  ·  " + modelData.priority.toUpperCase()
+                                                  + "  ·  " + modelData.state
+                                                  + (modelData.count > 1
+                                                     ? "  ·  ×" + modelData.count : "")
+                                                  + (modelData.suppressed ? "  ·  maintenance" : "")
+                                            color: "#e8ecf3"; font.pixelSize: 12; font.bold: true
+                                        }
+                                        Text {
+                                            text: modelData.time + " UTC  ·  " + modelData.message
+                                            color: "#8a93a3"; font.pixelSize: 11
+                                        }
+                                    }
+                                    Row {
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.rightMargin: 8
+                                        spacing: 5
+                                        Repeater {
+                                            model: [ { label: "Ack", verb: "ack" },
+                                                     { label: "Esc", verb: "escalate" },
+                                                     { label: "Clear", verb: "clear" } ]
+                                            delegate: Rectangle {
+                                                width: 40; height: 22; radius: 5
+                                                color: "#1a1f28"
+                                                border.color: "#333c4c"; border.width: 1
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: modelData.label
+                                                    color: "#9aa4b4"; font.pixelSize: 10
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    // Route through the envelope (A0).
+                                                    onClicked: root.alarmAction(
+                                                        modelData.verb,
+                                                        alarmRow.alarmId)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -633,7 +1420,8 @@ Window {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: governor.focusTile(modelData.id)
+                            onClicked: root.cmd("workspace.focus",
+                                                { "tile": modelData.id })
                         }
                     }
                 }

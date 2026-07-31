@@ -224,12 +224,21 @@ public:
 
 signals:
     void changed();
+    // inc 27 (P6-03/P6-08 direction): a device's derived health state crossed a
+    // boundary — the normalized event feed for the alarm engine. `eventType` is
+    // "device-offline" / "device-degraded" / "device-recovered".
+    void healthTransition(const QString& deviceId, const QString& eventType,
+                          const QString& message);
     void discoveryChanged();
 
 private:
     QVariantMap healthMap(const std::string& deviceId) const;
     void rebuild();
     void rebuildDiscovered();
+    // inc 27: emit healthTransition when a report moved the derived state
+    // across a boundary (call with the state captured before the report).
+    void emitTransition(const std::string& deviceId,
+                        vms::health::State before);
 
     vms::persist::DeviceRepo* repo_ = nullptr;
     vms::health::HealthMonitor* health_ = nullptr;

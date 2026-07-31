@@ -23,6 +23,10 @@ struct TilePref {
     int id = 0;
     int desiredTier = 3;   // Main
     int priority = 2;      // Medium
+    // Spatial-canvas world position (inc 24, P3-15). -1 = unset: the tile sits
+    // at the default grid placement until the operator drags it.
+    double posX = -1.0;
+    double posY = -1.0;
 };
 
 struct InstanceState {

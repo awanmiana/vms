@@ -99,6 +99,31 @@ public:
     // upgrade more of them to Main; more tiles means it degrades to fit budget.
     Q_INVOKABLE void setTileCount(int count);
 
+    // --- Spatial canvas (inc 24, P3-15/P3-01) -------------------------------
+    // Operator drags a tile to a new world position on the spatial canvas
+    // (P3-01's drag verb). Updates the model's px/py in place — positions are
+    // presentation, not a governor input, so no re-plan happens here.
+    Q_INVOKABLE void setTilePos(int id, double x, double y);
+
+    // The viewport media policy (P3-15): given the current canvas viewport
+    // (view size, zoom, pan offset) classify every tile by zone × zoom level
+    // (the prototype-exact SpatialPolicy) and drive the governor from it in ONE
+    // batched re-plan — culled tiles become visible=false (truly not decoding),
+    // on-screen tiles get their zone tier as the desired ceiling. Downgrades
+    // apply immediately; promotions only when `settled` (the 300 ms dwell,
+    // owned by the QML settle timer). A no-change pass does not re-plan.
+    Q_INVOKABLE void updateSpatialViewport(double viewW, double viewH,
+                                           double zoom, double offX,
+                                           double offY, bool settled);
+
+    // "site" / "wing" / "room" for the header read-out (single-sourced from
+    // SpatialPolicy rather than re-deriving thresholds in QML).
+    Q_INVOKABLE QString zoomLevelName(double zoom) const;
+
+    // Persistence accessors for the spatial positions (schema v9).
+    double tilePosX(int id) const;
+    double tilePosY(int id) const;
+
     // Begin an automatic focus sweep every intervalMs (<= 0 leaves it manual).
     void startAutoSweep(int intervalMs);
 
@@ -140,6 +165,9 @@ private:
     vms::GovernorSession session_;
     vms::CapacityProfile baseProfile_;   // static ceiling; optimizer adjusts from this
     std::vector<vms::TileRequest> requests_;
+    // Spatial-canvas world position per tile id (inc 24). Defaults to the
+    // prototype's grid placement; operator drags override; persisted (v9).
+    std::vector<double> posX_, posY_;
     vms::GovernorResult plan_;
     QVariantList tiles_;
     int columns_ = 1;

@@ -323,8 +323,31 @@ void DeviceController::setMaintenance(const QString& id, bool inMaintenance) {
     rebuild();
 }
 
+// inc 27: after any health report, surface a derived-state boundary crossing
+// as a normalized event (the alarm engine's first source). Only transitions
+// emit — steady state is silence, so the feed cannot spam the rule engine.
+void DeviceController::emitTransition(const std::string& deviceId,
+                                      vms::health::State before) {
+    using vms::health::State;
+    const State after = health_->state(deviceId);
+    if (after == before) return;
+    const QString id = QString::fromStdString(deviceId);
+    if (after == State::Offline)
+        emit healthTransition(id, QStringLiteral("device-offline"),
+                              QStringLiteral("device unreachable"));
+    else if (after == State::Degraded)
+        emit healthTransition(id, QStringLiteral("device-degraded"),
+                              QStringLiteral("device degraded"));
+    else if (after == State::Online &&
+             (before == State::Offline || before == State::Degraded))
+        emit healthTransition(id, QStringLiteral("device-recovered"),
+                              QStringLiteral("device recovered"));
+}
+
 void DeviceController::reportReach(const QString& id, int level) {
+    const vms::health::State before = health_->state(id.toStdString());
     health_->reportReachable(id.toStdString(), level != 0);
+    emitTransition(id.toStdString(), before);
     rebuild();
 }
 
@@ -336,7 +359,9 @@ void DeviceController::reportStream(const QString& id, int level) {
         case 2:  s = Stream::Ok;       break;
         default: s = Stream::Unknown;  break;
     }
+    const vms::health::State before = health_->state(id.toStdString());
     health_->reportStream(id.toStdString(), s);
+    emitTransition(id.toStdString(), before);
     rebuild();
 }
 
@@ -349,7 +374,9 @@ void DeviceController::reportStorage(const QString& id, int level) {
         case 3:  s = Storage::NotApplicable; break;
         default: s = Storage::Unknown;       break;
     }
+    const vms::health::State before = health_->state(id.toStdString());
     health_->reportStorage(id.toStdString(), s);
+    emitTransition(id.toStdString(), before);
     rebuild();
 }
 
@@ -391,7 +418,9 @@ void DeviceController::pollHealth() {
         const vms::health::ProbeResult r = probe_->probe(t);
         // Reachable -> Online; unreachable -> Offline (raises an exception).
         // Stream is left as-is: reachability alone doesn't prove a stream.
+        const vms::health::State before = health_->state(d.id);
         health_->reportReachable(d.id, r.reachable);
+        emitTransition(d.id, before);   // inc 27: feed the alarm engine
     }
     rebuild();
 }
