@@ -141,6 +141,34 @@ std::vector<Migration> coreMigrations() {
          "  message TEXT NOT NULL,"
          "  prev_hash TEXT NOT NULL,"
          "  row_hash TEXT NOT NULL);"},
+
+        // v11 — the first canonical premises model plus camera coverage
+        // metadata (native increment 31, P3-15). A floor owns only metadata for
+        // an optional image underlay; image bytes remain outside the database.
+        // Facing/FOV are presentation facts and do not alter governor policy.
+        {11, "premises_and_camera_fov",
+         "CREATE TABLE premises_site ("
+         "  id TEXT PRIMARY KEY,"
+         "  name TEXT NOT NULL,"
+         "  timezone TEXT NOT NULL DEFAULT 'UTC',"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
+         "CREATE TABLE premises_floor ("
+         "  id TEXT PRIMARY KEY,"
+         "  site_id TEXT NOT NULL,"
+         "  name TEXT NOT NULL,"
+         "  plan_uri TEXT NOT NULL DEFAULT '',"
+         "  world_width REAL NOT NULL DEFAULT 1600,"
+         "  world_height REAL NOT NULL DEFAULT 900,"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')) ,"
+         "  FOREIGN KEY(site_id) REFERENCES premises_site(id) ON DELETE CASCADE);"
+         "CREATE TABLE premises_active ("
+         "  workspace TEXT PRIMARY KEY,"
+         "  site_id TEXT NOT NULL,"
+         "  floor_id TEXT,"
+         "  FOREIGN KEY(site_id) REFERENCES premises_site(id) ON DELETE CASCADE,"
+         "  FOREIGN KEY(floor_id) REFERENCES premises_floor(id) ON DELETE SET NULL);"
+         "ALTER TABLE workspace_tile ADD COLUMN facing_deg REAL NOT NULL DEFAULT 0;"
+         "ALTER TABLE workspace_tile ADD COLUMN fov_deg REAL NOT NULL DEFAULT 70;"},
     };
 }
 

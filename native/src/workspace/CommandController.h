@@ -15,7 +15,8 @@
 // P0-01A: the session is Administrator, so ALL capabilities named by the
 // registered specs are granted — the envelope still checks membership, so
 // later role separation (P1-02/P1-03) changes the granted set, not the code.
-// Durable audit storage is P1-06; this keeps the session trail + stdout.
+// P1-06 durable audit attaches through setAuditStore(); the session trail and
+// stdout remain available even when no persistent store is open.
 
 #include <QObject>
 #include <QString>
@@ -30,8 +31,10 @@
 
 class WorkspaceController;
 class InstantReplayController;
+class PlaybackController;
 class DeviceController;
 class AlarmController;
+class PremisesController;
 
 // The audit chain's hash (SHA-256 hex via Qt), shared by writer and verifier.
 vms::persist::HashFn Sha256HexHash();
@@ -49,6 +52,7 @@ public:
     // affected commands then refuse honestly instead of not existing silently.
     CommandController(WorkspaceController* live, InstantReplayController* instant,
                       DeviceController* devices, AlarmController* alarms = nullptr,
+                      PlaybackController* playback = nullptr,
                       QObject* parent = nullptr);
 
     QVariantList auditLog() const { return auditLog_; }
@@ -77,6 +81,9 @@ public:
     // attempt (refusals included) ALSO lands one hash-chained row in SQLite.
     // A persist failure is reported once to stderr, never silently dropped.
     void setAuditStore(vms::persist::AuditRepo* repo);
+    void setPremisesController(PremisesController* premises) {
+        premises_ = premises;
+    }
 
     // Source attribution for the durable rows: run() stamps "palette", the
     // HTTP server stamps "api" around its invokes, everything else is "ui".
@@ -96,8 +103,10 @@ private:
 
     WorkspaceController* live_ = nullptr;
     InstantReplayController* instant_ = nullptr;
+    PlaybackController* playback_ = nullptr;
     DeviceController* devices_ = nullptr;
     AlarmController* alarms_ = nullptr;
+    PremisesController* premises_ = nullptr;
     QStringList hints_;
     vms::persist::AuditRepo* auditRepo_ = nullptr;   // inc 28: durable audit
     QString source_ = QStringLiteral("ui");

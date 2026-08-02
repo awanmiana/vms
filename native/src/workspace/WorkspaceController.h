@@ -105,6 +105,10 @@ public:
     // presentation, not a governor input, so no re-plan happens here.
     Q_INVOKABLE void setTilePos(int id, double x, double y);
 
+    // Camera coverage metadata on the spatial floor. Degrees are normalized /
+    // clamped here so every command/UI/API path yields the same model.
+    void setTileOrientation(int id, double facingDeg, double fovDeg);
+
     // The viewport media policy (P3-15): given the current canvas viewport
     // (view size, zoom, pan offset) classify every tile by zone × zoom level
     // (the prototype-exact SpatialPolicy) and drive the governor from it in ONE
@@ -123,6 +127,8 @@ public:
     // Persistence accessors for the spatial positions (schema v9).
     double tilePosX(int id) const;
     double tilePosY(int id) const;
+    double tileFacing(int id) const;
+    double tileFov(int id) const;
 
     // Begin an automatic focus sweep every intervalMs (<= 0 leaves it manual).
     void startAutoSweep(int intervalMs);
@@ -168,6 +174,7 @@ private:
     // Spatial-canvas world position per tile id (inc 24). Defaults to the
     // prototype's grid placement; operator drags override; persisted (v9).
     std::vector<double> posX_, posY_;
+    std::vector<double> facingDeg_, fovDeg_;
     vms::GovernorResult plan_;
     QVariantList tiles_;
     int columns_ = 1;

@@ -27,6 +27,8 @@ struct TilePref {
     // at the default grid placement until the operator drags it.
     double posX = -1.0;
     double posY = -1.0;
+    double facingDeg = 0.0;
+    double fovDeg = 70.0;
 };
 
 struct InstanceState {

@@ -30,14 +30,19 @@
 #endif
 
 #include <QGuiApplication>
+#include <QElapsedTimer>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QTimer>
 
 #include <cmath>
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <string>
 
 #ifdef VMS_WITH_PERSIST
@@ -53,6 +58,7 @@
 #include "persist/Schema.h"
 #include "persist/Store.h"
 #include "persist/WorkspaceRepo.h"
+#include "persist/PremisesRepo.h"
 #include "persist/SegmentIndex.h"
 #include "persist/DeviceRepo.h"
 #include "persist/SecretStore.h"
@@ -63,6 +69,7 @@
 #include "SpatialPolicy.h"
 #include "CommandController.h"
 #include "AlarmController.h"
+#include "PremisesController.h"
 #include "command/CoverageCheck.h"
 #ifdef VMS_WITH_API
 #include <QEventLoop>
@@ -140,6 +147,7 @@ void restoreInstance(vms::persist::Store& store, const std::string& name,
             // Spatial position (v9): -1 = unset, keep the default placement.
             if (t.posX >= 0.0 && t.posY >= 0.0)
                 c.setTilePos(t.id, t.posX, t.posY);
+            c.setTileOrientation(t.id, t.facingDeg, t.fovDeg);
         }
     }
 }
@@ -152,7 +160,8 @@ void saveInstance(vms::persist::Store& store, const std::string& name,
     st.tileCount = c.tileCount();
     for (int i = 0; i < c.tileCount(); ++i)
         st.tiles.push_back({i, c.desiredTierOf(i), c.priorityOf(i),
-                            c.tilePosX(i), c.tilePosY(i)});
+                            c.tilePosX(i), c.tilePosY(i), c.tileFacing(i),
+                            c.tileFov(i)});
     repo.save(name, st);
 }
 
@@ -275,6 +284,24 @@ int runInstantSelftest() {
                .toString().isEmpty(),
           "a recorded file backs the playhead");
 
+    // Inc 30: the instant overlay's discrete transport uses the same command
+    // envelope as Playback, the palette, and the external API.
+    WorkspaceController live(vms::DevBoxProfile(), 4);
+    CommandController cmd(&live, &ir, /*devices=*/nullptr);
+    QString cr = cmd.run(QStringLiteral("replay.pause"));
+    check(cr.startsWith(QLatin1String("ok")) && !ir.pb()->playing(),
+          "'replay.pause' pauses the real instant transport");
+    cr = cmd.run(QStringLiteral("replay.speed 2"));
+    check(cr.startsWith(QLatin1String("ok")) && ir.pb()->speed() == 2.0,
+          "'replay.speed 2' changes the real instant rate");
+    cr = cmd.run(QStringLiteral("replay.seek 0.5"));
+    check(cr.startsWith(QLatin1String("ok")) &&
+              std::abs(ir.pb()->playheadFrac() - 0.5) < 0.001,
+          "'replay.seek 0.5' moves the real instant playhead");
+    cr = cmd.run(QStringLiteral("replay.play"));
+    check(cr.startsWith(QLatin1String("ok")) && ir.pb()->playing(),
+          "'replay.play' resumes the real instant transport");
+
     // 2) Look back further than the footage -> clamps, honest actual look-back.
     ir.replay(600);
     check(ir.available(), "clamped replay still available");
@@ -287,6 +314,9 @@ int runInstantSelftest() {
     ir.returnToLive();
     check(!ir.active(), "returnToLive() closes the overlay");
     check(!ir.pb()->playing(), "decode paused on return to live");
+    check(cmd.run(QStringLiteral("replay.play"))
+              .startsWith(QLatin1String("failed")),
+          "instant transport refuses honestly after return-to-live");
 
     // 4) A camera with NO local recording -> honest unavailable, no fake footage.
     InstantReplayController ir2(&idx, QStringLiteral("cam-none"));
@@ -363,6 +393,19 @@ int runSpatialSelftest() {
         return x == kTileW + kTileW / 2.0 && y == kTileH / 2.0;
     }(), "default world layout matches the prototype grid placement");
 
+    // Inc 33: the spatial live-tile bridge crops the governed grid composite
+    // using exactly the same row-major tile ids. Exercise uneven dimensions so
+    // integer rounding cannot create seams, overlap, or a shifted camera.
+    check(VideoItem::sourceRectForFrame(QSize(1281, 801), 5, 4, 3) ==
+              QRect(320, 267, 320, 267),
+          "shared-frame crop maps tile 5 to row 1 / column 1");
+    check(VideoItem::sourceRectForFrame(QSize(1281, 801), 11, 4, 3) ==
+              QRect(960, 534, 321, 267),
+          "shared-frame crop preserves the composite's uneven final cell");
+    check(VideoItem::sourceRectForFrame(QSize(1281, 801), -1, 4, 3) ==
+              QRect(0, 0, 1281, 801),
+          "invalid crop ids safely retain the full source frame");
+
     // --- 2) The governor integration ---------------------------------------
     WorkspaceController c(vms::DevBoxProfile(), 16);
     int rePlans = 0;
@@ -433,10 +476,11 @@ int runSpatialSelftest() {
         check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
         check(static_cast<bool>(store.migrate(coreMigrations())),
               "migrate schema");
-        check(store.schemaVersion() == 10, "schema at v10 (audit log)");
+        check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
 
         WorkspaceController a(vms::DevBoxProfile(), 4);
         a.setTilePos(2, 777.0, 888.0);
+        a.setTileOrientation(2, 225.0, 110.0);
         saveInstance(store, "live", a);
 
         WorkspaceController b(vms::DevBoxProfile(), 16);
@@ -444,6 +488,10 @@ int runSpatialSelftest() {
         check(b.tileCount() == 4, "restore applies the saved tile count");
         check(b.tilePosX(2) == 777.0 && b.tilePosY(2) == 888.0,
               "a dragged spatial position survives save/restore");
+        check(b.tileFacing(2) == 225.0 && b.tileFov(2) == 110.0 &&
+                  b.tiles()[2].toMap().value(QStringLiteral("facing")).toDouble()
+                      == 225.0,
+              "camera direction/FOV survive save/restore and reach the model");
     }
 #endif
 
@@ -455,6 +503,107 @@ int runSpatialSelftest() {
     }
     std::cout << "FAILED: " << failures << " check(s)\n";
     return 1;
+}
+
+// P3-15 / inc 32: repeatable latency gate for the full controller-side path
+// exercised by a pan: spatial classification -> GovernorSession -> QVariant
+// model refresh -> synchronous Qt signals. It deliberately excludes scene-graph
+// render and media decode, which are reported separately and must not be implied
+// by this number. Scope: ../spatial-performance-P3-15-proposal.md.
+int runSpatialBenchmark(int samples) {
+    using Clock = std::chrono::steady_clock;
+    struct Result {
+        const char* scenario = "";
+        int samples = 0;
+        int replans = 0;
+        double meanMs = 0.0;
+        double p95Ms = 0.0;
+        double maxMs = 0.0;
+        double limitMs = 0.0;
+        bool invariantOk = false;
+    };
+
+    samples = std::max(50, std::min(100000, samples));
+    WorkspaceController controller(vms::DevBoxProfile(), 64);
+    int replans = 0;
+    QObject::connect(&controller, &WorkspaceController::planChanged,
+                     [&replans]() { ++replans; });
+
+    auto measure = [&](const char* name, double limitMs, auto&& pass) {
+        std::vector<double> elapsed;
+        elapsed.reserve(samples);
+        const int before = replans;
+        for (int i = 0; i < samples; ++i) {
+            const auto start = Clock::now();
+            pass(i);
+            const auto stop = Clock::now();
+            elapsed.push_back(
+                std::chrono::duration<double, std::milli>(stop - start).count());
+        }
+        std::vector<double> sorted = elapsed;
+        std::sort(sorted.begin(), sorted.end());
+        Result result;
+        result.scenario = name;
+        result.samples = samples;
+        result.replans = replans - before;
+        result.meanMs = std::accumulate(elapsed.begin(), elapsed.end(), 0.0) /
+                        static_cast<double>(elapsed.size());
+        const std::size_t p95Index = static_cast<std::size_t>(
+            std::ceil(sorted.size() * 0.95) - 1.0);
+        result.p95Ms = sorted[std::min(p95Index, sorted.size() - 1)];
+        result.maxMs = sorted.back();
+        result.limitMs = limitMs;
+        return result;
+    };
+
+    // Prime the session/model allocations, then establish the exact idle view.
+    for (int i = 0; i < 40; ++i)
+        controller.updateSpatialViewport(1280, 800, 1.0,
+                                         (i & 1) ? -1400.0 : 0.0, 0.0, true);
+    controller.updateSpatialViewport(1280, 800, 1.0, 0.0, 0.0, true);
+
+    Result idle = measure("idle-no-change", 0.50, [&](int) {
+        controller.updateSpatialViewport(1280, 800, 1.0, 0.0, 0.0, true);
+    });
+    idle.invariantOk = idle.replans == 0;
+
+    // Every sample jumps between distant parts of the 8x8 world. Settled=true
+    // permits promotions, so both directions update the working set and force
+    // the expensive governor + QVariant model path rather than timing a no-op.
+    Result active = measure("settled-pan-replan", 4.00, [&](int i) {
+        controller.updateSpatialViewport(1280, 800, 1.0,
+                                         (i & 1) ? 0.0 : -1400.0, 0.0, true);
+    });
+    active.invariantOk =
+        active.replans >= static_cast<int>(std::floor(samples * 0.95));
+
+    auto passed = [](const Result& r) {
+        return r.invariantOk && r.p95Ms <= r.limitMs;
+    };
+    auto print = [&](const Result& r) {
+        std::cout << r.scenario << ",64," << r.samples << ',' << r.replans
+                  << ',' << std::fixed << std::setprecision(4) << r.meanMs
+                  << ',' << r.p95Ms << ',' << r.maxMs << ',' << r.limitMs
+                  << ',' << (passed(r) ? "PASS" : "FAIL") << "\n";
+    };
+
+    std::cout << "vms_workspace --spatial-benchmark\n"
+                 "scenario,tiles,samples,replans,mean_ms,p95_ms,max_ms,"
+                 "p95_limit_ms,status\n";
+    print(idle);
+    print(active);
+
+    if (!idle.invariantOk)
+        std::cerr << "FAIL: identical viewport passes caused hidden replans\n";
+    if (!active.invariantOk)
+        std::cerr << "FAIL: active workload did not exercise enough replans\n";
+    if (!passed(idle) || !passed(active)) {
+        std::cerr << "FAILED: spatial controller latency regression\n";
+        return 1;
+    }
+    std::cout << "PASS: 64-tile spatial controller path stays within its "
+                 "60 Hz CPU budget\n";
+    return 0;
 }
 
 // P1-12/A0 / inc 25: headless check that the command envelope drives the REAL
@@ -471,12 +620,36 @@ int runCommandSelftest() {
     std::cout << "vms_workspace --command-selftest\n";
 
     WorkspaceController live(vms::DevBoxProfile(), 16);
-    CommandController cmd(&live, /*instant=*/nullptr, /*devices=*/nullptr);
+    vms::persist::Store commandStore;
+    check(static_cast<bool>(commandStore.open(":memory:")),
+          "open command-test recording store");
+    check(static_cast<bool>(commandStore.migrate(vms::persist::coreMigrations())),
+          "migrate command-test recording store");
+    vms::persist::SegmentIndex commandIndex(commandStore);
+    vms::persist::Segment commandSegment;
+    commandSegment.cameraId = "cam-test";
+    commandSegment.startUtc = "2026-01-01 00:00:00";
+    commandSegment.endUtc = "2026-01-01 00:00:10";
+    commandSegment.path = "command-test.mp4";
+    commandSegment.codec = "h264";
+    commandSegment.bytes = 1000;
+    std::int64_t commandSegmentId = 0;
+    check(static_cast<bool>(commandIndex.add(commandSegment, commandSegmentId)),
+          "index command-test recorded footage");
+    PlaybackController playback(&commandIndex, QStringLiteral("cam-test"));
+    playback.setRange(QStringLiteral("2026-01-01 00:00:00"),
+                      QStringLiteral("2026-01-01 00:00:10"));
+    CommandController cmd(&live, /*instant=*/nullptr, /*devices=*/nullptr,
+                          /*alarms=*/nullptr, &playback);
+    vms::persist::PremisesRepo premisesRepo(commandStore);
+    PremisesController premises(&premisesRepo);
+    cmd.setPremisesController(&premises);
 
     // Catalog + palette hints.
     const QString cat = cmd.catalogJson();
     check(cat.contains(QLatin1String("\"id\":\"workspace.focus\"")) &&
               cat.contains(QLatin1String("\"id\":\"device.remove\"")) &&
+              cat.contains(QLatin1String("\"id\":\"playback.play\"")) &&
               cat.contains(QLatin1String("\"dangerous\":true")),
           "catalog lists the native verbs and marks the dangerous one");
     check(!cmd.commandHints().isEmpty(), "palette hints populated");
@@ -498,6 +671,54 @@ int runCommandSelftest() {
     r = cmd.run(QStringLiteral("sweep off"));
     check(r.startsWith(QLatin1String("ok")) && !live.autoSweeping(),
           "'sweep off' stops the real auto sweep");
+    r = cmd.run(QStringLiteral("workspace.orientation 2 135 95"));
+    check(r.startsWith(QLatin1String("ok")) && live.tileFacing(2) == 135.0 &&
+              live.tileFov(2) == 95.0,
+          "orientation command updates the real spatial model");
+    r = cmd.invoke(QStringLiteral("premises.site"),
+                   {{QStringLiteral("id"), QStringLiteral("hq")},
+                    {QStringLiteral("name"), QStringLiteral("Headquarters")},
+                    {QStringLiteral("timezone"), QStringLiteral("Asia/Karachi")}})
+            .value(QStringLiteral("outcome")).toString();
+    check(r == QLatin1String("ok") && premises.siteId() == QLatin1String("hq"),
+          "typed premises.site configures the active site");
+    r = cmd.invoke(QStringLiteral("premises.floor"),
+                   {{QStringLiteral("id"), QStringLiteral("hq-ground")},
+                    {QStringLiteral("site"), QStringLiteral("hq")},
+                    {QStringLiteral("name"), QStringLiteral("Ground floor")},
+                    {QStringLiteral("plan"), QStringLiteral("none")},
+                    {QStringLiteral("width"), 2200.0},
+                    {QStringLiteral("height"), 1200.0}})
+            .value(QStringLiteral("outcome")).toString();
+    check(r == QLatin1String("ok") &&
+              premises.floorName() == QLatin1String("Ground floor") &&
+              premises.worldWidth() == 2200.0,
+          "typed premises.floor configures and selects the active floor");
+
+    // Inc 30: discrete Playback transport now uses the same envelope.
+    r = cmd.run(QStringLiteral("playback.play"));
+    check(r.startsWith(QLatin1String("ok")) && playback.playing(),
+          "'playback.play' drives the real transport");
+    r = cmd.run(QStringLiteral("playback.speed 2"));
+    check(r.startsWith(QLatin1String("ok")) && playback.speed() == 2.0,
+          "'playback.speed 2' sets the real rate");
+    r = cmd.run(QStringLiteral("playback.seek 0.5"));
+    check(r.startsWith(QLatin1String("ok")) &&
+              std::abs(playback.playheadFrac() - 0.5) < 0.001,
+          "'playback.seek 0.5' moves the real playhead");
+    r = cmd.run(QStringLiteral("playback.step 25"));
+    check(r.startsWith(QLatin1String("ok")) &&
+              std::abs(playback.playheadFrac() - 0.6) < 0.001,
+          "'playback.step 25' advances the real playhead");
+    r = cmd.run(QStringLiteral("playback.pause"));
+    check(r.startsWith(QLatin1String("ok")) && !playback.playing(),
+          "'playback.pause' pauses the real transport");
+    check(cmd.run(QStringLiteral("playback.seek 1"))
+              .startsWith(QLatin1String("ok")),
+          "seek can move to the honest end-of-footage boundary");
+    check(cmd.run(QStringLiteral("playback.play"))
+              .startsWith(QLatin1String("failed")),
+          "play refuses honestly when the playhead is not on footage");
 
     // Typed refusals out of the same gate.
     check(cmd.run(QStringLiteral("focus abc"))
@@ -581,7 +802,7 @@ int runAuditSelftest() {
         Store store;
         check(static_cast<bool>(store.open(dbf.toStdString())), "open store file");
         check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-        check(store.schemaVersion() == 10, "schema at v10 (audit_log)");
+        check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
         AuditRepo repo(store);
 
         WorkspaceController live(vms::DevBoxProfile(), 4);
@@ -713,6 +934,11 @@ int runCoverageSelftest() {
 
     const std::vector<MutatorSpec> declared = DeclaredMutators();
     check(declared.size() >= 30, "a declared mutator surface exists");
+    bool hasDeferred = false;
+    for (const MutatorSpec& m : declared)
+        if (m.exemption == Exemption::DeferredSlice) hasDeferred = true;
+    check(!hasDeferred,
+          "the Playback transport gap has no deferred-slice exemptions");
 
     // 1) The shipped UI is clean.
     const CoverageReport shipped = computeCoverage(declared);
@@ -1104,7 +1330,7 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 10, "schema at v10 (audit log, inc 28)");
+    check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
@@ -1652,6 +1878,8 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
     // and the persisted layout (v9) override these per tile.
     posX_.resize(count);
     posY_.resize(count);
+    facingDeg_.assign(count, 0.0);
+    fovDeg_.assign(count, 70.0);
     for (int i = 0; i < count; ++i)
         vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
 
@@ -1702,6 +1930,10 @@ void WorkspaceController::rebuildModel(bool isLayoutChange) {
                                            ? posX_[i] : 0.0);
         m.insert(QStringLiteral("py"), i < static_cast<int>(posY_.size())
                                            ? posY_[i] : 0.0);
+        m.insert(QStringLiteral("facing"),
+                 i < static_cast<int>(facingDeg_.size()) ? facingDeg_[i] : 0.0);
+        m.insert(QStringLiteral("fov"),
+                 i < static_cast<int>(fovDeg_.size()) ? fovDeg_[i] : 70.0);
         tiles_.push_back(m);
     }
 
@@ -1825,6 +2057,8 @@ void WorkspaceController::setTileCount(int count) {
     // belong to the previous layout's tiles).
     posX_.resize(count);
     posY_.resize(count);
+    facingDeg_.assign(count, 0.0);
+    fovDeg_.assign(count, 70.0);
     for (int i = 0; i < count; ++i)
         vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
 
@@ -1851,11 +2085,37 @@ void WorkspaceController::setTilePos(int id, double x, double y) {
     emit changed();
 }
 
+void WorkspaceController::setTileOrientation(int id, double facingDeg,
+                                             double fovDeg) {
+    if (id < 0 || id >= static_cast<int>(facingDeg_.size())) return;
+    facingDeg = std::fmod(facingDeg, 360.0);
+    if (facingDeg < 0.0) facingDeg += 360.0;
+    fovDeg = std::max(10.0, std::min(180.0, fovDeg));
+    if (facingDeg_[id] == facingDeg && fovDeg_[id] == fovDeg) return;
+    facingDeg_[id] = facingDeg;
+    fovDeg_[id] = fovDeg;
+    if (id < tiles_.size()) {
+        QVariantMap m = tiles_[id].toMap();
+        m.insert(QStringLiteral("facing"), facingDeg);
+        m.insert(QStringLiteral("fov"), fovDeg);
+        tiles_[id] = m;
+    }
+    emit changed();
+}
+
 double WorkspaceController::tilePosX(int id) const {
     return (id >= 0 && id < static_cast<int>(posX_.size())) ? posX_[id] : -1.0;
 }
 double WorkspaceController::tilePosY(int id) const {
     return (id >= 0 && id < static_cast<int>(posY_.size())) ? posY_[id] : -1.0;
+}
+double WorkspaceController::tileFacing(int id) const {
+    return (id >= 0 && id < static_cast<int>(facingDeg_.size()))
+               ? facingDeg_[id] : 0.0;
+}
+double WorkspaceController::tileFov(int id) const {
+    return (id >= 0 && id < static_cast<int>(fovDeg_.size()))
+               ? fovDeg_[id] : 70.0;
 }
 
 QString WorkspaceController::zoomLevelName(double zoom) const {
@@ -2110,6 +2370,8 @@ int main(int argc, char* argv[]) {
     bool playbackSelftest = false;
     bool instantSelftest = false;        // headless InstantReplayController check (inc 23)
     bool spatialSelftest = false;        // headless spatial-canvas check (inc 24)
+    bool spatialBenchmark = false;       // measured 64-tile performance gate (inc 32)
+    int spatialBenchmarkSamples = 600;
     bool spatial = false;                // start the Live tab in spatial mode
     bool commandSelftest = false;        // headless command-envelope check (inc 25)
     bool printCommands = false;          // print the machine-readable catalog
@@ -2152,6 +2414,10 @@ int main(int argc, char* argv[]) {
             instantSelftest = true;
         } else if (a == "--spatial-selftest") {
             spatialSelftest = true;
+        } else if (a == "--spatial-benchmark") {
+            spatialBenchmark = true;
+            if (i + 1 < argc && std::atoi(argv[i + 1]) > 0)
+                spatialBenchmarkSamples = std::atoi(argv[++i]);
         } else if (a == "--spatial") {
             spatial = true;
         } else if (a == "--command-selftest") {
@@ -2223,6 +2489,7 @@ int main(int argc, char* argv[]) {
                 "  --instant-selftest   headless instant-replay check (inc 23)\n"
                 "  --spatial            start the Live tab on the spatial canvas\n"
                 "  --spatial-selftest   headless spatial-canvas check (inc 24)\n"
+                "  --spatial-benchmark [N]  64-tile viewport latency gate\n"
                 "  --commands           print the machine-readable command catalog\n"
                 "  --command-selftest   headless command-envelope check (inc 25)\n"
                 "  --api-port N         serve the loopback control API (inc 26;\n"
@@ -2252,6 +2519,7 @@ int main(int argc, char* argv[]) {
     if (playbackSelftest) return runPlaybackSelftest();
     if (instantSelftest) return runInstantSelftest();
     if (spatialSelftest) return runSpatialSelftest();
+    if (spatialBenchmark) return runSpatialBenchmark(spatialBenchmarkSamples);
     if (commandSelftest) return runCommandSelftest();
     if (alarmsSelftest) return runAlarmsSelftest();
     if (auditSelftest) return runAuditSelftest();
@@ -2364,6 +2632,21 @@ int main(int argc, char* argv[]) {
             std::cout << "persist: " << dbPath << " (schema v"
                       << store.schemaVersion() << ")" << std::endl;
         }
+    }
+#endif
+
+    // inc 31 (P3-15): canonical active site/floor metadata for the spatial
+    // canvas. It shares the workspace store and seeds an explicit, honest
+    // default floor on first run.
+    QObject* premisesCtrl = nullptr;
+#ifdef VMS_WITH_PERSIST
+    std::unique_ptr<vms::persist::PremisesRepo> premisesRepo;
+    PremisesController* premises = nullptr;
+    if (persisting) {
+        premisesRepo = std::make_unique<vms::persist::PremisesRepo>(store);
+        premises = new PremisesController(premisesRepo.get(),
+                                          QStringLiteral("live"), &app);
+        premisesCtrl = premises;
     }
 #endif
 
@@ -2531,7 +2814,8 @@ int main(int argc, char* argv[]) {
     CommandController* commander = nullptr;
 #ifdef VMS_WITH_PERSIST
     commander = new CommandController(&liveController, instant, devices,
-                                      alarmsCtrl, &app);
+                                      alarmsCtrl, playback, &app);
+    commander->setPremisesController(premises);
     // inc 28 (P1-06): durable audit — from here on, every envelope attempt
     // (palette, API, panel; refusals included) also lands one hash-chained,
     // append-only row in the standalone store. Read it back: --audit-dump.
@@ -2593,6 +2877,8 @@ int main(int argc, char* argv[]) {
     // smoke exercise the spatial bindings).
     engine.rootContext()->setContextProperty(QStringLiteral("spatialDefault"),
                                               spatial);
+    engine.rootContext()->setContextProperty(QStringLiteral("premises"),
+                                              premisesCtrl);
     // inc 25: the command envelope (null on a build without persistence); the
     // palette QML guards every use with `commander &&`.
     engine.rootContext()->setContextProperty(QStringLiteral("commander"),
@@ -2600,10 +2886,23 @@ int main(int argc, char* argv[]) {
     // inc 27: the alarm surface (always present; empty until events arrive).
     engine.rootContext()->setContextProperty(QStringLiteral("alarmsCtrl"),
                                               alarmsCtrl);
+    QElapsedTimer qmlLoadTimer;
+    qmlLoadTimer.start();
     engine.load(QUrl(QStringLiteral("qrc:/Workspace.qml")));
+    const qint64 qmlLoadMs = qmlLoadTimer.elapsed();
     if (engine.rootObjects().isEmpty()) {
         std::cerr << "Failed to load qrc:/Workspace.qml\n";
         return 1;
+    }
+    // inc 33 media smoke: fit-to-view can legitimately choose Wing for 16
+    // tiles, where video is intentionally absent. Pin the test scene to Room so
+    // it exercises shared-frame consumers rather than weakening the UI policy.
+    if (smokeMs > 0 && video && spatial) {
+        engine.rootObjects().first()->setProperty("spatialMode", true);
+        if (QObject* spatialObject = engine.rootObjects().first()->findChild<QObject*>(
+                QStringLiteral("spatialView")))
+            spatialObject->setProperty("zoom", 1.0);
+        QCoreApplication::processEvents();
     }
 
     bool videoRunning = false;
@@ -2864,13 +3163,14 @@ int main(int argc, char* argv[]) {
     // The Live instance runs the automatic focus sweep; in --video the planChanged
     // connection above makes the picture follow it. A tile click stops the timer
     // (the operator has taken over the working set). Playback is not swept — it is
-    // paused footage conceptually (and, for now, awaiting the recording backend).
+    // driven by its recording-backed transport instead of the Live focus sweep.
     liveController.startAutoSweep(sweepIntervalSec * 1000);
 
     // Headless smoke check: load the whole scene (so every QML binding evaluates
     // and any error/warning surfaces), run briefly, then quit. Used with
     // QT_QPA_PLATFORM=offscreen to build-verify the QML without a display.
     if (smokeMs > 0) {
+        std::cout << "smoke: qml load " << qmlLoadMs << "ms" << std::endl;
         std::cout << "smoke: running " << smokeMs << "ms then quitting" << std::endl;
         QTimer::singleShot(smokeMs, &app, &QGuiApplication::quit);
 #if defined(VMS_WITH_GSTREAMER) && defined(VMS_WITH_PERSIST)
@@ -2908,6 +3208,39 @@ int main(int argc, char* argv[]) {
     }
 
     const int rc = app.exec();
+    bool spatialVideoSmokeFailed = false;
+#ifdef VMS_WITH_GSTREAMER
+    if (smokeMs > 0 && video && spatial && !engine.rootObjects().isEmpty()) {
+        QVariant result;
+        bool invoked = false;
+        if (QObject* spatialObject = engine.rootObjects().first()->findChild<QObject*>(
+                QStringLiteral("spatialView"))) {
+            invoked = QMetaObject::invokeMethod(
+                spatialObject, "videoStats", Q_RETURN_ARG(QVariant, result));
+        }
+        const QVariantMap stats = result.toMap();
+        const int delegates = stats.value(QStringLiteral("delegates")).toInt();
+        const int eligible = stats.value(QStringLiteral("eligible")).toInt();
+        const int consumers = stats.value(QStringLiteral("consumers")).toInt();
+        const int receiving = stats.value(QStringLiteral("receiving")).toInt();
+        const qulonglong delivered =
+            stats.value(QStringLiteral("delivered")).toULongLong();
+        const int unique = stats.value(QStringLiteral("unique")).toInt();
+        const bool cropsValid =
+            stats.value(QStringLiteral("cropsValid")).toBool();
+        std::cout << "smoke: spatial video delegates=" << delegates
+                  << " eligible=" << eligible << " consumers=" << consumers
+                  << " receiving=" << receiving
+                  << " delivered=" << delivered << " unique-crops=" << unique
+                  << std::endl;
+        spatialVideoSmokeFailed =
+            !invoked || delegates == 0 || consumers == 0 || consumers != eligible ||
+            receiving != consumers || unique != consumers || !cropsValid;
+        if (spatialVideoSmokeFailed)
+            std::cerr << "smoke: FAIL spatial live-frame fan-out/crop mapping"
+                      << std::endl;
+    }
+#endif
 #ifdef VMS_WITH_GSTREAMER
     delete grid;
 #endif
@@ -2915,5 +3248,5 @@ int main(int argc, char* argv[]) {
     delete pbPipe;
     delete irPipe;
 #endif
-    return rc;
+    return spatialVideoSmokeFailed ? 1 : rc;
 }

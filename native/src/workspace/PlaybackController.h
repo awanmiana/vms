@@ -12,10 +12,10 @@
 //   - a playhead (absolute time + fraction) the operator drags to scrub;
 //   - which recorded file (and offset) backs the current playhead, or none when
 //     the playhead sits in a gap.
-// Transport state (playing / speed) is held here; driving an actual media
-// pipeline from it (playbin seek/speed/frame-step over the recorded file) is the
-// windowed slice 7c-2. This controller is pure Qt + the pure SegmentIndex, so it
-// is verified headlessly (--playback-selftest) against real recorded segments.
+// Transport state (playing / speed) is held here; PlaybackPipeline consumes it
+// to seek, change rate, and roll across recorded files (native slice 7c-3).
+// This controller stays pure Qt + SegmentIndex, so it is verified headlessly
+// (--playback-selftest) against real recorded segments.
 
 #include <QObject>
 #include <QString>

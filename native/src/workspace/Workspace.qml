@@ -397,9 +397,9 @@ Window {
                 anchors.fill: parent
                 // The pipeline follows the Live instance; on the Playback tab
                 // there is no recorded footage yet, so the video is hidden.
-                // Hidden on the spatial canvas too: the d3d11 compositor's
-                // fixed grid no longer matches the free tile positions (video
-                // under the spatial tiles is a later media slice).
+                // Hidden as a full composite on the spatial canvas. Room-level
+                // tiles subscribe to and crop this same frame below; no second
+                // decode/compositor session is opened.
                 visible: videoActive && root.tabIndex === 0 && !root.spatialMode
             }
 
@@ -531,6 +531,7 @@ Window {
             // (persisted); a click focuses, exactly like the grid.
             Item {
                 id: spatialView
+                objectName: "spatialView"
                 visible: root.spatialMode && root.tabIndex === 0
                 anchors.fill: parent
                 clip: true
@@ -573,6 +574,32 @@ Window {
                     offY = (height - (minY + maxY) * zoom) / 2
                     markUnsettled()
                 }
+                function videoStats() {
+                    var consumers = 0, receiving = 0, delivered = 0
+                    var eligible = 0
+                    var unique = 0, ids = ({})
+                    var cropsValid = true
+                    for (var i = 0; i < spatialTileRepeater.count; i++) {
+                        var tile = spatialTileRepeater.itemAt(i)
+                        if (tile && (tile.honestState === "live"
+                                     || tile.honestState === "degraded"))
+                            eligible++
+                        var consumer = tile ? tile.videoConsumer : null
+                        if (!consumer) continue
+                        consumers++
+                        if (consumer.frameCount > 0) receiving++
+                        delivered += consumer.frameCount
+                        var id = consumer.sourceIndex
+                        if (id < 0 || id >= consumer.sourceColumns * consumer.sourceRows)
+                            cropsValid = false
+                        if (!ids[id]) { ids[id] = true; unique++ }
+                    }
+                    return { "delegates": spatialTileRepeater.count,
+                             "eligible": eligible,
+                             "consumers": consumers, "receiving": receiving,
+                             "delivered": delivered, "unique": unique,
+                             "cropsValid": cropsValid }
+                }
                 onVisibleChanged: if (visible) fitToView()
                 onWidthChanged: if (visible) markUnsettled()
                 onHeightChanged: if (visible) markUnsettled()
@@ -604,11 +631,53 @@ Window {
                     }
                 }
 
+                // inc 31: the active floor is real persisted premises metadata,
+                // not a decorative hard-coded backdrop. The URI may be empty;
+                // in that case the named blank floor is shown honestly.
+                Item {
+                    id: floorUnderlay
+                    z: -2
+                    x: spatialView.offX
+                    y: spatialView.offY
+                    width: ((typeof premises !== "undefined") && premises
+                            ? premises.worldWidth : 1600) * spatialView.zoom
+                    height: ((typeof premises !== "undefined") && premises
+                             ? premises.worldHeight : 900) * spatialView.zoom
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#111722"
+                        border.color: "#354155"
+                        border.width: Math.max(1, spatialView.zoom)
+                    }
+                    Image {
+                        anchors.fill: parent
+                        source: ((typeof premises !== "undefined") && premises)
+                                ? premises.planUri : ""
+                        visible: source.toString().length > 0
+                        fillMode: Image.Stretch
+                        asynchronous: true
+                    }
+                    Text {
+                        anchors.centerIn: parent
+                        visible: !((typeof premises !== "undefined") && premises
+                                   && premises.planUri.length > 0)
+                        text: ((typeof premises !== "undefined") && premises)
+                              ? premises.floorName + " · no plan image"
+                              : "No premises store"
+                        color: "#536078"
+                        font.pixelSize: Math.max(11, 18 * spatialView.zoom)
+                    }
+                }
+
                 Repeater {
+                    id: spatialTileRepeater
                     // Bound only while visible so the hidden canvas costs nothing.
                     model: spatialView.visible ? governor.tiles : []
                     delegate: Rectangle {
                         id: sTile
+                        property var videoConsumer: spatialVideoLoader.item
+                        property string honestState: modelData.state
                         width: 320 * spatialView.zoom
                         height: 190 * spatialView.zoom
                         x: modelData.px * spatialView.zoom + spatialView.offX - width / 2
@@ -617,6 +686,69 @@ Window {
                         color: "#171a21"
                         border.color: root.stateColor(modelData.state)
                         border.width: modelData.focused ? 3 : 1.5
+
+                        // inc 33: progressive map media. Site stays pins, wing
+                        // stays state cards, and room zoom reuses the one governed
+                        // composite frame. Loader means non-live/offscreen/zoomed-
+                        // out tiles have no texture consumer at all.
+                        Loader {
+                            id: spatialVideoLoader
+                            objectName: "spatialVideoLoader"
+                            anchors.fill: parent
+                            anchors.margins: sTile.border.width
+                            active: videoActive && spatialView.zoom >= 0.9
+                                    && (modelData.state === "live"
+                                        || modelData.state === "degraded")
+                            sourceComponent: VideoItem {
+                                objectName: "spatialVideoOut"
+                                anchors.fill: parent
+                                frameSource: videoLayer
+                                sourceIndex: modelData.id
+                                sourceColumns: gridArea.cols
+                                sourceRows: gridArea.rowsN
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: sTile.border.width
+                            visible: spatialVideoLoader.active
+                            color: Qt.rgba(0.04, 0.05, 0.07, 0.18)
+                        }
+
+                        // Camera coverage is metadata only: this wedge never
+                        // changes viewport tiering or implies decoded video.
+                        Canvas {
+                            id: fovWedge
+                            z: -1
+                            anchors.centerIn: parent
+                            width: 520 * spatialView.zoom
+                            height: 520 * spatialView.zoom
+                            visible: spatialView.zoom > 0.28
+                                     && modelData.state !== "paused-offscreen"
+                            rotation: modelData.facing
+                            property real aperture: modelData.fov
+                            onApertureChanged: requestPaint()
+                            onWidthChanged: requestPaint()
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                var cx = width / 2, cy = height / 2
+                                var r = Math.min(width, height) * 0.48
+                                var half = aperture * Math.PI / 360
+                                ctx.beginPath()
+                                ctx.moveTo(cx, cy)
+                                ctx.arc(cx, cy, r, -half, half, false)
+                                ctx.closePath()
+                                ctx.fillStyle = modelData.focused
+                                                ? "rgba(82,168,255,0.20)"
+                                                : "rgba(82,168,255,0.10)"
+                                ctx.fill()
+                                ctx.strokeStyle = "rgba(82,168,255,0.55)"
+                                ctx.lineWidth = Math.max(1, spatialView.zoom)
+                                ctx.stroke()
+                            }
+                        }
 
                         // Honest chrome, scaled with the zoom: camera id, the
                         // prototype's spatial tier label, and the true state.
@@ -644,6 +776,14 @@ Window {
                                 text: modelData.stateText
                                 color: "#8a93a3"
                                 font.pixelSize: Math.max(8, 10 * spatialView.zoom)
+                            }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: spatialView.zoom > 0.5
+                                text: Math.round(modelData.facing) + "° · "
+                                      + Math.round(modelData.fov) + "° FOV"
+                                color: "#6daee8"
+                                font.pixelSize: Math.max(8, 9 * spatialView.zoom)
                             }
                         }
                         // Zoomed far out (site level) a tile is just a dot-like
@@ -697,6 +837,27 @@ Window {
                     MouseArea {
                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                         onClicked: spatialView.fitToView()
+                    }
+                }
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: 14
+                    width: premisesText.width + 22
+                    height: 42
+                    radius: 6
+                    color: "#1a1f28"
+                    border.color: "#333c4c"
+                    Text {
+                        id: premisesText
+                        anchors.centerIn: parent
+                        text: ((typeof premises !== "undefined") && premises)
+                              ? premises.siteName + " / " + premises.floorName
+                                + "\n" + premises.timezone
+                              : "Premises unavailable"
+                        color: "#cbd3df"
+                        font.pixelSize: 11
                     }
                 }
             }
@@ -982,6 +1143,9 @@ Window {
                             onPositionChanged: (mouse) => { if (replayOverlay.ipb)
                                 replayOverlay.ipb.seekFrac(Math.max(0, Math.min(1,
                                     mouse.x / replayTrack.width))) }
+                            onReleased: root.cmd("replay.seek",
+                                { "position": Math.max(0, Math.min(1,
+                                    mouse.x / replayTrack.width)) })
                         }
                     }
 
@@ -1018,13 +1182,14 @@ Window {
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         if (!replayOverlay.ipb) return
-                                        if (modelData.act === 0) replayOverlay.ipb.seekFrac(0)
+                                        if (modelData.act === 0)
+                                            root.cmd("replay.seek", { "position": 0 })
                                         else if (modelData.act === 1)
                                             replayOverlay.ipb.playing
-                                                ? replayOverlay.ipb.pause()
-                                                : replayOverlay.ipb.play()
+                                                ? root.cmd("replay.pause", {})
+                                                : root.cmd("replay.play", {})
                                         else if (modelData.act === 2)
-                                            replayOverlay.ipb.setSpeed(modelData.v)
+                                            root.cmd("replay.speed", { "rate": modelData.v })
                                     }
                                 }
                             }
@@ -1494,6 +1659,9 @@ Window {
                             transport.pb.seekFrac(mouse.x / track.width) }
                         onPositionChanged: (mouse) => { if (transport.pb)
                             transport.pb.seekFrac(Math.max(0, Math.min(1, mouse.x / track.width))) }
+                        onReleased: root.cmd("playback.seek",
+                            { "position": Math.max(0, Math.min(1,
+                                mouse.x / track.width)) })
                     }
                 }
 
@@ -1536,12 +1704,16 @@ Window {
                                 enabled: transport.pb !== null
                                 onClicked: {
                                     if (!transport.pb) return
-                                    if (index === 0) transport.pb.seekFrac(0)
-                                    else if (index === 1) transport.pb.stepFrames(-25)
+                                    if (index === 0)
+                                        root.cmd("playback.seek", { "position": 0 })
+                                    else if (index === 1)
+                                        root.cmd("playback.step", { "frames": -25 })
                                     else if (index === 2) transport.pb.playing
-                                                          ? transport.pb.pause() : transport.pb.play()
-                                    else if (index === 3) transport.pb.stepFrames(25)
-                                    else transport.pb.seekFrac(1)
+                                                          ? root.cmd("playback.pause", {})
+                                                          : root.cmd("playback.play", {})
+                                    else if (index === 3)
+                                        root.cmd("playback.step", { "frames": 25 })
+                                    else root.cmd("playback.seek", { "position": 1 })
                                 }
                             }
                         }
@@ -1564,7 +1736,8 @@ Window {
                             MouseArea {
                                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                 enabled: transport.pb !== null
-                                onClicked: if (transport.pb) transport.pb.setSpeed(modelData.v)
+                                onClicked: if (transport.pb)
+                                    root.cmd("playback.speed", { "rate": modelData.v })
                             }
                         }
                     }

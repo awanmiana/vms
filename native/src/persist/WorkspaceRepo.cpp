@@ -24,10 +24,12 @@ Error WorkspaceRepo::save(const std::string& instance,
     for (const TilePref& t : state.tiles) {
         if (Error e = store_.exec(
                 "INSERT INTO workspace_tile(instance, tile_id, desired_tier, "
-                "priority, pos_x, pos_y) VALUES(?, ?, ?, ?, ?, ?);",
+                "priority, pos_x, pos_y, facing_deg, fov_deg) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?);",
                 {instance, static_cast<std::int64_t>(t.id),
                  static_cast<std::int64_t>(t.desiredTier),
-                 static_cast<std::int64_t>(t.priority), t.posX, t.posY});
+                 static_cast<std::int64_t>(t.priority), t.posX, t.posY,
+                 t.facingDeg, t.fovDeg});
             !e)
             return e;
     }
@@ -52,7 +54,8 @@ Error WorkspaceRepo::load(const std::string& instance, InstanceState& out,
 
     Result rt;
     if (Error e = store_.query(
-            "SELECT tile_id, desired_tier, priority, pos_x, pos_y "
+            "SELECT tile_id, desired_tier, priority, pos_x, pos_y, "
+            "facing_deg, fov_deg "
             "FROM workspace_tile WHERE instance=? ORDER BY tile_id;",
             {instance}, rt);
         !e)
@@ -73,6 +76,8 @@ Error WorkspaceRepo::load(const std::string& instance, InstanceState& out,
         t.priority = static_cast<int>(std::get<std::int64_t>(row[2]));
         t.posX = asDouble(row[3]);
         t.posY = asDouble(row[4]);
+        t.facingDeg = asDouble(row[5]);
+        t.fovDeg = asDouble(row[6]);
         out.tiles.push_back(t);
     }
     return Error::success();

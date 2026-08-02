@@ -9,6 +9,8 @@
 #include "AlarmController.h"
 #include "DeviceController.h"
 #include "InstantReplayController.h"
+#include "PlaybackController.h"
+#include "PremisesController.h"
 #include "WorkspaceController.h"
 
 using vms::command::Args;
@@ -27,6 +29,12 @@ int argInt(const Args& a, const char* name) {
 }
 std::string argStr(const Args& a, const char* name) {
     return std::get<std::string>(a.at(name));
+}
+double argNumber(const Args& a, const char* name) {
+    const vms::command::Value& v = a.at(name);
+    return std::holds_alternative<double>(v)
+               ? std::get<double>(v)
+               : static_cast<double>(std::get<std::int64_t>(v));
 }
 
 CommandResult ok(const std::string& msg) {
@@ -57,9 +65,11 @@ vms::persist::HashFn Sha256HexHash() {
 CommandController::CommandController(WorkspaceController* live,
                                      InstantReplayController* instant,
                                      DeviceController* devices,
-                                     AlarmController* alarms, QObject* parent)
-    : QObject(parent), live_(live), instant_(instant), devices_(devices),
-      alarms_(alarms) {
+                                     AlarmController* alarms,
+                                     PlaybackController* playback,
+                                     QObject* parent)
+    : QObject(parent), live_(live), instant_(instant), playback_(playback),
+      devices_(devices), alarms_(alarms) {
     registerCommands();
 
     // P0-01A Administrator session: grant every capability the catalog names.
@@ -200,6 +210,53 @@ void CommandController::registerCommands() {
             emit spatialModeRequested(on);
             return ok(std::string("spatial canvas ") + (on ? "on" : "off"));
         });
+    registry_.add(
+        {"workspace.orientation", "Set camera facing and field of view on the floor",
+         "workspace.control", false,
+         {{"tile", ParamType::Int, true, 0, 4095},
+          {"facing", ParamType::Number, true, 0.0, 359.999},
+          {"fov", ParamType::Number, true, 10.0, 180.0}}},
+        [this](const Args& a) {
+            if (!live_) return failed("no live workspace");
+            const int tile = argInt(a, "tile");
+            if (tile >= live_->tileCount()) return failed("no such tile");
+            live_->setTileOrientation(tile, argNumber(a, "facing"),
+                                      argNumber(a, "fov"));
+            return ok("tile " + std::to_string(tile) + " orientation set");
+        });
+    registry_.add(
+        {"premises.site", "Configure and select the active site",
+         "premises.manage", false,
+         {{"id", ParamType::String, true}, {"name", ParamType::String, true},
+          {"timezone", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->configureSite(
+                QString::fromStdString(argStr(a, "id")),
+                QString::fromStdString(argStr(a, "name")),
+                QString::fromStdString(argStr(a, "timezone")));
+            return err.isEmpty() ? ok("active site configured")
+                                 : failed(err.toStdString());
+        });
+    registry_.add(
+        {"premises.floor", "Configure and select a floor and optional plan URI",
+         "premises.manage", false,
+         {{"id", ParamType::String, true}, {"site", ParamType::String, true},
+          {"name", ParamType::String, true}, {"plan", ParamType::String, true},
+          {"width", ParamType::Number, true, 100.0, 100000.0},
+          {"height", ParamType::Number, true, 100.0, 100000.0}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            QString plan = QString::fromStdString(argStr(a, "plan"));
+            if (plan == QLatin1String("none")) plan.clear();
+            const QString err = premises_->configureFloor(
+                QString::fromStdString(argStr(a, "id")),
+                QString::fromStdString(argStr(a, "site")),
+                QString::fromStdString(argStr(a, "name")), plan,
+                argNumber(a, "width"), argNumber(a, "height"));
+            return err.isEmpty() ? ok("active floor configured")
+                                 : failed(err.toStdString());
+        });
 
     // --- Instant replay (P3-05) — honest refusal without a recording DB -----
     registry_.add(
@@ -222,6 +279,108 @@ void CommandController::registerCommands() {
             if (!instant_) return failed("no recording DB attached (--rec-db)");
             instant_->returnToLive();
             return ok("returned to live");
+        });
+
+    // --- Recorded playback transport (inc 30, P1-13) -----------------------
+    // These commands close the last explicitly deferred discrete UI-mutation
+    // gap. The Playback tab, instant-replay overlay, palette, and HTTP API now
+    // share the same capability check and audit trail. Drag frames remain a
+    // declared continuous-input exemption; QML commits the final seek here.
+    registry_.add(
+        {"playback.play", "Play the selected recorded footage",
+         "playback.review", false, {}},
+        [this](const Args&) {
+            if (!playback_) return failed("no recording DB attached (--rec-db)");
+            if (!playback_->onFootage())
+                return failed("no recorded footage at the playback position");
+            playback_->play();
+            return ok("playback playing");
+        });
+    registry_.add(
+        {"playback.pause", "Pause recorded playback",
+         "playback.review", false, {}},
+        [this](const Args&) {
+            if (!playback_) return failed("no recording DB attached (--rec-db)");
+            playback_->pause();
+            return ok("playback paused");
+        });
+    registry_.add(
+        {"playback.speed", "Set recorded playback speed",
+         "playback.review", false,
+         {{"rate", ParamType::Number, true, 0.25, 16.0}}},
+        [this](const Args& a) {
+            if (!playback_) return failed("no recording DB attached (--rec-db)");
+            const double rate = argNumber(a, "rate");
+            playback_->setSpeed(rate);
+            return ok("playback speed -> " + std::to_string(rate) + "x");
+        });
+    registry_.add(
+        {"playback.step", "Step recorded playback by an approximate frame count",
+         "playback.review", false,
+         {{"frames", ParamType::Int, true, -10000, 10000}}},
+        [this](const Args& a) {
+            if (!playback_) return failed("no recording DB attached (--rec-db)");
+            const int frames = argInt(a, "frames");
+            playback_->stepFrames(frames);
+            return ok("playback stepped " + std::to_string(frames) + " frame(s)");
+        });
+    registry_.add(
+        {"playback.seek", "Seek recorded playback to a fraction of its range",
+         "playback.review", false,
+         {{"position", ParamType::Number, true, 0.0, 1.0}}},
+        [this](const Args& a) {
+            if (!playback_) return failed("no recording DB attached (--rec-db)");
+            const double position = argNumber(a, "position");
+            playback_->seekFrac(position);
+            return ok("playback seek -> " + std::to_string(position));
+        });
+
+    auto instantPb = [this]() -> PlaybackController* {
+        return instant_ && instant_->active() && instant_->available()
+                   ? instant_->pb()
+                   : nullptr;
+    };
+    registry_.add(
+        {"replay.play", "Play the active instant replay",
+         "playback.review", false, {}},
+        [instantPb](const Args&) {
+            PlaybackController* pb = instantPb();
+            if (!pb) return failed("no active instant replay with footage");
+            if (!pb->onFootage())
+                return failed("no recorded footage at the replay position");
+            pb->play();
+            return ok("instant replay playing");
+        });
+    registry_.add(
+        {"replay.pause", "Pause the active instant replay",
+         "playback.review", false, {}},
+        [instantPb](const Args&) {
+            PlaybackController* pb = instantPb();
+            if (!pb) return failed("no active instant replay with footage");
+            pb->pause();
+            return ok("instant replay paused");
+        });
+    registry_.add(
+        {"replay.speed", "Set the active instant-replay speed",
+         "playback.review", false,
+         {{"rate", ParamType::Number, true, 0.25, 16.0}}},
+        [instantPb](const Args& a) {
+            PlaybackController* pb = instantPb();
+            if (!pb) return failed("no active instant replay with footage");
+            const double rate = argNumber(a, "rate");
+            pb->setSpeed(rate);
+            return ok("instant replay speed -> " + std::to_string(rate) + "x");
+        });
+    registry_.add(
+        {"replay.seek", "Seek the active instant replay to a fraction of its range",
+         "playback.review", false,
+         {{"position", ParamType::Number, true, 0.0, 1.0}}},
+        [instantPb](const Args& a) {
+            PlaybackController* pb = instantPb();
+            if (!pb) return failed("no active instant replay with footage");
+            const double position = argNumber(a, "position");
+            pb->seekFrac(position);
+            return ok("instant replay seek -> " + std::to_string(position));
         });
 
     // --- Device management (P2) — device.remove is the dangerous exemplar ---

@@ -192,6 +192,7 @@ if(WIN32)
         src/persist/Store.cpp
         src/persist/Schema.cpp
         src/persist/WorkspaceRepo.cpp
+        src/persist/PremisesRepo.cpp
         src/persist/SecretStore.cpp
         src/persist/CredentialRepo.cpp
         src/persist/SegmentIndex.cpp
@@ -366,7 +367,9 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # P1-12/A0 inc 25: the command envelope's Qt bridge + palette.
         target_sources(vms_workspace PRIVATE
             src/workspace/CommandController.cpp
-            src/workspace/CommandController.h)
+            src/workspace/CommandController.h
+            src/workspace/PremisesController.cpp
+            src/workspace/PremisesController.h)
         target_link_libraries(vms_workspace PRIVATE vms_command)
         # P6-03/P6-07 inc 27: the alarm surface (engine bridge + health feed).
         target_sources(vms_workspace PRIVATE

@@ -61,26 +61,20 @@ std::vector<MutatorSpec> DeclaredMutators() {
         {"ir", "returnToLive"},
 
         // --- Playback transport (PlaybackController, reached in QML through
-        // the `pb` / `ipb` property aliases). Declared so the gap is visible:
-        // its commands are a later slice, not a silent bypass.
-        {"pb", "play", Exemption::DeferredSlice,
-         "Playback-tab transport commands are a later P1-13 slice"},
-        {"pb", "pause", Exemption::DeferredSlice,
-         "Playback-tab transport commands are a later P1-13 slice"},
-        {"pb", "setSpeed", Exemption::DeferredSlice,
-         "Playback-tab transport commands are a later P1-13 slice"},
-        {"pb", "stepFrames", Exemption::DeferredSlice,
-         "Playback-tab transport commands are a later P1-13 slice"},
+        // the `pb` / `ipb` property aliases). Discrete controls must route
+        // through inc-30 commands. Only in-progress scrub frames are exempt;
+        // QML commits the final seek through playback.seek / replay.seek.
+        {"pb", "play"},
+        {"pb", "pause"},
+        {"pb", "setSpeed"},
+        {"pb", "stepFrames"},
         {"pb", "seekFrac", Exemption::ContinuousTransport,
-         "scrub frames while dragging the playhead; persists nothing"},
-        {"ipb", "play", Exemption::DeferredSlice,
-         "instant-replay overlay transport is a later P1-13 slice"},
-        {"ipb", "pause", Exemption::DeferredSlice,
-         "instant-replay overlay transport is a later P1-13 slice"},
-        {"ipb", "setSpeed", Exemption::DeferredSlice,
-         "instant-replay overlay transport is a later P1-13 slice"},
+         "in-progress scrub frames; release commits playback.seek through the envelope"},
+        {"ipb", "play"},
+        {"ipb", "pause"},
+        {"ipb", "setSpeed"},
         {"ipb", "seekFrac", Exemption::ContinuousTransport,
-         "scrub frames while dragging the playhead; persists nothing"},
+         "in-progress scrub frames; release commits replay.seek through the envelope"},
     };
 }
 

@@ -1,0 +1,52 @@
+Native inc 14+15: onboarding UI + NVR multi-channel (P2-01/02/05/13)
+
+The operator-facing device-management surface (owner item #3, sequenced
+after ONVIF and device health), plus the recorder onboarding workflow that
+completes P2-01. Landed as one commit because both are the same cohesive
+feature — the Devices tab — and were built back-to-back without an
+intervening commit.
+
+inc 14 — Onboarding UI:
+  - DeviceController (src/workspace/, Qt) bridges the two pure cores to QML,
+    mirroring PlaybackController: DeviceRepo (atomic onboard / idempotent
+    channel sync / remove over the P0-04 store + DPAPI SecretStore under the
+    broker's credential_ref scheme; new listDevices() accessor) and
+    HealthMonitor (honest per-device reach/stream/storage -> derived state,
+    exception raise -> acknowledge -> auto-clear, maintenance windows).
+  - A Devices tab in vms_workspace (DevicesView.qml): device list with honest
+    health badges (green Online / amber Degraded / red Offline / slate
+    Unsupported / grey Unknown-until-observed), an onboard form, and
+    per-device acknowledge / maintenance / remove. The credential secret is
+    only ever passed into onboard() — never read back or shown.
+  - Health is Unknown-until-observed; real observations from broker connect
+    outcomes + ONVIF polling are the live-blocked remainder (the
+    reportReach/Stream/Storage methods are the wiring points).
+
+inc 15 — NVR/hybrid multi-channel onboarding:
+  - Schema v5 adds devices.kind (camera | nvr | dvr | hybrid), a forward-only
+    additive migration. DeviceOnboard/DeviceSummary carry kind.
+  - DeviceController::onboardRecorder expands a channel count + per-channel
+    RTSP URL templates ({ch} -> the 1-based channel number) into N channels
+    with stable ids (<id>-ch<N>), onboarded atomically with the device, its
+    default group, and its credential.
+  - The form gains a device-kind selector (recorder kinds show channel-count
+    + template fields); cards show kind + channel count.
+
+Verification (dev box):
+  - vms_workspace --devices-selftest: 24 checks green (onboard via the
+    controller, credential stored only via the SecretStore under the broker
+    ref, Unknown-until-observed, Offline -> exception -> needs-attention,
+    acknowledge silences but keeps the exception, recovery auto-clears,
+    remove deletes the secret; schema v5, recorder onboard, kind persisted,
+    N channels expanded with stable ids, default group reconciled to all N,
+    idempotent re-onboard grows the channel set).
+  - offscreen QT_QPA_PLATFORM=offscreen --smoke-ms --devices-demo: whole
+    scene + Devices tab bindings load with no QML errors/warnings (5 cameras
+    + 1 NVR of 8 channels).
+  - all 9 CTest suites green (dbtest schema pinned to v5; device_selfcheck
+    unaffected).
+
+On-screen windowed view, the live health feed, and ONVIF GetProfiles as the
+channel source remain (live-blocked / later slices).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

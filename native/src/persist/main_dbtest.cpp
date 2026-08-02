@@ -6,6 +6,7 @@
 #include "persist/Schema.h"
 #include "persist/Store.h"
 #include "persist/WorkspaceRepo.h"
+#include "persist/PremisesRepo.h"
 
 #include <filesystem>
 #include <iostream>
@@ -51,7 +52,7 @@ int main() {
         check(static_cast<bool>(s.open(dbFile)), "open database file");
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "apply canonical migrations");
-        check(s.schemaVersion() == 10, "schema at version 10");
+        check(s.schemaVersion() == 11, "schema at version 11");
 
         // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
@@ -84,7 +85,7 @@ int main() {
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 10, "schema still at version 10 after reopen");
+        check(s.schemaVersion() == 11, "schema still at version 11 after reopen");
         check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
         check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
@@ -92,8 +93,8 @@ int main() {
 
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 10,
-              "exactly ten migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 11,
+              "exactly eleven migrations recorded (not duplicated)");
 
         {
             Store::Tx tx(s);
@@ -113,8 +114,20 @@ int main() {
         in.tileCount = 9;
         // tile0 Main/High at a dragged spatial position (v9); tile5 Thumb/Med
         // with the -1 "unset" default (falls back to the grid placement).
-        in.tiles = {TilePref{0, 3, 3, 512.5, 380.0}, TilePref{5, 1, 2}};
+        in.tiles = {TilePref{0, 3, 3, 512.5, 380.0, 135.0, 92.0},
+                    TilePref{5, 1, 2}};
         check(static_cast<bool>(repo.save("live", in)), "save workspace layout");
+
+        PremisesRepo premises(s);
+        check(static_cast<bool>(premises.ensureDefault("live")),
+              "seed default site and floor");
+        check(static_cast<bool>(premises.configureSite(
+                  "live", "hq", "Headquarters", "Asia/Karachi")),
+              "configure active site");
+        check(static_cast<bool>(premises.configureFloor(
+                  "live", "hq-1", "hq", "Ground floor",
+                  "file:///plans/hq-ground.png", 2400.0, 1400.0)),
+              "configure active floor and plan metadata");
     }
     {
         Store s;
@@ -132,6 +145,19 @@ int main() {
         check(out.tiles.size() == 2 && out.tiles[0].posX == 512.5 &&
                   out.tiles[0].posY == 380.0 && out.tiles[1].posX == -1.0,
               "restored spatial positions (dragged + unset default)");
+        check(out.tiles.size() == 2 && out.tiles[0].facingDeg == 135.0 &&
+                  out.tiles[0].fovDeg == 92.0 && out.tiles[1].fovDeg == 70.0,
+              "restored camera facing/FOV (custom + defaults)");
+
+        PremisesRepo premises(s);
+        PremisesState p;
+        bool premisesFound = false;
+        check(static_cast<bool>(premises.loadActive("live", p, premisesFound)) &&
+                  premisesFound && p.siteId == "hq" && p.siteName == "Headquarters" &&
+                  p.timezone == "Asia/Karachi" && p.floorId == "hq-1" &&
+                  p.planUri == "file:///plans/hq-ground.png" &&
+                  p.worldWidth == 2400.0 && p.worldHeight == 1400.0,
+              "site/floor selection and plan metadata survive reopen");
 
         // save again (atomic replace) — still one instance row, new tiles.
         InstanceState in2;

@@ -275,6 +275,43 @@ out of scope here — that is P2-05; this step only wires operator-provided URLs
 Still open: live-camera confirmation of the above, honest per-tile UI state, seamless live apply, and
 the true low-end i5 calibration.
 
+## Spatial viewport/controller latency (P3-15 increment 32) — 2026-08-01
+
+`vms_workspace --spatial-benchmark` measures the shipped 64-tile controller
+path synchronously: zone classification → `GovernorSession` update → QVariant
+model rebuild → Qt signals. The deterministic wrapper supplies the desktop
+runtime paths from a normal PowerShell:
+
+```powershell
+cd C:\Users\zubair\vms\native\scripts
+.\spatial-performance.ps1 -Samples 2000
+.\spatial-performance.ps1 -BuildDir ..\out\perf-release -Samples 5000
+```
+
+Targets are p95 <= 0.50 ms for an identical/no-change viewport and <= 4.00 ms
+for a settled pan that crosses zones and forces the governor/model path. The
+active limit reserves at least 12.67 ms of a 16.67 ms 60 Hz frame for QML,
+rendering, input, and OS scheduling.
+
+Dev box: RTX 3050 / auto H.265 hardware profile, Windows, Qt 6.11.1, MSVC 19.50.
+
+| build / scenario | samples | replans | mean ms | p95 ms | max ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| Debug / idle no-change | 2,000 | 0 | 0.0025 | 0.0026 | 0.0107 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 2,000 | 1.6079 | 1.9852 | 2.9955 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0 | 0.0006 | 0.0006 | 0.0010 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 5,000 | 0.1358 | 0.1995 | 0.3148 | 4.00 | PASS |
+
+The matching Release offscreen scene test (`--count 64 --spatial`) loaded QML
+in **105 ms**, ran cleanly for 1.2 s, and the viewport policy left 25/64 tiles
+decoding under the initial view. FOV canvases are no longer painted for cameras
+whose honest state is `paused-offscreen`.
+
+These numbers close the controller-side performance acceptance only. They do
+not claim physical-display frame latency, GPU scene-graph time, decoded video
+inside spatial tiles, or low-end hardware performance; those require their own
+instrumented media/display runs.
+
 ## What this feeds
 
 Once both tiers are filled in, the two ceilings define the range the decode governor
