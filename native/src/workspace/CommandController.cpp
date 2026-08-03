@@ -257,6 +257,75 @@ void CommandController::registerCommands() {
             return err.isEmpty() ? ok("active floor configured")
                                  : failed(err.toStdString());
         });
+    registry_.add(
+        {"premises.hours.add", "Add a weekly operating-hours window",
+         "premises.manage", false,
+         {{"day", ParamType::Enum, true, 1, 0,
+           {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}},
+          {"start", ParamType::String, true},
+          {"end", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->addOperatingWindow(
+                QString::fromStdString(argStr(a, "day")),
+                QString::fromStdString(argStr(a, "start")),
+                QString::fromStdString(argStr(a, "end")));
+            return err.isEmpty() ? ok("weekly operating window added")
+                                 : failed(err.toStdString());
+        });
+    registry_.add(
+        {"premises.hours.clear", "Clear one weekly day (configured closed)",
+         "premises.manage", false,
+         {{"day", ParamType::Enum, true, 1, 0,
+           {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->clearOperatingDay(
+                QString::fromStdString(argStr(a, "day")));
+            return err.isEmpty() ? ok("weekly day configured closed")
+                                 : failed(err.toStdString());
+        });
+    registry_.add(
+        {"premises.hours.exception", "Set special hours for one local date",
+         "premises.manage", false,
+         {{"date", ParamType::String, true},
+          {"start", ParamType::String, true},
+          {"end", ParamType::String, true},
+          {"label", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->setSpecialHours(
+                QString::fromStdString(argStr(a, "date")),
+                QString::fromStdString(argStr(a, "start")),
+                QString::fromStdString(argStr(a, "end")),
+                QString::fromStdString(argStr(a, "label")));
+            return err.isEmpty() ? ok("date special hours configured")
+                                 : failed(err.toStdString());
+        });
+    registry_.add(
+        {"premises.hours.holiday", "Close one local date",
+         "premises.manage", false,
+         {{"date", ParamType::String, true},
+          {"label", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->setHolidayClosed(
+                QString::fromStdString(argStr(a, "date")),
+                QString::fromStdString(argStr(a, "label")));
+            return err.isEmpty() ? ok("date configured closed")
+                                 : failed(err.toStdString());
+        });
+    registry_.add(
+        {"premises.hours.exception.clear", "Remove a local-date exception",
+         "premises.manage", false,
+         {{"date", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!premises_) return failed("no premises store attached");
+            const QString err = premises_->clearDateException(
+                QString::fromStdString(argStr(a, "date")));
+            return err.isEmpty() ? ok("date exception cleared")
+                                 : failed(err.toStdString());
+        });
 
     // --- Instant replay (P3-05) — honest refusal without a recording DB -----
     registry_.add(
@@ -406,6 +475,20 @@ void CommandController::registerCommands() {
             return fromDeviceError(
                 devices_->setDeviceDisabled(QString::fromStdString(id),
                                             std::get<bool>(a.at("detached"))),
+                id);
+        });
+    registry_.add(
+        {"device.site", "Assign a device to a premises site (or none)",
+         "devices.manage", false,
+         {{"id", ParamType::String, true},
+          {"site", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!devices_) return failed("no device store attached");
+            const std::string id = argStr(a, "id");
+            return fromDeviceError(
+                devices_->assignSite(
+                    QString::fromStdString(id),
+                    QString::fromStdString(argStr(a, "site"))),
                 id);
         });
     registry_.add(

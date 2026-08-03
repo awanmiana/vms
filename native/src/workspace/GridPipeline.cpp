@@ -9,6 +9,8 @@
 
 #include <QImage>
 
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <set>
 #include <string>
@@ -131,14 +133,32 @@ struct Branch {
     GstElement* queue = nullptr;
     GstElement* upload = nullptr;
     GstPad* compPad = nullptr;
-    bool linked = false;
+    std::atomic<bool> linked{false};
+    std::atomic<std::uint64_t> decodedFrames{0};
+    std::atomic<std::int64_t> lastFrameNs{0};
     std::string decoder;
 };
+
+std::int64_t steadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+GstPadProbeReturn CountDecodedFrame(GstPad*, GstPadProbeInfo* info,
+                                    gpointer user_data) {
+    if (!(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER))
+        return GST_PAD_PROBE_OK;
+    auto* b = static_cast<Branch*>(user_data);
+    b->decodedFrames.fetch_add(1, std::memory_order_relaxed);
+    b->lastFrameNs.store(steadyNowNs(), std::memory_order_relaxed);
+    return GST_PAD_PROBE_OK;
+}
 
 // Link the decoded video pad to the branch queue (ported from vms_grid).
 void OnPadAdded(GstElement* dbin, GstPad* pad, gpointer user_data) {
     auto* b = static_cast<Branch*>(user_data);
-    if (b->linked) return;
+    if (b->linked.load(std::memory_order_acquire)) return;
 
     GstCaps* caps = gst_pad_get_current_caps(pad);
     if (!caps) caps = gst_pad_query_caps(pad, nullptr);
@@ -154,7 +174,7 @@ void OnPadAdded(GstElement* dbin, GstPad* pad, gpointer user_data) {
     GstPad* qsink = gst_element_get_static_pad(b->queue, "sink");
     if (gst_pad_link(pad, qsink) == GST_PAD_LINK_OK) {
         b->decoder = FindDecoderName(GST_BIN(dbin));
-        b->linked = true;
+        b->linked.store(true, std::memory_order_release);
     }
     gst_object_unref(qsink);
 }
@@ -174,6 +194,11 @@ struct GridPipeline::Impl {
     std::vector<Branch*> branches;
     std::string tierFile[4];   // indexed by (int)Tier: 1=thumb 2=sub 3=main
     std::string encoderUsed;
+    std::atomic<std::uint64_t> outputFrames{0};
+    std::atomic<std::int64_t> lastOutputFrameNs{0};
+    std::uint64_t sampledOutputFrames = 0;
+    std::chrono::steady_clock::time_point sampledOutputAt =
+        std::chrono::steady_clock::now();
 
     // The composited surface is a fixed 1080p; each cell is an equal integer
     // fraction so it aligns with the QML chrome grid.
@@ -183,7 +208,7 @@ struct GridPipeline::Impl {
 namespace {
 
 GstFlowReturn onNewSample(GstAppSink* sink, gpointer user) {
-    auto* item = static_cast<VideoItem*>(user);
+    auto* d = static_cast<GridPipeline::Impl*>(user);
     GstSample* sample = gst_app_sink_pull_sample(sink);
     if (!sample) return GST_FLOW_OK;
     GstCaps* caps = gst_sample_get_caps(sample);
@@ -197,7 +222,9 @@ GstFlowReturn onNewSample(GstAppSink* sink, gpointer user) {
     GstMapInfo map;
     if (w > 0 && h > 0 && buffer && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
         const QImage view(map.data, w, h, w * 4, QImage::Format_RGBA8888);
-        item->submitFrame(view.copy());
+        d->sink->submitFrame(view.copy());
+        d->outputFrames.fetch_add(1, std::memory_order_relaxed);
+        d->lastOutputFrameNs.store(steadyNowNs(), std::memory_order_relaxed);
         gst_buffer_unmap(buffer, &map);
     }
     gst_sample_unref(sample);
@@ -221,7 +248,9 @@ void resForTier(vms::Tier t, int& w, int& h) {
 static bool buildFront(GridPipeline::Impl* d, Branch* b, vms::Tier tier,
                        std::string& err) {
     b->tier = tier;
-    b->linked = false;
+    b->linked.store(false, std::memory_order_release);
+    b->decodedFrames.store(0, std::memory_order_relaxed);
+    b->lastFrameNs.store(0, std::memory_order_relaxed);
 
     if (tier == vms::Tier::Paused) {
         b->source = gst_element_factory_make("videotestsrc", nullptr);
@@ -233,7 +262,7 @@ static bool buildFront(GridPipeline::Impl* d, Branch* b, vms::Tier tier,
             return false;
         }
         b->decoder = "(paused)";
-        b->linked = true;
+        b->linked.store(true, std::memory_order_release);
         return true;
     }
 
@@ -276,7 +305,7 @@ static void teardownFront(GridPipeline::Impl* d, Branch* b) {
         gst_bin_remove(GST_BIN(d->pipeline), b->source);
         b->source = nullptr;
     }
-    b->linked = false;
+    b->linked.store(false, std::memory_order_release);
 }
 
 GridPipeline::GridPipeline(VideoItem* sink, int cols, int rows,
@@ -357,7 +386,7 @@ bool GridPipeline::start(bool sweepable, std::string& error) {
     g_object_set(d_->appsink, "emit-signals", TRUE, "max-buffers", 1, "drop",
                  TRUE, "sync", TRUE, nullptr);
     g_signal_connect(d_->appsink, "new-sample", G_CALLBACK(onNewSample),
-                     d_->sink);
+                     d_);
 
     gst_bin_add_many(GST_BIN(d_->pipeline), d_->comp, download, conv, scale,
                      capsf, d_->appsink, nullptr);
@@ -386,6 +415,13 @@ bool GridPipeline::start(bool sweepable, std::string& error) {
                      "max-size-time", static_cast<guint64>(0), "max-size-bytes",
                      0, nullptr);
         gst_bin_add_many(GST_BIN(d_->pipeline), b->queue, b->upload, nullptr);
+
+        // Observe decoded buffers at the stable queue boundary. The probe
+        // survives tier-front rebuilds and never modifies/drops a buffer.
+        GstPad* queueSink = gst_element_get_static_pad(b->queue, "sink");
+        gst_pad_add_probe(queueSink, GST_PAD_PROBE_TYPE_BUFFER,
+                          CountDecodedFrame, b, nullptr);
+        gst_object_unref(queueSink);
 
         std::string ferr;
         if (!buildFront(d_, b, d_->tiers[i], ferr)) {
@@ -482,6 +518,59 @@ bool GridPipeline::pumpBus(std::string& error) {
     return false;
 }
 
+std::vector<GridTileDiagnostics> GridPipeline::diagnostics() {
+    std::vector<GridTileDiagnostics> out;
+    out.reserve(d_->branches.size());
+    const auto now = std::chrono::steady_clock::now();
+    const std::int64_t nowNs = steadyNowNs();
+    const std::uint64_t outputFrames =
+        d_->outputFrames.load(std::memory_order_relaxed);
+    const double outputElapsed =
+        std::chrono::duration<double>(now - d_->sampledOutputAt).count();
+    double outputFps = 0.0;
+    if (outputElapsed > 0.0 && outputFrames >= d_->sampledOutputFrames)
+        outputFps = static_cast<double>(outputFrames - d_->sampledOutputFrames) /
+                    outputElapsed;
+    d_->sampledOutputFrames = outputFrames;
+    d_->sampledOutputAt = now;
+    const std::int64_t lastOutput =
+        d_->lastOutputFrameNs.load(std::memory_order_relaxed);
+    const bool outputReceiving =
+        lastOutput > 0 && nowNs - lastOutput <= 2000000000LL;
+
+    for (Branch* b : d_->branches) {
+        GridTileDiagnostics d;
+        d.tileId = b->index;
+        if (b->tier == vms::Tier::Paused) {
+            d.streamState = "paused";
+            out.push_back(std::move(d));
+            continue;
+        }
+
+        resForTier(b->tier, d.width, d.height);
+        d.codec = d_->codec;
+        const std::uint64_t frames =
+            b->decodedFrames.load(std::memory_order_relaxed);
+        // Use branch counts only for state/stall detection. Their wall-clock
+        // rate is not exposed: the leaky queue intentionally lets decoders run
+        // ahead. The operator-visible FPS is outputFps below.
+
+        const std::int64_t last =
+            b->lastFrameNs.load(std::memory_order_relaxed);
+        d.receiving = last > 0 && nowNs - last <= 2000000000LL &&
+                      outputReceiving;
+        if (d.receiving) d.fps = outputFps;
+        if (d.receiving)
+            d.streamState = "playing";
+        else if (!b->linked.load(std::memory_order_acquire) || frames == 0)
+            d.streamState = "connecting";
+        else
+            d.streamState = "stalled";
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
 void GridPipeline::stop() {
     if (d_->bus) {
         gst_object_unref(d_->bus);
@@ -525,6 +614,7 @@ bool GridPipeline::applyPlan(const std::vector<vms::Tier>&, std::string&) {
     return true;
 }
 bool GridPipeline::pumpBus(std::string&) { return true; }
+std::vector<GridTileDiagnostics> GridPipeline::diagnostics() { return {}; }
 std::string GridPipeline::summary() const { return {}; }
 
 #endif // VMS_WITH_GSTREAMER

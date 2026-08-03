@@ -369,7 +369,9 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
             src/workspace/CommandController.cpp
             src/workspace/CommandController.h
             src/workspace/PremisesController.cpp
-            src/workspace/PremisesController.h)
+            src/workspace/PremisesController.h
+            src/workspace/SiteOperationsController.cpp
+            src/workspace/SiteOperationsController.h)
         target_link_libraries(vms_workspace PRIVATE vms_command)
         # P6-03/P6-07 inc 27: the alarm surface (engine bridge + health feed).
         target_sources(vms_workspace PRIVATE

@@ -169,6 +169,59 @@ std::vector<Migration> coreMigrations() {
          "  FOREIGN KEY(floor_id) REFERENCES premises_floor(id) ON DELETE SET NULL);"
          "ALTER TABLE workspace_tile ADD COLUMN facing_deg REAL NOT NULL DEFAULT 0;"
          "ALTER TABLE workspace_tile ADD COLUMN fov_deg REAL NOT NULL DEFAULT 70;"},
+
+        // v12 — P3-18 operating hours (native increment 36). A marker row
+        // distinguishes "configured but closed" from "not configured". Weekly
+        // and exception windows are local wall-clock minutes in the site's IANA
+        // timezone; date exceptions replace the weekly rule for that date.
+        {12, "premises_operating_hours",
+         "CREATE TABLE premises_hours_schedule ("
+         "  site_id TEXT PRIMARY KEY,"
+         "  updated_at TEXT NOT NULL DEFAULT (datetime('now')) ,"
+         "  FOREIGN KEY(site_id) REFERENCES premises_site(id) ON DELETE CASCADE);"
+         "CREATE TABLE premises_hours_weekly ("
+         "  site_id TEXT NOT NULL,"
+         "  weekday INTEGER NOT NULL CHECK(weekday BETWEEN 1 AND 7),"
+         "  start_minute INTEGER NOT NULL CHECK(start_minute BETWEEN 0 AND 1439),"
+         "  end_minute INTEGER NOT NULL CHECK(end_minute BETWEEN 1 AND 1440),"
+         "  PRIMARY KEY(site_id,weekday,start_minute,end_minute),"
+         "  CHECK(start_minute < end_minute),"
+         "  FOREIGN KEY(site_id) REFERENCES premises_hours_schedule(site_id) "
+         "    ON DELETE CASCADE);"
+         "CREATE TABLE premises_hours_exception ("
+         "  site_id TEXT NOT NULL,"
+         "  local_date TEXT NOT NULL CHECK(length(local_date)=10),"
+         "  closed INTEGER NOT NULL CHECK(closed IN (0,1)),"
+         "  label TEXT NOT NULL DEFAULT '',"
+         "  PRIMARY KEY(site_id,local_date),"
+         "  FOREIGN KEY(site_id) REFERENCES premises_hours_schedule(site_id) "
+         "    ON DELETE CASCADE);"
+         "CREATE TABLE premises_hours_exception_window ("
+         "  site_id TEXT NOT NULL,"
+         "  local_date TEXT NOT NULL,"
+         "  start_minute INTEGER NOT NULL CHECK(start_minute BETWEEN 0 AND 1439),"
+         "  end_minute INTEGER NOT NULL CHECK(end_minute BETWEEN 1 AND 1440),"
+         "  PRIMARY KEY(site_id,local_date,start_minute,end_minute),"
+         "  CHECK(start_minute < end_minute),"
+         "  FOREIGN KEY(site_id,local_date) "
+         "    REFERENCES premises_hours_exception(site_id,local_date) "
+         "    ON DELETE CASCADE);"},
+
+        // v13 — site-scoped device operations evidence (native increment 37).
+        // Ownership is optional and deleting a site unassigns inventory. The
+        // observation row records reachability evidence only: last positive
+        // seen and the start of the current uninterrupted positive run.
+        {13, "device_site_and_reachability_time",
+         "ALTER TABLE devices ADD COLUMN site_id TEXT "
+         "  REFERENCES premises_site(id) ON DELETE SET NULL;"
+         "CREATE INDEX idx_devices_site ON devices(site_id);"
+         "CREATE TABLE device_reach_observation ("
+         "  device_id TEXT PRIMARY KEY,"
+         "  reach_state TEXT NOT NULL CHECK(reach_state IN ('online','offline')) ,"
+         "  observed_at_utc TEXT NOT NULL,"
+         "  last_seen_utc TEXT,"
+         "  online_since_utc TEXT,"
+         "  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE);"},
     };
 }
 

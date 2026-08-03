@@ -1,6 +1,7 @@
 #include "persist/SegmentIndex.h"
 
 #include <algorithm>
+#include <cctype>
 #include <set>
 
 namespace vms::persist {
@@ -56,6 +57,51 @@ std::vector<AvailabilitySpan> ComputeAvailability(const std::vector<Segment>& se
 
 namespace {
 
+bool parseCanonicalUtc(const std::string& value, std::int64_t& seconds) {
+    seconds = 0;
+    if (value.size() != 19 || value[4] != '-' || value[7] != '-' ||
+        value[10] != ' ' || value[13] != ':' || value[16] != ':')
+        return false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (i == 4 || i == 7 || i == 10 || i == 13 || i == 16) continue;
+        if (!std::isdigit(static_cast<unsigned char>(value[i]))) return false;
+    }
+    auto number = [&](std::size_t offset, std::size_t count) {
+        int out = 0;
+        for (std::size_t i = 0; i < count; ++i)
+            out = out * 10 + (value[offset + i] - '0');
+        return out;
+    };
+    int year = number(0, 4);
+    const int month = number(5, 2);
+    const int day = number(8, 2);
+    const int hour = number(11, 2);
+    const int minute = number(14, 2);
+    const int second = number(17, 2);
+    if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 ||
+        second > 59)
+        return false;
+    static constexpr int monthDays[] =
+        {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    const int maxDay = monthDays[month - 1] + (month == 2 && leap ? 1 : 0);
+    if (day < 1 || day > maxDay) return false;
+
+    // Howard Hinnant's civil-date conversion: days relative to 1970-01-01.
+    year -= month <= 2;
+    const int era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned shiftedMonth =
+        static_cast<unsigned>(month + (month > 2 ? -3 : 9));
+    const unsigned doy = (153 * shiftedMonth + 2) / 5 +
+                         static_cast<unsigned>(day - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const std::int64_t days =
+        static_cast<std::int64_t>(era) * 146097 + doe - 719468;
+    seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+    return true;
+}
+
 // Column order shared by every SELECT below.
 const char* kCols = "id, camera_id, start_utc, end_utc, path, codec, bytes";
 
@@ -77,7 +123,13 @@ Error SegmentIndex::add(const Segment& seg, std::int64_t& outId) {
     outId = 0;
     if (seg.cameraId.empty() || seg.path.empty())
         return {Status::Misuse, "segment requires camera_id and path"};
-    if (seg.startUtc.empty() || seg.endUtc.empty() || seg.endUtc <= seg.startUtc)
+    std::int64_t startSeconds = 0;
+    std::int64_t endSeconds = 0;
+    if (!parseCanonicalUtc(seg.startUtc, startSeconds) ||
+        !parseCanonicalUtc(seg.endUtc, endSeconds))
+        return {Status::Misuse,
+                "segment timestamps must be canonical YYYY-MM-DD HH:MM:SS UTC"};
+    if (endSeconds <= startSeconds)
         return {Status::Misuse, "segment end_utc must be after start_utc"};
     if (seg.bytes < 0)
         return {Status::Misuse, "segment bytes must be >= 0"};
@@ -134,6 +186,81 @@ Error SegmentIndex::availability(const std::string& cameraId, const std::string&
     std::vector<Segment> segs;
     if (Error e = list(cameraId, startUtc, endUtc, segs); !e) return e;
     out = ComputeAvailability(segs, startUtc, endUtc);
+    return Error::success();
+}
+
+Error SegmentIndex::recordedDuration(const std::vector<std::string>& cameraIds,
+                                     RecordingDuration& out) {
+    out = {};
+    std::set<std::string> unique;
+    for (const std::string& id : cameraIds)
+        if (!id.empty()) unique.insert(id);
+    if (unique.empty()) return Error::success();
+
+    // Chunk the IN query below SQLite's common bind-parameter limits. A camera
+    // appears in exactly one chunk, so interval union remains camera-local.
+    constexpr std::size_t kChunkSize = 256;
+    std::vector<std::string> ids(unique.begin(), unique.end());
+    for (std::size_t offset = 0; offset < ids.size(); offset += kChunkSize) {
+        const std::size_t count = std::min(kChunkSize, ids.size() - offset);
+        std::string sql =
+            "SELECT camera_id,start_utc,end_utc FROM segments WHERE camera_id IN (";
+        std::vector<Value> params;
+        params.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (i) sql += ',';
+            sql += '?';
+            params.emplace_back(ids[offset + i]);
+        }
+        sql += ") ORDER BY camera_id,start_utc,end_utc,id;";
+
+        Result result;
+        if (Error e = store_.query(sql, params, result); !e) return e;
+        std::string activeCamera;
+        std::int64_t mergedStart = 0;
+        std::int64_t mergedEnd = 0;
+        bool hasMerged = false;
+        auto finishMerged = [&]() {
+            if (!hasMerged) return;
+            out.seconds += mergedEnd - mergedStart;
+            hasMerged = false;
+        };
+
+        for (const Row& row : result.rows) {
+            const std::string camera = std::get<std::string>(row[0]);
+            const std::string startUtc = std::get<std::string>(row[1]);
+            const std::string endUtc = std::get<std::string>(row[2]);
+            std::int64_t start = 0;
+            std::int64_t end = 0;
+            if (!parseCanonicalUtc(startUtc, start) ||
+                !parseCanonicalUtc(endUtc, end) || end <= start) {
+                ++out.invalidSegments;
+                continue;
+            }
+            ++out.segmentCount;
+            out.rawSeconds += end - start;
+            if (camera != activeCamera) {
+                finishMerged();
+                activeCamera = camera;
+                ++out.camerasWithFootage;
+                mergedStart = start;
+                mergedEnd = end;
+                hasMerged = true;
+                continue;
+            }
+            if (start <= mergedEnd) {
+                if (start < mergedEnd) ++out.overlappingSegments;
+                mergedEnd = std::max(mergedEnd, end);
+            } else {
+                finishMerged();
+                mergedStart = start;
+                mergedEnd = end;
+                hasMerged = true;
+            }
+        }
+        finishMerged();
+    }
+    out.overlapRemovedSeconds = out.rawSeconds - out.seconds;
     return Error::success();
 }
 

@@ -1,5 +1,7 @@
 #include "DeviceController.h"
 
+#include <QDateTime>
+
 #include <algorithm>
 #include <cctype>
 #include <vector>
@@ -81,15 +83,20 @@ QString errMessage(const Error& e) {
 DeviceController::DeviceController(DeviceRepo* repo, HealthMonitor* health,
                                    DiscoverySource* discovery,
                                    vms::health::DeviceHealthProbe* probe,
-                                   QObject* parent)
+                                   QObject* parent, NowUtcFn nowUtc)
     : QObject(parent), repo_(repo), health_(health), discovery_(discovery),
-      probe_(probe) {
+      probe_(probe), nowUtc_(std::move(nowUtc)) {
+    if (!nowUtc_)
+        nowUtc_ = [] {
+            return QDateTime::currentDateTimeUtc().toString(
+                QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        };
     refresh();
 }
 
-QVariantMap DeviceController::healthMap(const std::string& deviceId) const {
+QVariantMap DeviceController::healthMap(const DeviceSummary& device) const {
     QVariantMap m;
-    const vms::health::DeviceHealth h = health_->get(deviceId);
+    const vms::health::DeviceHealth h = health_->get(device.id);
     const HealthView sv = stateView(h.state);
     m.insert(QStringLiteral("state"), sv.category);
     m.insert(QStringLiteral("stateText"), sv.text);
@@ -104,7 +111,41 @@ QVariantMap DeviceController::healthMap(const std::string& deviceId) const {
              QString::fromStdString(h.exceptionReason));
     m.insert(QStringLiteral("inMaintenance"), h.inMaintenance);
     // shouldNotify(): an active, unacknowledged, non-maintenance exception.
-    m.insert(QStringLiteral("needsAttention"), health_->shouldNotify(deviceId));
+    m.insert(QStringLiteral("needsAttention"), health_->shouldNotify(device.id));
+    m.insert(QStringLiteral("reachObserved"), device.reachObserved);
+    m.insert(QStringLiteral("persistedReachState"),
+             QString::fromStdString(device.persistedReachState));
+    m.insert(QStringLiteral("reachObservedAtUtc"),
+             QString::fromStdString(device.reachObservedAtUtc));
+    m.insert(QStringLiteral("lastSeenAvailable"), !device.lastSeenUtc.empty());
+    m.insert(QStringLiteral("lastSeenUtc"),
+             QString::fromStdString(device.lastSeenUtc));
+    const bool uptimeAvailable =
+        h.reach == Reach::Online && device.persistedReachState == "online" &&
+        !device.onlineSinceUtc.empty();
+    m.insert(QStringLiteral("uptimeAvailable"), uptimeAvailable);
+    m.insert(QStringLiteral("onlineSinceUtc"),
+             QString::fromStdString(device.onlineSinceUtc));
+    qint64 uptimeSeconds = 0;
+    if (uptimeAvailable) {
+        const QDateTime since = QDateTime::fromString(
+            QString::fromStdString(device.onlineSinceUtc)
+                    .replace(QLatin1Char(' '), QLatin1Char('T')) +
+                QLatin1Char('Z'),
+            Qt::ISODate);
+        const QDateTime now = QDateTime::fromString(
+            nowUtc_().replace(QLatin1Char(' '), QLatin1Char('T')) +
+                QLatin1Char('Z'),
+            Qt::ISODate);
+        if (since.isValid() && now.isValid() && since <= now)
+            uptimeSeconds = since.secsTo(now);
+    }
+    m.insert(QStringLiteral("uptimeSeconds"), uptimeSeconds);
+    if (!uptimeAvailable)
+        m.insert(QStringLiteral("uptimeReason"),
+                 h.reach == Reach::Unknown
+                     ? QStringLiteral("No fresh reachability evidence this session")
+                     : QStringLiteral("Device is not currently reachable"));
     return m;
 }
 
@@ -130,7 +171,9 @@ void DeviceController::rebuild() {
                                                        : d.kind));
         m.insert(QStringLiteral("cameraCount"), d.cameraCount);
         m.insert(QStringLiteral("disabled"), d.disabled);
-        m.insert(QStringLiteral("health"), healthMap(d.id));
+        m.insert(QStringLiteral("siteId"), QString::fromStdString(d.siteId));
+        m.insert(QStringLiteral("assigned"), !d.siteId.empty());
+        m.insert(QStringLiteral("health"), healthMap(d));
         // The device's channels (increment 17): the channel-management panel
         // binds to this, so it refreshes with the model on every mutation.
         QVariantList channels;
@@ -277,6 +320,16 @@ QString DeviceController::setDeviceDisabled(const QString& id, bool disabled) {
     return lastError_;
 }
 
+QString DeviceController::assignSite(const QString& id, const QString& siteId) {
+    QString target = siteId.trimmed();
+    if (target.compare(QLatin1String("none"), Qt::CaseInsensitive) == 0)
+        target.clear();
+    const Error e = repo_->setDeviceSite(id.toStdString(), target.toStdString());
+    lastError_ = e ? QString() : errMessage(e);
+    rebuild();
+    return lastError_;
+}
+
 QString DeviceController::removeDevice(const QString& id) {
     const Error e = repo_->remove(id.toStdString());
     lastError_ = e ? QString() : errMessage(e);
@@ -345,7 +398,13 @@ void DeviceController::emitTransition(const std::string& deviceId,
 }
 
 void DeviceController::reportReach(const QString& id, int level) {
-    const vms::health::State before = health_->state(id.toStdString());
+    const vms::health::DeviceHealth beforeHealth =
+        health_->get(id.toStdString());
+    const Error persisted = repo_->recordReachObservation(
+        id.toStdString(), level != 0, nowUtc_().toStdString(),
+        beforeHealth.reach == Reach::Online);
+    lastError_ = persisted ? QString() : errMessage(persisted);
+    const vms::health::State before = beforeHealth.state;
     health_->reportReachable(id.toStdString(), level != 0);
     emitTransition(id.toStdString(), before);
     rebuild();
@@ -419,6 +478,12 @@ void DeviceController::pollHealth() {
         // Reachable -> Online; unreachable -> Offline (raises an exception).
         // Stream is left as-is: reachability alone doesn't prove a stream.
         const vms::health::State before = health_->state(d.id);
+        const vms::health::Reach beforeReach = health_->get(d.id).reach;
+        const Error persisted =
+            repo_->recordReachObservation(d.id, r.reachable,
+                                          nowUtc_().toStdString(),
+                                          beforeReach == Reach::Online);
+        lastError_ = persisted ? QString() : errMessage(persisted);
         health_->reportReachable(d.id, r.reachable);
         emitTransition(d.id, before);   // inc 27: feed the alarm engine
     }

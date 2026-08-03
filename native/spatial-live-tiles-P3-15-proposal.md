@@ -1,7 +1,7 @@
 # P3-15 adaptive spatial live tiles (native increment 33)
 
 Date: 2026-08-01  
-Status: approved by the operator's directive to identify and start the next build
+Status: built and verified on the dev box (2026-08-03)
 
 ## Decision
 
@@ -61,3 +61,29 @@ operationally useful.
    exits cleanly with no QML errors.
 5. The spatial performance gate, command coverage, workspace gates, component
    tests, and root regressions remain green.
+
+## Verification evidence
+
+- `VideoItem` now supports a shared `frameSource` plus row-major crop metadata.
+  Consumers share the source `QImage` until their render-thread crop; the
+  existing `GridPipeline` remains the only session/decode/compositor owner.
+- The spatial delegate instantiates a consumer only at room zoom and only for
+  honest `live`/`degraded` states. Site remains pin-only; wing and every paused
+  state remain state-only. Existing focus, tier, priority, state, and FOV chrome
+  stays above the imagery.
+- `--spatial-selftest` pins crop geometry for uneven 1281x801 composites,
+  including the rounded final cell and the safe invalid-index fallback.
+- Release offscreen smoke with `--no-persist --count 64 --profile lowend
+  --video --spatial --smoke-ms 3000` loaded QML in **85 ms** and reported
+  **64 delegates / 16 eligible / 16 consumers / 16 receiving / 223 delivered
+  frames / 16 unique crop ids**. The other 48 tiles had no consumer.
+- The repeated Release performance gate passed at **0.0006 ms idle p95** and
+  **0.1874 ms forced-replan p95** over 5,000 samples. Debug passed at
+  **0.0040 / 1.7165 ms p95** over 2,000 samples.
+- Native build, all 11 workspace gates, and the complete root regression suite
+  pass. Aggregate component CTest is 10/11 only because the unchanged Windows
+  ONVIF loader intermittently exits `0xc0000135`; the focused ONVIF CTest passes.
+
+The verification source is the existing synthetic governed-grid media harness,
+not a claim of live-camera credential/device validation. That remains the
+separately tracked broker/media hardware gate.

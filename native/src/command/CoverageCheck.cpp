@@ -39,6 +39,7 @@ std::vector<MutatorSpec> DeclaredMutators() {
         {"devicesCtrl", "rescanDevice"},
         {"devicesCtrl", "renameDevice"},
         {"devicesCtrl", "setDeviceDisabled"},
+        {"devicesCtrl", "assignSite"},
         {"devicesCtrl", "removeDevice"},
         {"devicesCtrl", "renameChannel"},
         {"devicesCtrl", "setChannelDisabled"},

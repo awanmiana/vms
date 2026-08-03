@@ -33,8 +33,12 @@ Error DeviceRepo::listDevices(std::vector<DeviceSummary>& out) {
     Result r;
     if (Error e = store_.query(
             "SELECT d.id, d.name, d.address, d.vendor, d.kind, "
-            "(SELECT COUNT(*) FROM cameras c WHERE c.device_id = d.id), d.disabled "
-            "FROM devices d ORDER BY d.id;",
+            "(SELECT COUNT(*) FROM cameras c WHERE c.device_id = d.id), "
+            "d.disabled,COALESCE(d.site_id,''),COALESCE(o.reach_state,''),"
+            "COALESCE(o.observed_at_utc,''),COALESCE(o.last_seen_utc,''),"
+            "COALESCE(o.online_since_utc,'') "
+            "FROM devices d LEFT JOIN device_reach_observation o "
+            "ON o.device_id=d.id ORDER BY d.id;",
             {}, r);
         !e)
         return e;
@@ -47,6 +51,12 @@ Error DeviceRepo::listDevices(std::vector<DeviceSummary>& out) {
         s.kind = textOrEmpty(row[4]);
         s.cameraCount = static_cast<int>(std::get<std::int64_t>(row[5]));
         s.disabled = std::get<std::int64_t>(row[6]) != 0;
+        s.siteId = textOrEmpty(row[7]);
+        s.persistedReachState = textOrEmpty(row[8]);
+        s.reachObserved = !s.persistedReachState.empty();
+        s.reachObservedAtUtc = textOrEmpty(row[9]);
+        s.lastSeenUtc = textOrEmpty(row[10]);
+        s.onlineSinceUtc = textOrEmpty(row[11]);
         out.push_back(std::move(s));
     }
     return Error::success();
@@ -238,6 +248,85 @@ Error DeviceRepo::setDeviceDisabled(const std::string& deviceId, bool disabled) 
     // reconcileGroup empties the group when the device is detached and restores
     // it to the enabled channels on re-attach.
     if (Error e = reconcileGroup(deviceId, deviceName); !e) return e;
+    return tx.commit();
+}
+
+Error DeviceRepo::setDeviceSite(const std::string& deviceId,
+                                const std::string& siteId) {
+    if (deviceId.empty()) return {Status::Misuse, "empty deviceId"};
+    Result device;
+    if (Error e = store_.query("SELECT 1 FROM devices WHERE id=?;",
+                               {deviceId}, device); !e) return e;
+    if (device.rows.empty())
+        return {Status::NotFound, "unknown device " + deviceId};
+    if (!siteId.empty()) {
+        Result site;
+        if (Error e = store_.query("SELECT 1 FROM premises_site WHERE id=?;",
+                                   {siteId}, site); !e) return e;
+        if (site.rows.empty())
+            return {Status::NotFound, "unknown premises site " + siteId};
+    }
+    return store_.exec(
+        "UPDATE devices SET site_id=?,updated_at=datetime('now') WHERE id=?;",
+        {siteId.empty() ? Value{nullptr} : Value{siteId}, deviceId});
+}
+
+Error DeviceRepo::recordReachObservation(const std::string& deviceId,
+                                         bool reachable,
+                                         const std::string& observedUtc,
+                                         bool continuesCurrentRun) {
+    if (deviceId.empty()) return {Status::Misuse, "empty deviceId"};
+    Result parsed;
+    if (Error e = store_.query("SELECT datetime(?);", {observedUtc}, parsed); !e)
+        return e;
+    if (parsed.rows.empty() || parsed.rows[0].empty() ||
+        !std::holds_alternative<std::string>(parsed.rows[0][0]) ||
+        std::get<std::string>(parsed.rows[0][0]) != observedUtc)
+        return {Status::Misuse,
+                "observation time must be canonical UTC YYYY-MM-DD HH:MM:SS"};
+
+    Store::Tx tx(store_);
+    if (Error e = tx.begin(); !e) return e;
+    Result device;
+    if (Error e = store_.query("SELECT 1 FROM devices WHERE id=?;",
+                               {deviceId}, device); !e) return e;
+    if (device.rows.empty())
+        return {Status::NotFound, "unknown device " + deviceId};
+
+    Result prior;
+    if (Error e = store_.query(
+            "SELECT reach_state,observed_at_utc,last_seen_utc,online_since_utc "
+            "FROM device_reach_observation WHERE device_id=?;",
+            {deviceId}, prior); !e) return e;
+    std::string priorState, priorObserved, priorLastSeen, priorOnlineSince;
+    if (!prior.rows.empty()) {
+        priorState = textOrEmpty(prior.rows[0][0]);
+        priorObserved = textOrEmpty(prior.rows[0][1]);
+        priorLastSeen = textOrEmpty(prior.rows[0][2]);
+        priorOnlineSince = textOrEmpty(prior.rows[0][3]);
+        if (observedUtc < priorObserved)
+            return {Status::Misuse, "reachability observation is older than current evidence"};
+    }
+
+    const std::string state = reachable ? "online" : "offline";
+    const std::string lastSeen = reachable ? observedUtc : priorLastSeen;
+    const std::string onlineSince =
+        reachable ? (continuesCurrentRun && priorState == "online" &&
+                             !priorOnlineSince.empty()
+                         ? priorOnlineSince : observedUtc)
+                  : std::string();
+    if (Error e = store_.exec(
+            "INSERT INTO device_reach_observation"
+            "(device_id,reach_state,observed_at_utc,last_seen_utc,online_since_utc) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET "
+            "reach_state=excluded.reach_state,"
+            "observed_at_utc=excluded.observed_at_utc,"
+            "last_seen_utc=excluded.last_seen_utc,"
+            "online_since_utc=excluded.online_since_utc;",
+            {deviceId, state, observedUtc,
+             lastSeen.empty() ? Value{nullptr} : Value{lastSeen},
+             onlineSince.empty() ? Value{nullptr} : Value{onlineSince}}); !e)
+        return e;
     return tx.commit();
 }
 

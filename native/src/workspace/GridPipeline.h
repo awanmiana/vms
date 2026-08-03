@@ -22,6 +22,16 @@
 
 class VideoItem;
 
+struct GridTileDiagnostics {
+    int tileId = -1;
+    bool receiving = false;
+    double fps = 0.0;
+    std::string streamState;  // playing / connecting / stalled / paused
+    std::string codec;
+    int width = 0;
+    int height = 0;
+};
+
 class GridPipeline {
 public:
     // `tiers` is indexed by tile id (0..cols*rows-1); its size is the tile count.
@@ -49,6 +59,13 @@ public:
     // Drain the GStreamer bus for errors/EOS; call from a Qt timer on the GUI
     // thread. Returns false if a fatal pipeline error was seen.
     bool pumpBus(std::string& error);
+
+    // P3-04 / inc 34: a snapshot of facts observed at each governed decode
+    // branch. Branch probes establish playing/connecting/stalled; FPS counts
+    // composited frames actually delivered to Qt (raw decoders can run far
+    // ahead into leaky queues and would over-report). Transport metrics are
+    // deliberately not claimed because the current synthetic source exposes none.
+    std::vector<GridTileDiagnostics> diagnostics();
 
     std::string summary() const;   // encoder + per-tier decoder(s), for the console
 

@@ -59,6 +59,12 @@ struct DeviceSummary {
     std::string kind;       // "camera" | "nvr" | "dvr" | "hybrid"
     int cameraCount = 0;
     bool disabled = false;  // detached from active use (P2-06); config preserved
+    std::string siteId;     // empty = explicitly unassigned
+    bool reachObserved = false;
+    std::string persistedReachState; // online | offline; empty when unobserved
+    std::string reachObservedAtUtc;
+    std::string lastSeenUtc;          // last positive reachability evidence
+    std::string onlineSinceUtc;       // current persisted positive run
 };
 
 // A read-only summary of one camera channel for the channel-management UI
@@ -102,6 +108,18 @@ public:
     // group is emptied (and restored to its enabled channels on re-attach).
     // Honest NotFound on a bad id.
     Error setDeviceDisabled(const std::string& deviceId, bool disabled);
+
+    // Assign to a canonical premises site; empty siteId explicitly unassigns.
+    // No site is inferred from address, name, floor, or active selection.
+    Error setDeviceSite(const std::string& deviceId,
+                        const std::string& siteId);
+
+    // Persist one UTC reachability observation. Older observations are refused;
+    // positive repeats preserve the run start, a negative clears it while
+    // retaining lastSeenUtc, and a later positive starts a new run.
+    Error recordReachObservation(const std::string& deviceId, bool reachable,
+                                 const std::string& observedUtc,
+                                 bool continuesCurrentRun = true);
 
     // Rename a device (P2-06): updates the device's operator-facing name and
     // refreshes its default group's display name, while PRESERVING every

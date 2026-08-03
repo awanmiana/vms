@@ -532,6 +532,9 @@ Item {
                                           + "   ·   id " + modelData.id
                                           + (modelData.address ? ("   ·   " + modelData.address) : "")
                                           + (modelData.vendor ? ("   ·   " + modelData.vendor) : "")
+                                          + "   ·   " + (modelData.assigned
+                                                          ? ("site " + modelData.siteId)
+                                                          : "Unassigned")
                                           + "   ·   " + modelData.cameraCount + " channel(s)"
                                           + (modelData.disabled ? "   ·   ⏸ detached" : "")
                                     color: "#8a93a3"; font.pixelSize: 11

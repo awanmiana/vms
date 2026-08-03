@@ -77,6 +77,10 @@ int main() {
     check(idx.add(seg("", "2026-07-29 10:00:00", "2026-07-29 10:10:00", "z.mp4", 100), bad)
               .status == Status::Misuse,
           "reject segment with empty camera_id");
+    check(idx.add(seg("cam-1", "2026-02-30 10:00:00",
+                      "2026-02-30 10:10:00", "z.mp4", 100), bad)
+              .status == Status::Misuse,
+          "reject non-canonical calendar timestamps");
 
     std::int64_t total = 0;
     check(static_cast<bool>(idx.totalBytes(total)) && total == 400,
@@ -186,9 +190,52 @@ int main() {
               "7b: overlapping segments are flagged Overlapping (2 sources), not hidden");
     }
 
+    // ---- P3-18 / inc 38: cumulative completed-recording duration ----
+    idx.add(seg("duration-a", "2026-07-29 09:00:00",
+                "2026-07-29 09:10:00", "da.mp4", 10), tmp);
+    idx.add(seg("duration-a", "2026-07-29 09:05:00",
+                "2026-07-29 09:15:00", "db.mp4", 10), tmp);
+    idx.add(seg("duration-a", "2026-07-29 09:15:00",
+                "2026-07-29 09:20:00", "dc.mp4", 10), tmp);
+    idx.add(seg("duration-b", "2026-07-29 10:00:00",
+                "2026-07-29 10:02:00", "dd.mp4", 10), tmp);
+    {
+        RecordingDuration duration;
+        check(static_cast<bool>(idx.recordedDuration(
+                  {"duration-a", "duration-b", "duration-a"}, duration)),
+              "38: query duration for a deduplicated camera set");
+        check(duration.seconds == 1320 && duration.rawSeconds == 1620 &&
+                  duration.overlapRemovedSeconds == 300,
+              "38: union removes same-camera overlap and sums camera-hours");
+        check(duration.segmentCount == 4 &&
+                  duration.camerasWithFootage == 2 &&
+                  duration.overlappingSegments == 1 &&
+                  duration.invalidSegments == 0,
+              "38: duration evidence counts cameras, segments, and overlap");
+    }
+    {
+        RecordingDuration duration;
+        check(static_cast<bool>(idx.recordedDuration(
+                  {"camera-with-no-footage"}, duration)) &&
+                  duration.seconds == 0 && duration.segmentCount == 0,
+              "38: connected index with no completed footage returns honest zero");
+    }
+    check(static_cast<bool>(store.exec(
+              "INSERT INTO segments(camera_id,start_utc,end_utc,path,bytes) "
+              "VALUES('duration-a','not-a-time','2026-07-29 11:00:00',"
+              "'legacy-bad.mp4',10);")),
+          "38: inject one malformed legacy row for exclusion coverage");
+    {
+        RecordingDuration duration;
+        idx.recordedDuration({"duration-a"}, duration);
+        check(duration.seconds == 1200 && duration.segmentCount == 3 &&
+                  duration.invalidSegments == 1,
+              "38: malformed legacy rows are excluded and reported");
+    }
+
     if (failures == 0) {
-        std::cout << "PASS: segment add/validation, overlap listing, totals, and "
-                     "oldest-first size/age retention all verified\n";
+        std::cout << "PASS: segment validation, availability, retention, and "
+                     "overlap-safe cumulative duration all verified\n";
         return 0;
     }
     std::cout << "FAILED: " << failures << " check(s)\n";

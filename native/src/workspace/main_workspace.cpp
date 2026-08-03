@@ -70,6 +70,7 @@
 #include "CommandController.h"
 #include "AlarmController.h"
 #include "PremisesController.h"
+#include "SiteOperationsController.h"
 #include "command/CoverageCheck.h"
 #ifdef VMS_WITH_API
 #include <QEventLoop>
@@ -476,7 +477,8 @@ int runSpatialSelftest() {
         check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
         check(static_cast<bool>(store.migrate(coreMigrations())),
               "migrate schema");
-        check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
+        check(store.schemaVersion() == 13,
+              "schema at v13 (site-scoped reachability evidence)");
 
         WorkspaceController a(vms::DevBoxProfile(), 4);
         a.setTilePos(2, 777.0, 888.0);
@@ -694,6 +696,41 @@ int runCommandSelftest() {
               premises.floorName() == QLatin1String("Ground floor") &&
               premises.worldWidth() == 2200.0,
           "typed premises.floor configures and selects the active floor");
+    r = cmd.run(QStringLiteral("premises.hours.add mon 09:00 17:00"));
+    const QDateTime mondayOpen = QDateTime::fromString(
+        QStringLiteral("2026-01-05T05:00:00Z"), Qt::ISODate);
+    check(r.startsWith(QLatin1String("ok")) &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                  .value(QStringLiteral("open")).toBool(),
+          "audited weekly-hours command produces Open in site local time");
+    r = cmd.run(QStringLiteral("premises.hours.add mon 10:00 18:00"));
+    const QString unchangedHours = premises.operatingHoursAtUtc(mondayOpen)
+                                       .value(QStringLiteral("todayHours"))
+                                       .toString();
+    check(r.startsWith(QLatin1String("failed")) &&
+              unchangedHours.contains(QLatin1String("09:00")) &&
+              unchangedHours.contains(QLatin1String("17:00")),
+          "overlapping command is refused without changing the schedule");
+    r = cmd.invoke(QStringLiteral("premises.hours.holiday"),
+                   {{QStringLiteral("date"), QStringLiteral("2026-01-05")},
+                    {QStringLiteral("label"), QStringLiteral("Test holiday")}})
+            .value(QStringLiteral("outcome")).toString();
+    check(r == QLatin1String("ok") &&
+              !premises.operatingHoursAtUtc(mondayOpen)
+                   .value(QStringLiteral("open")).toBool() &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                      .value(QStringLiteral("source")).toString() ==
+                  QLatin1String("Date closed"),
+          "date-closed command overrides the weekly rule");
+    r = cmd.run(QStringLiteral(
+        "premises.hours.exception.clear 2026-01-05"));
+    check(r.startsWith(QLatin1String("ok")) &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                  .value(QStringLiteral("open")).toBool(),
+          "clearing the date exception restores the weekly rule");
+    check(cmd.catalogJson().contains(
+              QLatin1String("\"id\":\"premises.hours.exception\"")),
+          "operating-hours verbs are discoverable in the command catalog");
 
     // Inc 30: discrete Playback transport now uses the same envelope.
     r = cmd.run(QStringLiteral("playback.play"));
@@ -802,7 +839,8 @@ int runAuditSelftest() {
         Store store;
         check(static_cast<bool>(store.open(dbf.toStdString())), "open store file");
         check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-        check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
+        check(store.schemaVersion() == 13,
+              "schema at v13 (site-scoped reachability evidence)");
         AuditRepo repo(store);
 
         WorkspaceController live(vms::DevBoxProfile(), 4);
@@ -1330,16 +1368,20 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 11, "schema at v11 (premises + FOV)");
+    check(store.schemaVersion() == 13,
+          "schema at v13 (site-scoped reachability evidence)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
     FakeHealthProbe fakeProbe;
+    QString observationNow = QStringLiteral("2026-08-03 08:00:00");
 #ifdef VMS_WITH_ONVIF
     FakeDiscoverySource fakeDisc;
-    DeviceController ctrl(&repo, &health, &fakeDisc, &fakeProbe);
+    DeviceController ctrl(&repo, &health, &fakeDisc, &fakeProbe, nullptr,
+                          [&observationNow] { return observationNow; });
 #else
-    DeviceController ctrl(&repo, &health, nullptr, &fakeProbe);
+    DeviceController ctrl(&repo, &health, nullptr, &fakeProbe, nullptr,
+                          [&observationNow] { return observationNow; });
 #endif
 
     std::cout << "vms_workspace --devices-selftest\n";
@@ -1368,6 +1410,29 @@ int runDevicesSelftest() {
               .value(QStringLiteral("state")).toString() == QLatin1String("unknown"),
           "new device health is Unknown until observed");
 
+    PremisesRepo siteRepo(store);
+    check(static_cast<bool>(siteRepo.ensureDefault("live")),
+          "seed canonical site for device ownership");
+    WorkspaceController assignmentLive(vms::DevBoxProfile(), 4);
+    CommandController assignmentCommand(&assignmentLive, nullptr, &ctrl);
+    QString assignmentResult = assignmentCommand.run(
+        QStringLiteral("device.site cam-1 site-default"));
+    check(assignmentResult.startsWith(QLatin1String("ok")) &&
+              ctrl.devices().first().toMap()
+                      .value(QStringLiteral("siteId")).toString() ==
+                  QLatin1String("site-default"),
+          "audited device.site command assigns the canonical site");
+    assignmentResult = assignmentCommand.run(
+        QStringLiteral("device.site cam-1 missing-site"));
+    check(assignmentResult.startsWith(QLatin1String("failed")) &&
+              ctrl.devices().first().toMap()
+                      .value(QStringLiteral("siteId")).toString() ==
+                  QLatin1String("site-default"),
+          "bad site assignment is refused without changing ownership");
+    check(assignmentCommand.catalogJson().contains(
+              QLatin1String("\"id\":\"device.site\"")),
+          "device.site is discoverable in the command catalog");
+
     auto healthOf = [&]() {
         return ctrl.devices().first().toMap()
             .value(QStringLiteral("health")).toMap();
@@ -1388,6 +1453,7 @@ int runDevicesSelftest() {
     check(ctrl.attentionCount() == 0,
           "acknowledged device no longer needs attention");
 
+    observationNow = QStringLiteral("2026-08-03 09:00:00");
     ctrl.reportReach(QStringLiteral("cam-1"), 1);   // online
     ctrl.reportStream(QStringLiteral("cam-1"), 2);  // ok
     check(healthOf().value(QStringLiteral("state")).toString() ==
@@ -1395,11 +1461,62 @@ int runDevicesSelftest() {
           "reachable + stream ok -> Online");
     check(!healthOf().value(QStringLiteral("exceptionActive")).toBool(),
           "recovery auto-clears the exception");
+    observationNow = QStringLiteral("2026-08-03 10:00:00");
+    ctrl.reportReach(QStringLiteral("cam-1"), 1);
+    check(healthOf().value(QStringLiteral("lastSeenUtc")).toString() ==
+              QLatin1String("2026-08-03 10:00:00") &&
+              healthOf().value(QStringLiteral("onlineSinceUtc")).toString() ==
+                  QLatin1String("2026-08-03 09:00:00") &&
+              healthOf().value(QStringLiteral("uptimeSeconds")).toLongLong() ==
+                  3600,
+          "positive repeat advances last seen and preserves evidenced uptime");
+
+    vms::health::HealthMonitor restartedHealth;
+#ifdef VMS_WITH_ONVIF
+    DeviceController restarted(&repo, &restartedHealth, &fakeDisc, nullptr,
+                               nullptr,
+                               [&observationNow] { return observationNow; });
+#else
+    DeviceController restarted(&repo, &restartedHealth, nullptr, nullptr,
+                               nullptr,
+                               [&observationNow] { return observationNow; });
+#endif
+    const QVariantMap restartedEvidence =
+        restarted.devices().first().toMap().value(QStringLiteral("health")).toMap();
+    check(restartedEvidence.value(QStringLiteral("lastSeenAvailable")).toBool() &&
+              !restartedEvidence.value(QStringLiteral("uptimeAvailable")).toBool(),
+          "restart exposes persisted last seen but awaits fresh uptime evidence");
+    observationNow = QStringLiteral("2026-08-03 10:30:00");
+    restarted.reportReach(QStringLiteral("cam-1"), 1);
+    const QVariantMap restartedFresh =
+        restarted.devices().first().toMap().value(QStringLiteral("health")).toMap();
+    check(restartedFresh.value(QStringLiteral("uptimeAvailable")).toBool() &&
+              restartedFresh.value(QStringLiteral("onlineSinceUtc")).toString() ==
+                  QLatin1String("2026-08-03 10:30:00"),
+          "first fresh positive after restart begins a new evidenced run");
+
+    observationNow = QStringLiteral("2026-08-03 11:00:00");
+    ctrl.reportReach(QStringLiteral("cam-1"), 0);
+    check(!healthOf().value(QStringLiteral("uptimeAvailable")).toBool() &&
+              healthOf().value(QStringLiteral("lastSeenUtc")).toString() ==
+                  QLatin1String("2026-08-03 10:30:00"),
+          "negative evidence clears uptime while preserving last seen");
+    observationNow = QStringLiteral("2026-08-03 12:00:00");
+    ctrl.reportReach(QStringLiteral("cam-1"), 1);
+    check(healthOf().value(QStringLiteral("onlineSinceUtc")).toString() ==
+              QLatin1String("2026-08-03 12:00:00"),
+          "positive after offline begins a new evidenced uptime run");
 
     err = ctrl.removeDevice(QStringLiteral("cam-1"));
     check(err.isEmpty() && ctrl.deviceCount() == 0, "remove clears the device");
     check(!secrets.contains(CredentialRepo::mintRef("cam-1")),
           "remove deletes the credential secret");
+    Result observationRows;
+    store.query("SELECT COUNT(*) FROM device_reach_observation;", {},
+                observationRows);
+    check(!observationRows.rows.empty() &&
+              std::get<std::int64_t>(observationRows.rows[0][0]) == 0,
+          "device removal cascades its persisted reachability evidence");
 
     // inc 15: a multi-channel recorder onboards atomically — N channels expand
     // from the URL templates and the default group is reconciled to all N.
@@ -1845,6 +1962,42 @@ StateView stateView(vms::TileState s) {
     return {QStringLiteral("unknown"), QStringLiteral("?")};
 }
 
+QVariantMap unavailableDiagnostics(const QString& reason) {
+    QVariantMap d;
+    d.insert(QStringLiteral("streamState"), QStringLiteral("unavailable"));
+    d.insert(QStringLiteral("streamStateText"), QStringLiteral("Unavailable"));
+    d.insert(QStringLiteral("streamReason"), reason);
+    d.insert(QStringLiteral("codecAvailable"), false);
+    d.insert(QStringLiteral("codec"), QString());
+    d.insert(QStringLiteral("resolutionAvailable"), false);
+    d.insert(QStringLiteral("width"), 0);
+    d.insert(QStringLiteral("height"), 0);
+    d.insert(QStringLiteral("fpsAvailable"), false);
+    d.insert(QStringLiteral("fps"), 0.0);
+    d.insert(QStringLiteral("bitrateAvailable"), false);
+    d.insert(QStringLiteral("bitrateKbps"), 0.0);
+    d.insert(QStringLiteral("bitrateReason"),
+             QStringLiteral("Source transport bitrate is not exposed"));
+    d.insert(QStringLiteral("latencyAvailable"), false);
+    d.insert(QStringLiteral("latencyMs"), 0.0);
+    d.insert(QStringLiteral("latencyReason"),
+             QStringLiteral("Source latency telemetry is not exposed"));
+    d.insert(QStringLiteral("packetLossAvailable"), false);
+    d.insert(QStringLiteral("packetLossPct"), 0.0);
+    d.insert(QStringLiteral("packetLossReason"),
+             QStringLiteral("Source packet-loss telemetry is not exposed"));
+    return d;
+}
+
+QVariantMap pausedDiagnostics() {
+    QVariantMap d = unavailableDiagnostics(
+        QStringLiteral("Decode paused by viewport or capacity policy"));
+    d.insert(QStringLiteral("streamState"), QStringLiteral("paused"));
+    d.insert(QStringLiteral("streamStateText"),
+             QStringLiteral("Paused by policy"));
+    return d;
+}
+
 } // namespace
 
 // --- WorkspaceController ----------------------------------------------------
@@ -1883,6 +2036,10 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
     for (int i = 0; i < count; ++i)
         vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
 
+    for (int i = 0; i < count; ++i)
+        mediaDiagnostics_.push_back(unavailableDiagnostics(
+            QStringLiteral("Live video is not enabled")));
+
     columns_ = std::max(1, static_cast<int>(std::ceil(std::sqrt(
                                static_cast<double>(count)))));
     rows_ = std::max(1, static_cast<int>(std::ceil(
@@ -1892,6 +2049,37 @@ WorkspaceController::WorkspaceController(vms::CapacityProfile profile, int count
     rebuildModel();
 
     connect(&timer_, &QTimer::timeout, this, [this]() { sweep(); });
+}
+
+void WorkspaceController::clearMediaDiagnostics(const QString& reason) {
+    mediaDiagnostics_.clear();
+    const std::vector<vms::Tier> tiers = currentTiers();
+    for (int i = 0; i < static_cast<int>(requests_.size()); ++i)
+        mediaDiagnostics_.push_back(tiers[i] == vms::Tier::Paused
+                                        ? pausedDiagnostics()
+                                        : unavailableDiagnostics(reason));
+    mediaDiagnosticsActive_ = true;
+    emit diagnosticsChanged();
+}
+
+void WorkspaceController::setMediaDiagnostics(const QVariantList& diagnostics) {
+    QVariantList next;
+    const int n = static_cast<int>(requests_.size());
+    next.reserve(n);
+    for (int i = 0; i < n; ++i)
+        next.push_back(unavailableDiagnostics(
+            QStringLiteral("No media observation for this tile")));
+    for (const QVariant& value : diagnostics) {
+        const QVariantMap d = value.toMap();
+        const int id = d.value(QStringLiteral("id"), -1).toInt();
+        if (id >= 0 && id < n) next[id] = d;
+    }
+    const std::vector<vms::Tier> tiers = currentTiers();
+    for (int i = 0; i < n; ++i)
+        if (tiers[i] == vms::Tier::Paused) next[i] = pausedDiagnostics();
+    mediaDiagnostics_ = next;
+    mediaDiagnosticsActive_ = true;
+    emit diagnosticsChanged();
 }
 
 void WorkspaceController::rebuildModel(bool isLayoutChange) {
@@ -1947,7 +2135,27 @@ void WorkspaceController::rebuildModel(bool isLayoutChange) {
                     .arg(plan_.decoding)
                     .arg(n);
 
+    bool diagnosticsReconciled = false;
+    if (mediaDiagnosticsActive_ && mediaDiagnostics_.size() == n) {
+        for (int i = 0; i < n; ++i) {
+            QVariantMap d = mediaDiagnostics_[i].toMap();
+            const QString streamState =
+                d.value(QStringLiteral("streamState")).toString();
+            if (tier[i] == vms::Tier::Paused &&
+                streamState != QLatin1String("paused")) {
+                mediaDiagnostics_[i] = pausedDiagnostics();
+                diagnosticsReconciled = true;
+            } else if (tier[i] != vms::Tier::Paused &&
+                       streamState == QLatin1String("paused")) {
+                mediaDiagnostics_[i] = unavailableDiagnostics(
+                    QStringLiteral("Awaiting media after policy promotion"));
+                diagnosticsReconciled = true;
+            }
+        }
+    }
+
     emit changed();
+    if (diagnosticsReconciled) emit diagnosticsChanged();
     // A layout change rebuilds the whole video grid; a same-size re-plan only
     // re-tiers the existing branches. Keep them distinct so the video follows
     // correctly (a planChanged handler must not run against a stale tile count).
@@ -2062,6 +2270,11 @@ void WorkspaceController::setTileCount(int count) {
     for (int i = 0; i < count; ++i)
         vms::spatial::GridWorldPos(i, count, posX_[i], posY_[i]);
 
+    mediaDiagnostics_.clear();  // old tile ids/measurements must never leak
+    for (int i = 0; i < count; ++i)
+        mediaDiagnostics_.push_back(unavailableDiagnostics(
+            QStringLiteral("Live video is not enabled")));
+    mediaDiagnosticsActive_ = false;
     session_.reset();   // a new working set: re-plan from scratch, no stale state
     plan_ = session_.update(requests_);
     rebuildModel(/*isLayoutChange=*/true);
@@ -2361,6 +2574,337 @@ int runSelftest(const vms::CapacityProfile& profile, int count) {
     return 0;
 }
 
+int runDiagnosticsSelftest() {
+    int failures = 0;
+    auto check = [&](bool condition, const char* what) {
+        std::cout << (condition ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!condition) ++failures;
+    };
+    std::cout << "vms_workspace --diagnostics-selftest\n";
+
+    WorkspaceController controller(vms::DevBoxProfile(), 4);
+    QVariantMap initial = controller.mediaDiagnostics()[0].toMap();
+    check(initial.value(QStringLiteral("streamState")) ==
+              QLatin1String("unavailable"),
+          "video-disabled tiles start explicitly unavailable");
+    check(!initial.value(QStringLiteral("fpsAvailable")).toBool() &&
+              !initial.value(QStringLiteral("bitrateAvailable")).toBool() &&
+              !initial.value(QStringLiteral("latencyAvailable")).toBool() &&
+              !initial.value(QStringLiteral("packetLossAvailable")).toBool(),
+          "unknown metrics use availability flags, never fake zeroes");
+
+    QVariantMap observed = unavailableDiagnostics(QStringLiteral("observed"));
+    observed.insert(QStringLiteral("id"), 0);
+    observed.insert(QStringLiteral("streamState"), QStringLiteral("playing"));
+    observed.insert(QStringLiteral("streamStateText"), QStringLiteral("Playing"));
+    observed.insert(QStringLiteral("streamReason"),
+                    QStringLiteral("Decoded buffers observed"));
+    observed.insert(QStringLiteral("codecAvailable"), true);
+    observed.insert(QStringLiteral("codec"), QStringLiteral("H.265"));
+    observed.insert(QStringLiteral("resolutionAvailable"), true);
+    observed.insert(QStringLiteral("width"), 1920);
+    observed.insert(QStringLiteral("height"), 1080);
+    observed.insert(QStringLiteral("fpsAvailable"), true);
+    observed.insert(QStringLiteral("fps"), 24.75);
+
+    int replans = 0;
+    QObject::connect(&controller, &WorkspaceController::planChanged,
+                     [&replans]() { ++replans; });
+    controller.setMediaDiagnostics({observed});
+    QVariantMap live = controller.mediaDiagnostics()[0].toMap();
+    check(replans == 0, "publishing diagnostics never re-plans media");
+    check(live.value(QStringLiteral("streamState")) == QLatin1String("playing") &&
+              live.value(QStringLiteral("fpsAvailable")).toBool() &&
+              std::fabs(live.value(QStringLiteral("fps")).toDouble() - 24.75) <
+                  0.001,
+          "observed stream state and decoded FPS reach the tile model");
+    check(live.value(QStringLiteral("codec")) == QLatin1String("H.265") &&
+              live.value(QStringLiteral("width")).toInt() == 1920 &&
+              live.value(QStringLiteral("height")).toInt() == 1080,
+          "active codec and source resolution reach the tile model");
+    check(!live.value(QStringLiteral("bitrateAvailable")).toBool() &&
+              !live.value(QStringLiteral("bitrateReason")).toString().isEmpty() &&
+              !live.value(QStringLiteral("latencyReason")).toString().isEmpty() &&
+              !live.value(QStringLiteral("packetLossReason")).toString().isEmpty(),
+          "unsupported transport metrics carry explicit reasons");
+
+    QVariantMap missing = controller.mediaDiagnostics()[1].toMap();
+    check(missing.value(QStringLiteral("streamState")) ==
+              QLatin1String("unavailable"),
+          "an absent observation stays honestly unavailable");
+
+    controller.setDesiredTier(2, 0);
+    QVariantMap paused = controller.mediaDiagnostics()[2].toMap();
+    check(paused.value(QStringLiteral("streamState")) == QLatin1String("paused") &&
+              !paused.value(QStringLiteral("fpsAvailable")).toBool() &&
+              !paused.value(QStringLiteral("codecAvailable")).toBool(),
+          "policy-paused tiles suppress stale live measurements");
+
+    if (failures == 0) {
+        std::cout << "PASS: honest live-diagnostics model, availability, and "
+                     "policy-pause behavior verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+
+#ifdef VMS_WITH_PERSIST
+int runSiteOperationsSelftest() {
+    using namespace vms::persist;
+    int failures = 0;
+    auto check = [&](bool condition, const char* what) {
+        std::cout << (condition ? "  ok  " : "  FAIL ") << what << "\n";
+        if (!condition) ++failures;
+    };
+    std::cout << "vms_workspace --site-operations-selftest\n";
+
+    Store store;
+    check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
+    check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
+    PremisesRepo premisesRepo(store);
+    PremisesController premises(&premisesRepo);
+    check(premises.configureSite(QStringLiteral("hq"),
+                                 QStringLiteral("Headquarters"),
+                                 QStringLiteral("Asia/Karachi")).isEmpty(),
+          "configure active site/timezone");
+    check(premises.configureFloor(QStringLiteral("hq-ground"),
+                                  QStringLiteral("hq"),
+                                  QStringLiteral("Ground floor"), {},
+                                  1600, 900).isEmpty(),
+          "configure active floor");
+
+    InMemorySecretStore secrets;
+    DeviceRepo deviceRepo(store, secrets);
+    vms::health::HealthMonitor health;
+    DeviceController devices(&deviceRepo, &health);
+    check(devices.onboard(QStringLiteral("cam-online"),
+                          QStringLiteral("Online camera"),
+                          QStringLiteral("192.0.2.10"), QStringLiteral("Test"),
+                          QStringLiteral("admin"), QStringLiteral("secret"),
+                          QStringLiteral("rtsp://192.0.2.10/main"), {}).isEmpty(),
+          "onboard online fixture device");
+    check(devices.onboard(QStringLiteral("cam-offline"),
+                          QStringLiteral("Offline camera"),
+                          QStringLiteral("192.0.2.11"), QStringLiteral("Test"),
+                          QStringLiteral("admin"), QStringLiteral("secret"),
+                          QStringLiteral("rtsp://192.0.2.11/main"), {}).isEmpty(),
+          "onboard offline fixture device");
+    check(devices.onboard(QStringLiteral("cam-unassigned"),
+                          QStringLiteral("Unassigned camera"),
+                          QStringLiteral("192.0.2.12"), QStringLiteral("Test"),
+                          QStringLiteral("admin"), QStringLiteral("secret"),
+                          QStringLiteral("rtsp://192.0.2.12/main"), {}).isEmpty(),
+          "onboard unassigned fixture device");
+    check(devices.assignSite(QStringLiteral("cam-online"),
+                             QStringLiteral("hq")).isEmpty() &&
+              devices.assignSite(QStringLiteral("cam-offline"),
+                                 QStringLiteral("hq")).isEmpty(),
+          "assign two fixture devices to the active site");
+    devices.reportReach(QStringLiteral("cam-online"), 1);
+    devices.reportStream(QStringLiteral("cam-online"), 2);
+    devices.reportReach(QStringLiteral("cam-offline"), 0);
+
+    SegmentIndex recordings(store);
+    auto addRecording = [&](const char* cameraId, const char* startUtc,
+                            const char* endUtc, const char* path) {
+        Segment segment;
+        segment.cameraId = cameraId;
+        segment.startUtc = startUtc;
+        segment.endUtc = endUtc;
+        segment.path = path;
+        segment.codec = "h265";
+        segment.bytes = 100;
+        std::int64_t id = 0;
+        return static_cast<bool>(recordings.add(segment, id));
+    };
+    check(addRecording("cam-online", "2026-08-03 09:00:00",
+                       "2026-08-03 09:10:00", "online-a.mp4") &&
+              addRecording("cam-online", "2026-08-03 09:08:00",
+                           "2026-08-03 09:15:00", "online-b.mp4") &&
+              addRecording("cam-offline", "2026-08-03 10:00:00",
+                           "2026-08-03 10:05:00", "offline-a.mp4") &&
+              addRecording("cam-unassigned", "2026-08-03 08:00:00",
+                           "2026-08-03 09:00:00", "unassigned.mp4"),
+          "index completed recording fixtures including unassigned footage");
+    check(devices.setChannelDisabled(QStringLiteral("cam-offline"),
+                                     QStringLiteral("cam-offline"), true)
+              .isEmpty(),
+          "disable a channel without deleting its retained recording history");
+
+    WorkspaceController live(vms::DevBoxProfile(), 4);
+    QVariantList diagnostics;
+    QVariantMap playing = unavailableDiagnostics(QStringLiteral("observed"));
+    playing.insert(QStringLiteral("id"), 0);
+    playing.insert(QStringLiteral("streamState"), QStringLiteral("playing"));
+    playing.insert(QStringLiteral("streamStateText"), QStringLiteral("Playing"));
+    playing.insert(QStringLiteral("fpsAvailable"), true);
+    playing.insert(QStringLiteral("fps"), 30.0);
+    diagnostics.push_back(playing);
+    QVariantMap connecting = unavailableDiagnostics(QStringLiteral("waiting"));
+    connecting.insert(QStringLiteral("id"), 1);
+    connecting.insert(QStringLiteral("streamState"), QStringLiteral("connecting"));
+    diagnostics.push_back(connecting);
+    live.setMediaDiagnostics(diagnostics);
+
+    SiteOperationsController operations(&premises, &devices, &live,
+                                        &recordings);
+    const QVariantMap snapshot = operations.snapshot();
+    const QVariantMap site = snapshot.value(QStringLiteral("site")).toMap();
+    const QVariantMap clock =
+        snapshot.value(QStringLiteral("localClock")).toMap();
+    check(site.value(QStringLiteral("name")) ==
+              QLatin1String("Headquarters") &&
+              site.value(QStringLiteral("floor")) ==
+                  QLatin1String("Ground floor") &&
+              site.value(QStringLiteral("timezone")) ==
+                  QLatin1String("Asia/Karachi"),
+          "snapshot is keyed by the active premises");
+    check(clock.value(QStringLiteral("available")).toBool() &&
+              !clock.value(QStringLiteral("date")).toString().isEmpty() &&
+              !clock.value(QStringLiteral("time")).toString().isEmpty(),
+          "valid IANA timezone produces a site-local clock");
+
+    const QVariantMap device =
+        snapshot.value(QStringLiteral("devices")).toMap();
+    check(device.value(QStringLiteral("total")).toInt() == 2 &&
+              device.value(QStringLiteral("online")).toInt() == 1 &&
+              device.value(QStringLiteral("offline")).toInt() == 1 &&
+              device.value(QStringLiteral("unassigned")).toInt() == 1,
+          "device aggregate is active-site scoped and reports unassigned inventory");
+    const QVariantMap uptime =
+        snapshot.value(QStringLiteral("uptimeLastSeen")).toMap();
+    check(uptime.value(QStringLiteral("available")).toBool() &&
+              uptime.value(QStringLiteral("currentReachable")).toInt() == 1 &&
+              uptime.value(QStringLiteral("lastSeenCount")).toInt() == 1 &&
+              !uptime.value(QStringLiteral("latestLastSeenUtc")).toString().isEmpty(),
+          "positive reach evidence supplies site uptime and last seen");
+    const QVariantMap media = snapshot.value(QStringLiteral("media")).toMap();
+    check(media.value(QStringLiteral("playing")).toInt() == 1 &&
+              media.value(QStringLiteral("connecting")).toInt() == 1 &&
+              media.value(QStringLiteral("displayFpsAvailable")).toBool() &&
+              std::fabs(media.value(QStringLiteral("displayFps")).toDouble() -
+                        30.0) < 0.001,
+          "media aggregate preserves state counts and observed FPS");
+
+    const QVariantMap initialHours =
+        snapshot.value(QStringLiteral("operatingHours")).toMap();
+    check(!initialHours.value(QStringLiteral("available")).toBool() &&
+              !initialHours.value(QStringLiteral("reason")).toString().isEmpty(),
+          "unconfigured operating hours are explicitly unavailable");
+    const QVariantMap duration =
+        snapshot.value(QStringLiteral("cumulativeDuration")).toMap();
+    check(duration.value(QStringLiteral("available")).toBool() &&
+              duration.value(QStringLiteral("recordingAvailable")).toBool() &&
+              duration.value(QStringLiteral("recordingSeconds")).toLongLong() ==
+                  1200 &&
+              duration.value(QStringLiteral("rawRecordingSeconds")).toLongLong() ==
+                  1320 &&
+              duration.value(QStringLiteral("overlapRemovedSeconds")).toLongLong() ==
+                  120,
+          "completed site recordings produce overlap-safe cumulative camera-time");
+    check(duration.value(QStringLiteral("segments")).toInt() == 3 &&
+              duration.value(QStringLiteral("siteCameras")).toInt() == 2 &&
+              duration.value(QStringLiteral("camerasWithFootage")).toInt() == 2 &&
+              !duration.value(QStringLiteral("streamingAvailable")).toBool() &&
+              !duration.value(QStringLiteral("streamingReason")).toString().isEmpty(),
+          "duration evidence is site-scoped while streaming remains explicit");
+    const QVariantMap analysis =
+        snapshot.value(QStringLiteral("analysis")).toMap();
+    check(!analysis.value(QStringLiteral("available")).toBool() &&
+              !analysis.value(QStringLiteral("reason")).toString().isEmpty(),
+          "analysis is explicitly unavailable");
+
+    check(premises.addOperatingWindow(QStringLiteral("mon"),
+                                      QStringLiteral("09:00"),
+                                      QStringLiteral("17:00")).isEmpty(),
+          "configure a weekly local-time window");
+    const QDateTime mondayOpen = QDateTime::fromString(
+        QStringLiteral("2026-01-05T05:00:00Z"), Qt::ISODate);
+    const QDateTime mondayEnd = QDateTime::fromString(
+        QStringLiteral("2026-01-05T12:00:00Z"), Qt::ISODate);
+    check(premises.operatingHoursAtUtc(mondayOpen)
+                  .value(QStringLiteral("open")).toBool() &&
+              !premises.operatingHoursAtUtc(mondayEnd)
+                   .value(QStringLiteral("open")).toBool(),
+          "weekly interval is start-inclusive and end-exclusive");
+    check(premises.setHolidayClosed(QStringLiteral("2026-01-05"),
+                                    QStringLiteral("Public holiday")).isEmpty() &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                      .value(QStringLiteral("source")).toString() ==
+                  QLatin1String("Date closed") &&
+              !premises.operatingHoursAtUtc(mondayOpen)
+                   .value(QStringLiteral("open")).toBool(),
+          "closed date exception replaces the weekly rule");
+    check(premises.setSpecialHours(QStringLiteral("2026-01-05"),
+                                   QStringLiteral("10:00"),
+                                   QStringLiteral("14:00"),
+                                   QStringLiteral("Special opening")).isEmpty() &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                  .value(QStringLiteral("todayHours")).toString()
+                  .contains(QLatin1String("10:00")) &&
+              premises.operatingHoursAtUtc(mondayOpen)
+                  .value(QStringLiteral("todayHours")).toString()
+                  .contains(QLatin1String("14:00")),
+          "special-hours exception replaces a closed-date exception atomically");
+    check(operations.snapshot().value(QStringLiteral("operatingHours")).toMap()
+              .value(QStringLiteral("available")).toBool(),
+          "schedule mutation refreshes the panel aggregate immediately");
+
+    check(premises.configureSite(QStringLiteral("ny"),
+                                 QStringLiteral("New York site"),
+                                 QStringLiteral("America/New_York")).isEmpty() &&
+              premises.addOperatingWindow(QStringLiteral("sun"),
+                                           QStringLiteral("01:00"),
+                                           QStringLiteral("03:00")).isEmpty(),
+          "configure an IANA-zone DST fixture");
+    const QVariantMap nySnapshot = operations.snapshot();
+    check(nySnapshot.value(QStringLiteral("devices")).toMap()
+                  .value(QStringLiteral("total")).toInt() == 0 &&
+              !nySnapshot.value(QStringLiteral("uptimeLastSeen")).toMap()
+                   .value(QStringLiteral("available")).toBool() &&
+              !nySnapshot.value(QStringLiteral("cumulativeDuration")).toMap()
+                   .value(QStringLiteral("available")).toBool(),
+          "switching sites excludes prior-site devices, uptime, and recordings");
+    const QDateTime springBefore = QDateTime::fromString(
+        QStringLiteral("2026-03-08T06:30:00Z"), Qt::ISODate);
+    const QDateTime springAfter = QDateTime::fromString(
+        QStringLiteral("2026-03-08T07:30:00Z"), Qt::ISODate);
+    check(premises.operatingHoursAtUtc(springBefore)
+                  .value(QStringLiteral("open")).toBool() &&
+              !premises.operatingHoursAtUtc(springAfter)
+                   .value(QStringLiteral("open")).toBool(),
+          "spring-forward skips nonexistent wall time via UTC-to-IANA conversion");
+    const QDateTime fallFirst = QDateTime::fromString(
+        QStringLiteral("2026-11-01T05:30:00Z"), Qt::ISODate);
+    const QDateTime fallSecond = QDateTime::fromString(
+        QStringLiteral("2026-11-01T06:30:00Z"), Qt::ISODate);
+    check(premises.operatingHoursAtUtc(fallFirst)
+                  .value(QStringLiteral("open")).toBool() &&
+              premises.operatingHoursAtUtc(fallSecond)
+                  .value(QStringLiteral("open")).toBool(),
+          "both repeated fall-back wall hours follow the same local rule");
+
+    QVariantMap stalled = unavailableDiagnostics(QStringLiteral("stalled"));
+    stalled.insert(QStringLiteral("id"), 0);
+    stalled.insert(QStringLiteral("streamState"), QStringLiteral("stalled"));
+    live.setMediaDiagnostics({stalled});
+    check(operations.snapshot().value(QStringLiteral("media")).toMap()
+              .value(QStringLiteral("stalled")).toInt() == 1,
+          "source signal refreshes the aggregate immediately");
+
+    if (failures == 0) {
+        std::cout << "PASS: site-scoped operations aggregation, persisted "
+                     "reachability uptime/last-seen, overlap-safe recording "
+                     "duration, local schedule/DST rules, health/media counts, "
+                     "and remaining unavailable contracts verified\n";
+        return 0;
+    }
+    std::cout << "FAILED: " << failures << " check(s)\n";
+    return 1;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -2372,6 +2916,8 @@ int main(int argc, char* argv[]) {
     bool spatialSelftest = false;        // headless spatial-canvas check (inc 24)
     bool spatialBenchmark = false;       // measured 64-tile performance gate (inc 32)
     int spatialBenchmarkSamples = 600;
+    bool diagnosticsSelftest = false;    // honest live diagnostics (inc 34)
+    bool siteOperationsSelftest = false; // premises operations panel (inc 35)
     bool spatial = false;                // start the Live tab in spatial mode
     bool commandSelftest = false;        // headless command-envelope check (inc 25)
     bool printCommands = false;          // print the machine-readable catalog
@@ -2418,6 +2964,10 @@ int main(int argc, char* argv[]) {
             spatialBenchmark = true;
             if (i + 1 < argc && std::atoi(argv[i + 1]) > 0)
                 spatialBenchmarkSamples = std::atoi(argv[++i]);
+        } else if (a == "--diagnostics-selftest") {
+            diagnosticsSelftest = true;
+        } else if (a == "--site-operations-selftest") {
+            siteOperationsSelftest = true;
         } else if (a == "--spatial") {
             spatial = true;
         } else if (a == "--command-selftest") {
@@ -2490,6 +3040,8 @@ int main(int argc, char* argv[]) {
                 "  --spatial            start the Live tab on the spatial canvas\n"
                 "  --spatial-selftest   headless spatial-canvas check (inc 24)\n"
                 "  --spatial-benchmark [N]  64-tile viewport latency gate\n"
+                "  --diagnostics-selftest  headless live-diagnostics model check\n"
+                "  --site-operations-selftest  headless premises aggregate check\n"
                 "  --commands           print the machine-readable command catalog\n"
                 "  --command-selftest   headless command-envelope check (inc 25)\n"
                 "  --api-port N         serve the loopback control API (inc 26;\n"
@@ -2515,7 +3067,9 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 #endif
+    if (diagnosticsSelftest) return runDiagnosticsSelftest();
 #ifdef VMS_WITH_PERSIST
+    if (siteOperationsSelftest) return runSiteOperationsSelftest();
     if (playbackSelftest) return runPlaybackSelftest();
     if (instantSelftest) return runInstantSelftest();
     if (spatialSelftest) return runSpatialSelftest();
@@ -2535,6 +3089,10 @@ int main(int argc, char* argv[]) {
     }
     if (devicesSelftest) return runDevicesSelftest();
 #else
+    if (siteOperationsSelftest) {
+        std::cerr << "--site-operations-selftest needs the persistence build.\n";
+        return 2;
+    }
     if (playbackSelftest) {
         std::cerr << "--playback-selftest needs the persistence build.\n";
         return 2;
@@ -2714,6 +3272,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (devicesDemo) {
+            const QString demoSite = premises ? premises->siteId() : QString();
             struct Demo { const char* id; const char* name; const char* addr;
                           const char* vendor; int reach; int stream; bool maint; };
             const Demo demos[] = {
@@ -2733,6 +3292,7 @@ int main(int argc, char* argv[]) {
                                      QString::fromLatin1(d.addr) +
                                      QStringLiteral(":554/Streaming/Channels/101"),
                                  QString());
+                if (!demoSite.isEmpty()) devices->assignSite(id, demoSite);
                 if (d.reach >= 0) devices->reportReach(id, d.reach);
                 if (d.stream >= 0) devices->reportStream(id, d.stream);
                 if (d.maint) devices->setMaintenance(id, true);
@@ -2745,6 +3305,8 @@ int main(int argc, char* argv[]) {
                 QStringLiteral("nvr"), QStringLiteral("admin"), QStringLiteral("demo"),
                 8, QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}01"),
                 QStringLiteral("rtsp://192.168.0.20:554/Streaming/Channels/{ch}02"));
+            if (!demoSite.isEmpty())
+                devices->assignSite(QStringLiteral("nvr-lobby"), demoSite);
             devices->reportReach(QStringLiteral("nvr-lobby"), 1);
             devices->reportStream(QStringLiteral("nvr-lobby"), 2);
             // inc 16: run one discovery pass so the Discover panel is populated
@@ -2812,6 +3374,10 @@ int main(int argc, char* argv[]) {
 #endif
 
     CommandController* commander = nullptr;
+    QObject* siteOpsCtrl = nullptr;
+#ifdef VMS_WITH_PERSIST
+    SiteOperationsController* siteOps = nullptr;
+#endif
 #ifdef VMS_WITH_PERSIST
     commander = new CommandController(&liveController, instant, devices,
                                       alarmsCtrl, playback, &app);
@@ -2824,6 +3390,11 @@ int main(int argc, char* argv[]) {
         commander->setAuditStore(auditRepo);
         std::cout << "audit: durable hash-chained log in " << dbPath
                   << " (--audit-dump to read)" << std::endl;
+    }
+    if (persisting) {
+        siteOps = new SiteOperationsController(premises, devices,
+                                               &liveController, recIndex, &app);
+        siteOpsCtrl = siteOps;
     }
 #endif
 
@@ -2879,6 +3450,8 @@ int main(int argc, char* argv[]) {
                                               spatial);
     engine.rootContext()->setContextProperty(QStringLiteral("premises"),
                                               premisesCtrl);
+    engine.rootContext()->setContextProperty(QStringLiteral("siteOps"),
+                                              siteOpsCtrl);
     // inc 25: the command envelope (null on a build without persistence); the
     // palette QML guards every use with `commander &&`.
     engine.rootContext()->setContextProperty(QStringLiteral("commander"),
@@ -2909,6 +3482,7 @@ int main(int argc, char* argv[]) {
 #ifdef VMS_WITH_GSTREAMER
     GridPipeline* grid = nullptr;
     QTimer busTimer;
+    QTimer diagnosticsTimer;
     if (video) {
         VideoItem* item =
             engine.rootObjects().first()->findChild<VideoItem*>(
@@ -2933,6 +3507,74 @@ int main(int argc, char* argv[]) {
         std::cout << "video: governed grid PLAYING (slice 2b) -- "
                   << grid->summary() << std::endl;
         videoRunning = true;
+
+        // P3-04 / inc 34: publish only observations the governed media path
+        // really owns. Decoded FPS is measured at branch buffers; codec and
+        // resolution are the active source tier. This synthetic source has no
+        // RTCP/transport feed, so bitrate/latency/loss stay typed unavailable.
+        liveController.clearMediaDiagnostics(
+            QStringLiteral("Waiting for decoded media samples"));
+        auto publishDiagnostics = [&liveController, &grid]() {
+            if (!grid) return;
+            QVariantList observed;
+            for (const GridTileDiagnostics& sample : grid->diagnostics()) {
+                QVariantMap d;
+                d.insert(QStringLiteral("id"), sample.tileId);
+                d.insert(QStringLiteral("streamState"),
+                         QString::fromStdString(sample.streamState));
+                QString stateText;
+                QString stateReason;
+                if (sample.streamState == "playing") {
+                    stateText = QStringLiteral("Playing");
+                    stateReason = QStringLiteral("Decoded buffers observed");
+                } else if (sample.streamState == "connecting") {
+                    stateText = QStringLiteral("Connecting");
+                    stateReason = QStringLiteral("Awaiting the first decoded buffer");
+                } else if (sample.streamState == "stalled") {
+                    stateText = QStringLiteral("Stalled");
+                    stateReason = QStringLiteral("No decoded buffer for two seconds");
+                } else {
+                    stateText = QStringLiteral("Paused by policy");
+                    stateReason = QStringLiteral(
+                        "Decode paused by viewport or capacity policy");
+                }
+                d.insert(QStringLiteral("streamStateText"), stateText);
+                d.insert(QStringLiteral("streamReason"), stateReason);
+
+                const bool mediaAssigned = sample.streamState != "paused";
+                d.insert(QStringLiteral("codecAvailable"),
+                         mediaAssigned && !sample.codec.empty());
+                QString codec = QString::fromStdString(sample.codec).toUpper();
+                if (codec == QLatin1String("H264")) codec = QStringLiteral("H.264");
+                if (codec == QLatin1String("H265")) codec = QStringLiteral("H.265");
+                d.insert(QStringLiteral("codec"), codec);
+                d.insert(QStringLiteral("resolutionAvailable"),
+                         mediaAssigned && sample.width > 0 && sample.height > 0);
+                d.insert(QStringLiteral("width"), sample.width);
+                d.insert(QStringLiteral("height"), sample.height);
+                d.insert(QStringLiteral("fpsAvailable"),
+                         sample.receiving && sample.fps > 0.0);
+                d.insert(QStringLiteral("fps"), sample.fps);
+
+                d.insert(QStringLiteral("bitrateAvailable"), false);
+                d.insert(QStringLiteral("bitrateKbps"), 0.0);
+                d.insert(QStringLiteral("bitrateReason"), QStringLiteral(
+                    "Synthetic source exposes no transport bitrate"));
+                d.insert(QStringLiteral("latencyAvailable"), false);
+                d.insert(QStringLiteral("latencyMs"), 0.0);
+                d.insert(QStringLiteral("latencyReason"), QStringLiteral(
+                    "Synthetic source exposes no capture/network timestamp"));
+                d.insert(QStringLiteral("packetLossAvailable"), false);
+                d.insert(QStringLiteral("packetLossPct"), 0.0);
+                d.insert(QStringLiteral("packetLossReason"), QStringLiteral(
+                    "Synthetic source has no RTP/RTCP packet statistics"));
+                observed.push_back(d);
+            }
+            liveController.setMediaDiagnostics(observed);
+        };
+        QObject::connect(&diagnosticsTimer, &QTimer::timeout,
+                         publishDiagnostics);
+        diagnosticsTimer.start(500);
 
         // `grid` is rebuilt on a layout change, so every handler captures it by
         // reference and uses whatever pipeline is current.
@@ -2963,6 +3605,8 @@ int main(int argc, char* argv[]) {
         // for the new geometry; encoded clips are cached so this is fast.
         QObject::connect(&liveController, &WorkspaceController::layoutChanged,
                          [&liveController, &grid, item]() {
+            liveController.clearMediaDiagnostics(
+                QStringLiteral("Media pipeline is rebuilding"));
             if (grid) { grid->stop(); delete grid; }
             grid = new GridPipeline(item, liveController.columns(),
                                     liveController.rows(),
@@ -3208,6 +3852,170 @@ int main(int argc, char* argv[]) {
     }
 
     const int rc = app.exec();
+    bool siteOperationsSmokeFailed = false;
+#ifdef VMS_WITH_PERSIST
+    if (smokeMs > 0 && siteOps) {
+        siteOps->refresh();
+        const QVariantMap snapshot = siteOps->snapshot();
+        const QVariantMap site = snapshot.value(QStringLiteral("site")).toMap();
+        const QVariantMap clock =
+            snapshot.value(QStringLiteral("localClock")).toMap();
+        const QVariantMap device =
+            snapshot.value(QStringLiteral("devices")).toMap();
+        const QVariantMap media =
+            snapshot.value(QStringLiteral("media")).toMap();
+        const QVariantMap hours =
+            snapshot.value(QStringLiteral("operatingHours")).toMap();
+        const QVariantMap uptime =
+            snapshot.value(QStringLiteral("uptimeLastSeen")).toMap();
+        const QVariantMap duration =
+            snapshot.value(QStringLiteral("cumulativeDuration")).toMap();
+        QObject* panel = engine.rootObjects().isEmpty()
+                             ? nullptr
+                             : engine.rootObjects().first()->findChild<QObject*>(
+                                   QStringLiteral("siteOperationsPanel"));
+        std::cout << "smoke: site operations site='"
+                  << site.value(QStringLiteral("name")).toString().toStdString()
+                  << "' timezone="
+                  << site.value(QStringLiteral("timezone")).toString().toStdString()
+                  << " devices=" << device.value(QStringLiteral("total")).toInt()
+                  << " online=" << device.value(QStringLiteral("online")).toInt()
+                  << " degraded="
+                  << device.value(QStringLiteral("degraded")).toInt()
+                  << " offline=" << device.value(QStringLiteral("offline")).toInt()
+                  << " streams-playing="
+                  << media.value(QStringLiteral("playing")).toInt()
+                  << " hours="
+                  << hours.value(QStringLiteral("stateText")).toString()
+                         .toStdString()
+                  << " reachable="
+                  << uptime.value(QStringLiteral("currentReachable")).toInt()
+                  << " last-seen='"
+                  << uptime.value(QStringLiteral("latestLastSeenUtc"))
+                         .toString().toStdString()
+                  << "' recorded-seconds="
+                  << duration.value(QStringLiteral("recordingSeconds"))
+                         .toLongLong()
+                  << " recording-segments="
+                  << duration.value(QStringLiteral("segments")).toInt()
+                  << " panel=" << (panel ? "loaded" : "missing")
+                  << std::endl;
+        auto unavailableHonest = [&](const char* key) {
+            const QVariantMap field =
+                snapshot.value(QString::fromLatin1(key)).toMap();
+            return !field.value(QStringLiteral("available")).toBool() &&
+                   !field.value(QStringLiteral("reason")).toString().isEmpty();
+        };
+        const bool hoursHonest =
+            hours.value(QStringLiteral("available")).toBool()
+                ? (!hours.value(QStringLiteral("stateText")).toString().isEmpty() &&
+                   !hours.value(QStringLiteral("todayHours")).toString().isEmpty() &&
+                   !hours.value(QStringLiteral("source")).toString().isEmpty())
+                : !hours.value(QStringLiteral("reason")).toString().isEmpty();
+        const bool uptimeHonest =
+            uptime.value(QStringLiteral("available")).toBool()
+                ? (!uptime.value(QStringLiteral("stateText")).toString().isEmpty() &&
+                   !uptime.value(QStringLiteral("latestLastSeenUtc"))
+                        .toString().isEmpty())
+                : !uptime.value(QStringLiteral("reason")).toString().isEmpty();
+        const bool durationHonest =
+            duration.value(QStringLiteral("available")).toBool()
+                ? (duration.value(QStringLiteral("recordingAvailable")).toBool() &&
+                   duration.value(QStringLiteral("recordingSeconds")).toLongLong() >= 0 &&
+                   !duration.value(QStringLiteral("stateText")).toString().isEmpty() &&
+                   !duration.value(QStringLiteral("streamingAvailable")).toBool() &&
+                   !duration.value(QStringLiteral("streamingReason"))
+                        .toString().isEmpty())
+                : !duration.value(QStringLiteral("reason")).toString().isEmpty();
+        siteOperationsSmokeFailed =
+            !site.value(QStringLiteral("available")).toBool() ||
+            !panel || !panel->property("visible").toBool() ||
+            !clock.value(QStringLiteral("available")).toBool() ||
+            !device.value(QStringLiteral("available")).toBool() ||
+            !hoursHonest ||
+            !uptimeHonest ||
+            !durationHonest ||
+            !unavailableHonest("analysis") ||
+            (devicesDemo && device.value(QStringLiteral("total")).toInt() == 0) ||
+            (devicesDemo &&
+             !uptime.value(QStringLiteral("available")).toBool()) ||
+            (video && (!media.value(QStringLiteral("available")).toBool() ||
+                       media.value(QStringLiteral("playing")).toInt() == 0));
+        if (siteOperationsSmokeFailed)
+            std::cerr << "smoke: FAIL premises operations panel contract"
+                      << std::endl;
+    }
+#endif
+    bool diagnosticsSmokeFailed = false;
+#ifdef VMS_WITH_GSTREAMER
+    if (smokeMs > 0 && video) {
+        int active = 0;
+        int playing = 0;
+        int fpsKnown = 0;
+        int mediaKnown = 0;
+        int paused = 0;
+        int pausedHonest = 0;
+        int transportUnavailable = 0;
+        double minFps = 0.0;
+        double maxFps = 0.0;
+        const QVariantList diagnosticModel =
+            liveController.mediaDiagnostics();
+        const QVariantList tileModel = liveController.tiles();
+        for (int i = 0; i < tileModel.size(); ++i) {
+            const QVariantMap tile = tileModel[i].toMap();
+            const QVariantMap d = i < diagnosticModel.size()
+                                      ? diagnosticModel[i].toMap()
+                                      : QVariantMap{};
+            const QString state =
+                d.value(QStringLiteral("streamState")).toString();
+            const bool isPaused =
+                tile.value(QStringLiteral("tier")).toString() ==
+                QLatin1String("PAUSED");
+            if (isPaused) {
+                ++paused;
+                if (state == QLatin1String("paused") &&
+                    !d.value(QStringLiteral("fpsAvailable")).toBool() &&
+                    !d.value(QStringLiteral("codecAvailable")).toBool())
+                    ++pausedHonest;
+            } else {
+                ++active;
+            }
+            if (state == QLatin1String("playing")) ++playing;
+            if (d.value(QStringLiteral("fpsAvailable")).toBool()) {
+                const double fps = d.value(QStringLiteral("fps")).toDouble();
+                if (fps > 0.0) {
+                    if (fpsKnown == 0 || fps < minFps) minFps = fps;
+                    if (fps > maxFps) maxFps = fps;
+                    ++fpsKnown;
+                }
+            }
+            if (d.value(QStringLiteral("codecAvailable")).toBool() &&
+                d.value(QStringLiteral("resolutionAvailable")).toBool())
+                ++mediaKnown;
+            if (!d.value(QStringLiteral("bitrateAvailable")).toBool() &&
+                !d.value(QStringLiteral("latencyAvailable")).toBool() &&
+                !d.value(QStringLiteral("packetLossAvailable")).toBool() &&
+                !d.value(QStringLiteral("bitrateReason")).toString().isEmpty() &&
+                !d.value(QStringLiteral("latencyReason")).toString().isEmpty() &&
+                !d.value(QStringLiteral("packetLossReason")).toString().isEmpty())
+                ++transportUnavailable;
+        }
+        const int total = liveController.tiles().size();
+        std::cout << "smoke: diagnostics tiles=" << total
+                  << " active=" << active << " playing=" << playing
+                  << " fps-known=" << fpsKnown << " media-known=" << mediaKnown
+                  << " paused-honest=" << pausedHonest << "/" << paused
+                  << " fps-range=" << std::fixed << std::setprecision(1)
+                  << minFps << ".." << maxFps << std::endl;
+        diagnosticsSmokeFailed =
+            total == 0 || active == 0 || playing == 0 || fpsKnown != playing ||
+            mediaKnown < playing || pausedHonest != paused ||
+            transportUnavailable != total;
+        if (diagnosticsSmokeFailed)
+            std::cerr << "smoke: FAIL honest live diagnostics observation"
+                      << std::endl;
+    }
+#endif
     bool spatialVideoSmokeFailed = false;
 #ifdef VMS_WITH_GSTREAMER
     if (smokeMs > 0 && video && spatial && !engine.rootObjects().isEmpty()) {
@@ -3248,5 +4056,6 @@ int main(int argc, char* argv[]) {
     delete pbPipe;
     delete irPipe;
 #endif
-    return spatialVideoSmokeFailed ? 1 : rc;
+    return (siteOperationsSmokeFailed || diagnosticsSmokeFailed ||
+            spatialVideoSmokeFailed) ? 1 : rc;
 }

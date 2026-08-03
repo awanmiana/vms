@@ -312,6 +312,202 @@ not claim physical-display frame latency, GPU scene-graph time, decoded video
 inside spatial tiles, or low-end hardware performance; those require their own
 instrumented media/display runs.
 
+## Spatial shared-frame live tiles (P3-15 increment 33) — 2026-08-03
+
+The room-level spatial canvas now reuses the single governed `GridPipeline`
+composite. Eligible spatial `VideoItem` instances subscribe to the source frame
+and crop their row-major cell; they do not open another session, decode branch,
+or compositor. Site zoom is pin-only, wing zoom is state-only, and
+paused/offscreen/capacity states instantiate no video consumer.
+
+Release offscreen evidence (`--no-persist --count 64 --profile lowend --video
+--spatial --smoke-ms 3000`, software Qt Quick backend):
+
+| QML load | delegates | eligible | consumers | receiving | delivered frames | unique crop ids |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 85 ms | 64 | 16 | 16 | 16 | 223 | 16 |
+
+Thus the 48 non-eligible tiles allocated no spatial video surface, every
+eligible tile received the shared source, and each selected a distinct cell.
+The uneven-frame crop cases are also pinned in `--spatial-selftest`.
+
+The controller benchmark remained comfortably inside its existing budgets after
+the media addition:
+
+| build / scenario | samples | replans | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| Debug / idle no-change | 2,000 | 0 | 0.0040 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 2,000 | 1.7165 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0 | 0.0006 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 5,000 | 0.1874 | 4.00 | PASS |
+
+This is synthetic governed-grid decode evidence on the dev box. It does not
+claim real-camera source validation, physical-display latency, GPU timing, or
+the low-end i5 hardware result.
+
+## Honest live diagnostics (P3-04 increment 34) — 2026-08-03
+
+The current governed workspace source now publishes a tile-id-indexed
+diagnostics model. Per-branch decoded-buffer probes establish stream state;
+displayed FPS counts composite frames actually delivered to Qt. Codec and
+resolution come from the branch's active source tier. The synthetic source has
+no network transport feed, so bitrate, latency, and packet loss are explicitly
+unavailable with reasons.
+
+Release offscreen evidence (`--no-persist --count 64 --profile lowend --video
+--spatial --sweep-interval 0 --smoke-ms 5000`):
+
+| QML load | active | playing | FPS known | codec/res known | paused honest | display FPS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 92 ms | 16 | 16 | 16 | 16 | 48/48 | 29.7 |
+
+An initial branch-arrival calculation reported ~695 FPS because decoders can
+run ahead into intentionally leaky queues. That was rejected as an operator
+metric; the shipped calculation observes the compositor→Qt delivery boundary.
+
+Keeping diagnostics in a separate model also matters for P3-15 performance. A
+first nested-map implementation made Debug active p95 5.83 ms and failed the
+4.00 ms gate. The separate model restored the results:
+
+| build / scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | :--- |
+| Debug / idle no-change | 2,000 | 0.0025 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 1.5745 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 0.1691 | 4.00 | PASS |
+
+## Premises operations panel (P3-18 increment 35) — 2026-08-03
+
+The first P3-18 slice adds a read-only `SiteOperationsController` and a
+toggleable front-layer panel. It composes the already-owned premises, device,
+and Live diagnostics read models. Missing schedule, uptime/last-seen,
+cumulative-duration, and analytics sources remain explicitly unavailable with
+source-specific reasons.
+
+Release persistent offscreen evidence (`--db site-ops-smoke.sqlite
+--devices-demo --count 4 --profile lowend --video --sweep-interval 0
+--smoke-ms 5000`):
+
+| QML load | panel | site / zone | devices | device health | playing streams | display FPS |
+| ---: | :--- | :--- | ---: | :--- | ---: | ---: |
+| 103 ms | loaded | Default site / UTC | 6 | 3 online, 1 degraded, 1 offline | 4 | 24.6 |
+
+The aggregate selftest passed 15/15 checks, including immediate refresh from
+premises, device, and diagnostics source signals. The one-second timer is used
+only for the valid site-local clock; it does not poll or fabricate operational
+data.
+
+The controller remained inside the existing spatial performance budgets:
+
+| build / scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: |
+| Debug / idle no-change | 2,000 | 0.0039 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 2.3720 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0.0010 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 0.2185 | 4.00 | PASS |
+
+## Operating hours and open state (P3-18 increment 36) — 2026-08-03
+
+Schema v12 persists per-site weekly local-time windows and local-date
+exceptions. Runtime evaluation begins with UTC and converts through the site's
+IANA timezone; the panel therefore applies wall-clock rules without freezing a
+manual offset. An unconfigured schedule remains unavailable rather than being
+reported Closed.
+
+The Debug offscreen scene received an authenticated
+`premises.hours.add mon 00:00 24:00` API call while running. Its exit contract
+reported `hours=Open`, `panel=loaded`, and 4/4 playing streams. A subsequent
+Release launch restored that schedule from the schema-v12 database:
+
+| QML load | schema | schedule state | panel | playing streams | display FPS |
+| ---: | ---: | :--- | :--- | ---: | ---: |
+| 97 ms | v12 | Open | loaded | 4 | 24.0 |
+
+`--site-operations-selftest` passed 23/23 checks. Its deterministic UTC
+fixtures cover half-open boundaries, a closed-date override, replacement by
+special hours, the New York spring-forward gap, and both UTC occurrences of
+the repeated fall-back 01:30 wall time. `vms_dbtest` separately covers reopen,
+split weekly windows, date exceptions, and atomic overlap refusal.
+
+The full controller performance path remains inside its existing budgets:
+
+| build / scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: |
+| Debug / idle no-change | 2,000 | 0.0026 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 1.7772 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 0.1680 | 4.00 | PASS |
+
+## Device-site ownership and reachability time (P3-18 increment 37) — 2026-08-03
+
+Schema v13 assigns devices explicitly to a canonical site and persists the
+latest reach observation, last positive seen, and the start of the current
+uninterrupted positive run. Unassigned and other-site devices are excluded from
+the active premises totals. Persisted historical last seen survives restart;
+current uptime requires fresh positive evidence in the running session.
+
+Release persistent offscreen evidence (`--db uptime-smoke.sqlite --rec-db
+uptime-rec.sqlite --devices-demo --count 4 --profile lowend --video
+--sweep-interval 0 --smoke-ms 5000`):
+
+| QML load | schema | assigned devices | current reachable | playing streams | display FPS | panel |
+| ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 92 ms | v13 | 6 | 4 | 4 | 26.4 | loaded |
+
+The smoke contract also observed a non-empty persisted latest-seen timestamp.
+The focused evidence covers three independent boundaries:
+
+- `vms_dbtest` 49/49: migration, assignment, bad-assignment preservation,
+  positive repeat, offline reset, stale refusal, new run, and reopen.
+- `--devices-selftest` 85/85: audited assignment, model timestamps, advancing
+  uptime, restart honesty, offline preservation, recovery, and cascade delete.
+- `--site-operations-selftest` 26/26: active-site filtering, explicit
+  unassigned inventory, aggregate uptime/last-seen, and site-switch exclusion.
+
+The controller performance path remains inside its existing budgets:
+
+| build / scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: |
+| Debug / idle no-change | 2,000 | 0.0026 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 1.6001 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 0.1322 | 4.00 | PASS |
+
+## Cumulative completed-recording duration (P3-18 increment 38) — 2026-08-03
+
+The existing completed-segment index now supplies site-scoped cumulative
+recording camera-time. Intervals are unioned per camera before cameras are
+summed, so overlapping duplicate fragments cannot inflate the metric. Only
+stable channel ids currently owned by the active premises contribute; retained
+orphan and unassigned footage is not silently attributed. Streaming duration
+remains unavailable because live diagnostics are not a persistent session log.
+
+Release end-to-end evidence first recorded a synthetic `cam-front` source into
+a clean recording index, then opened the normal persistent/video workspace with
+that camera assigned to the active demo site:
+
+| QML load | schema | recorded time | completed segments | playing streams | display FPS | panel |
+| ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 91 ms | v13 | 5 s | 2 | 4 | 26.1 | loaded |
+
+The focused evidence covers both adapter layers:
+
+- `vms_rectest`: canonical calendar validation, duplicate camera-id removal,
+  same-camera interval union, cross-camera summation, honest zero footage, and
+  explicit malformed-legacy-row exclusion.
+- `--site-operations-selftest` 29/29: active-site camera attribution, 120
+  seconds of overlap removed, unassigned/site-switch exclusion, retained
+  disabled-channel history, and reasoned unavailable streaming duration.
+
+The controller performance path remains inside its existing budgets:
+
+| build / scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | ---: |
+| Debug / idle no-change | 2,000 | 0.0026 | 0.50 | PASS |
+| Debug / settled pan replan | 2,000 | 1.7340 | 4.00 | PASS |
+| Release / idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
+| Release / settled pan replan | 5,000 | 0.1120 | 4.00 | PASS |
+
 ## What this feeds
 
 Once both tiers are filled in, the two ceilings define the range the decode governor

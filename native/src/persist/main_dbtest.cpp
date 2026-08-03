@@ -7,6 +7,7 @@
 #include "persist/Store.h"
 #include "persist/WorkspaceRepo.h"
 #include "persist/PremisesRepo.h"
+#include "persist/DeviceRepo.h"
 
 #include <filesystem>
 #include <iostream>
@@ -52,7 +53,7 @@ int main() {
         check(static_cast<bool>(s.open(dbFile)), "open database file");
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "apply canonical migrations");
-        check(s.schemaVersion() == 11, "schema at version 11");
+        check(s.schemaVersion() == 13, "schema at version 13");
 
         // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
@@ -85,7 +86,7 @@ int main() {
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 11, "schema still at version 11 after reopen");
+        check(s.schemaVersion() == 13, "schema still at version 13 after reopen");
         check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
         check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
@@ -93,8 +94,8 @@ int main() {
 
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 11,
-              "exactly eleven migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 13,
+              "exactly thirteen migrations recorded (not duplicated)");
 
         {
             Store::Tx tx(s);
@@ -128,6 +129,44 @@ int main() {
                   "live", "hq-1", "hq", "Ground floor",
                   "file:///plans/hq-ground.png", 2400.0, 1400.0)),
               "configure active floor and plan metadata");
+        check(static_cast<bool>(premises.addWeeklyWindow("hq", 1, 540, 720)) &&
+                  static_cast<bool>(premises.addWeeklyWindow("hq", 1, 780, 1020)),
+              "configure split Monday operating windows");
+        const Error overlap = premises.addWeeklyWindow("hq", 1, 660, 840);
+        check(overlap.status == Status::Misuse &&
+                  count(s, "SELECT COUNT(*) FROM premises_hours_weekly;") == 2,
+              "overlapping window is rejected atomically");
+        check(static_cast<bool>(premises.clearWeeklyDay("hq", 2)),
+              "configure Tuesday explicitly closed");
+        check(static_cast<bool>(premises.setDateException(
+                  "hq", "2026-12-25", true, 0, 0, "Public holiday")) &&
+                  static_cast<bool>(premises.setDateException(
+                      "hq", "2026-12-31", false, 600, 840,
+                      "Year-end hours")),
+              "configure closed and special-hours date exceptions");
+
+        InMemorySecretStore observationSecrets;
+        DeviceRepo devices(s, observationSecrets);
+        check(static_cast<bool>(devices.setDeviceSite("dev-1", "hq")),
+              "assign device to canonical premises site");
+        const Error badSite = devices.setDeviceSite("dev-1", "missing-site");
+        check(badSite.status == Status::NotFound,
+              "unknown site assignment is refused");
+        check(static_cast<bool>(devices.recordReachObservation(
+                  "dev-1", true, "2026-08-03 08:00:00")) &&
+                  static_cast<bool>(devices.recordReachObservation(
+                      "dev-1", true, "2026-08-03 09:00:00")),
+              "positive repeat advances last seen and preserves uptime start");
+        check(static_cast<bool>(devices.recordReachObservation(
+                  "dev-1", false, "2026-08-03 10:00:00")),
+              "negative observation ends the current uptime run");
+        const Error stale = devices.recordReachObservation(
+            "dev-1", true, "2026-08-03 09:30:00");
+        check(stale.status == Status::Misuse,
+              "out-of-order reachability evidence is refused atomically");
+        check(static_cast<bool>(devices.recordReachObservation(
+                  "dev-1", true, "2026-08-03 11:00:00")),
+              "positive after offline begins a new uptime run");
     }
     {
         Store s;
@@ -158,6 +197,29 @@ int main() {
                   p.planUri == "file:///plans/hq-ground.png" &&
                   p.worldWidth == 2400.0 && p.worldHeight == 1400.0,
               "site/floor selection and plan metadata survive reopen");
+        OperatingSchedule hours;
+        check(static_cast<bool>(premises.loadOperatingSchedule("hq", hours)) &&
+                  hours.configured && hours.weekly.size() == 2 &&
+                  hours.exceptions.size() == 2,
+              "operating schedule and exceptions survive reopen");
+        check(hours.weekly[0].weekday == 1 &&
+                  hours.weekly[0].startMinute == 540 &&
+                  hours.weekly[1].endMinute == 1020 &&
+                  hours.exceptions[0].closed &&
+                  hours.exceptions[1].windows.size() == 1,
+              "weekly and exception window values round-trip exactly");
+        InMemorySecretStore restoredSecrets;
+        DeviceRepo restoredDevices(s, restoredSecrets);
+        std::vector<DeviceSummary> deviceRows;
+        check(static_cast<bool>(restoredDevices.listDevices(deviceRows)) &&
+                  deviceRows.size() == 1 && deviceRows[0].siteId == "hq",
+              "device-site ownership survives reopen and bad assignment");
+        check(deviceRows[0].reachObserved &&
+                  deviceRows[0].persistedReachState == "online" &&
+                  deviceRows[0].reachObservedAtUtc == "2026-08-03 11:00:00" &&
+                  deviceRows[0].lastSeenUtc == "2026-08-03 11:00:00" &&
+                  deviceRows[0].onlineSinceUtc == "2026-08-03 11:00:00",
+              "reach state, last seen, and restarted uptime run survive reopen");
 
         // save again (atomic replace) — still one instance row, new tiles.
         InstanceState in2;

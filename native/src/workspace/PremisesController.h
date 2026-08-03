@@ -4,7 +4,9 @@
 // the canonical repository; all mutations enter through CommandController.
 
 #include <QObject>
+#include <QDateTime>
 #include <QString>
+#include <QVariantMap>
 
 #include "persist/PremisesRepo.h"
 
@@ -38,6 +40,17 @@ public:
     QString configureFloor(const QString& id, const QString& siteId,
                            const QString& name, const QString& planUri,
                            double width, double height);
+    QString addOperatingWindow(const QString& weekday, const QString& start,
+                               const QString& end);
+    QString clearOperatingDay(const QString& weekday);
+    QString setSpecialHours(const QString& localDate, const QString& start,
+                            const QString& end, const QString& label);
+    QString setHolidayClosed(const QString& localDate, const QString& label);
+    QString clearDateException(const QString& localDate);
+
+    // Deterministic UTC input keeps DST behavior directly self-testable. The
+    // front-layer aggregate supplies currentDateTimeUtc().
+    QVariantMap operatingHoursAtUtc(const QDateTime& utc) const;
 
 signals:
     void changed();
@@ -50,4 +63,5 @@ private:
     QString siteId_, siteName_, timezone_, floorId_, floorName_, planUri_;
     double worldWidth_ = 1600.0;
     double worldHeight_ = 900.0;
+    vms::persist::OperatingSchedule operatingSchedule_;
 };

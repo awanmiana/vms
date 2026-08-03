@@ -35,6 +35,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <functional>
+
 #include "HealthProbe.h"             // DeviceHealthProbe (live-feed reachability)
 #include "health/HealthMonitor.h"
 #include "onvif/DiscoverySource.h"  // DiscoverySource + DiscoveryCandidate + OnvifDevice
@@ -70,6 +72,7 @@ class DeviceController : public QObject {
     Q_PROPERTY(QString discoveryStatus READ discoveryStatus NOTIFY discoveryChanged)
 
 public:
+    using NowUtcFn = std::function<QString()>;
     // `repo`, `health`, `discovery`, and `probe` are owned by the caller (main)
     // and must outlive this. `discovery` may be null (discovery then reports
     // unavailable); `probe` may be null (no live health feed — health stays
@@ -78,7 +81,7 @@ public:
                      vms::health::HealthMonitor* health,
                      vms::onvif::DiscoverySource* discovery = nullptr,
                      vms::health::DeviceHealthProbe* probe = nullptr,
-                     QObject* parent = nullptr);
+                     QObject* parent = nullptr, NowUtcFn nowUtc = {});
 
     QVariantList devices() const { return devices_; }
     int deviceCount() const { return static_cast<int>(devices_.size()); }
@@ -127,6 +130,10 @@ public:
     // excluded from active use (empty default group) and skipped by the health
     // poll. Returns "" on success or a human-readable error.
     Q_INVOKABLE QString setDeviceDisabled(const QString& id, bool disabled);
+
+    // Assign to a canonical premises site; "none" or empty explicitly
+    // unassigns. UI/API calls route this method through `device.site`.
+    Q_INVOKABLE QString assignSite(const QString& id, const QString& siteId);
 
     // Remove a device and everything it owns (cameras, group, credential, and
     // its health record). Returns "" on success or a human-readable error.
@@ -232,7 +239,7 @@ signals:
     void discoveryChanged();
 
 private:
-    QVariantMap healthMap(const std::string& deviceId) const;
+    QVariantMap healthMap(const vms::persist::DeviceSummary& device) const;
     void rebuild();
     void rebuildDiscovered();
     // inc 27: emit healthTransition when a report moved the derived state
@@ -244,6 +251,7 @@ private:
     vms::health::HealthMonitor* health_ = nullptr;
     vms::onvif::DiscoverySource* discovery_ = nullptr;
     vms::health::DeviceHealthProbe* probe_ = nullptr;
+    NowUtcFn nowUtc_;
     QVariantList devices_;
     QString lastError_;
 

@@ -28,6 +28,7 @@ Window {
 
     // Workspace UI state (P3-14 layered panels).
     property bool showBrowser: true
+    property bool showSiteOps: true
     property string cameraSearch: ""
     // Spatial canvas mode (inc 24, P3-15/P3-01): the Live grid becomes a
     // pannable/zoomable canvas of draggable camera tiles; media cost follows
@@ -244,6 +245,22 @@ Window {
                     MouseArea {
                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                         onClicked: root.showBrowser = !root.showBrowser
+                    }
+                }
+                Rectangle {
+                    visible: root.tabIndex === 0
+                             && (typeof siteOps !== "undefined") && siteOps
+                    width: siteOpsBtnText.width + 22; height: 28; radius: 6
+                    color: root.showSiteOps ? "#2a3446" : "#1a1f28"
+                    border.color: root.showSiteOps ? "#3a6ea5" : "#333c4c"
+                    border.width: 1
+                    Text {
+                        id: siteOpsBtnText; anchors.centerIn: parent
+                        text: "Site Ops"; color: "#cbd3df"; font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showSiteOps = !root.showSiteOps
                     }
                 }
                 // Alarms chip (inc 27): honest attention count, red when
@@ -869,11 +886,15 @@ Window {
                 property var sel: (governor.focusIndex >= 0
                                    && governor.tiles.length > governor.focusIndex)
                                   ? governor.tiles[governor.focusIndex] : null
+                property var diag: sel && governor.mediaDiagnostics.length
+                                        > governor.focusIndex
+                                   ? governor.mediaDiagnostics[governor.focusIndex]
+                                   : null
                 property bool showInstant: root.tabIndex === 0
                                            && (typeof instant !== "undefined") && instant
                 visible: sel !== null
-                width: 288
-                height: showInstant ? 214 : 182
+                width: 348
+                height: showInstant ? 350 : 318
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 anchors.margins: 16
@@ -980,6 +1001,81 @@ Window {
                             }
                         }
                     }
+                    Rectangle {
+                        width: parent.width
+                        height: 1
+                        color: "#2c3441"
+                    }
+                    Text {
+                        objectName: "selectedDiagnosticsTitle"
+                        text: "Live diagnostics"
+                        color: "#cbd3df"
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: infoPanel.diag
+                              ? ("stream  " + infoPanel.diag.streamStateText
+                                 + " · " + infoPanel.diag.streamReason)
+                              : "stream  Unavailable"
+                        color: infoPanel.diag
+                               && infoPanel.diag.streamState === "playing"
+                               ? "#62d98b" : "#d1a15c"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: {
+                            if (!infoPanel.diag) return "media  Unavailable"
+                            var parts = []
+                            parts.push(infoPanel.diag.codecAvailable
+                                       ? infoPanel.diag.codec : "codec unavailable")
+                            parts.push(infoPanel.diag.resolutionAvailable
+                                       ? (infoPanel.diag.width + "×"
+                                          + infoPanel.diag.height)
+                                       : "resolution unavailable")
+                            parts.push(infoPanel.diag.fpsAvailable
+                                       ? (Number(infoPanel.diag.fps).toFixed(1)
+                                          + " fps")
+                                       : "fps unavailable")
+                            return "media  " + parts.join(" · ")
+                        }
+                        color: "#9fb3c8"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: infoPanel.diag && infoPanel.diag.bitrateAvailable
+                              ? ("bitrate  "
+                                 + Number(infoPanel.diag.bitrateKbps).toFixed(0)
+                                 + " kb/s")
+                              : "bitrate  Unavailable · no transport telemetry"
+                        color: "#7f8998"; font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: infoPanel.diag && infoPanel.diag.latencyAvailable
+                              ? ("latency  "
+                                 + Number(infoPanel.diag.latencyMs).toFixed(0)
+                                 + " ms")
+                              : "latency  Unavailable · no source timestamp"
+                        color: "#7f8998"; font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: infoPanel.diag && infoPanel.diag.packetLossAvailable
+                              ? ("packet loss  "
+                                 + Number(infoPanel.diag.packetLossPct).toFixed(2)
+                                 + "%")
+                              : "packet loss  Unavailable · no RTP/RTCP stats"
+                        color: "#7f8998"; font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
                     // Instant replay (P3-05 / inc 23): jump back N seconds on the
                     // recording-backed camera and watch, then return to live. Only
                     // on the Live tab and only when a recording index is present.
@@ -1016,6 +1112,198 @@ Window {
                     Text {
                         text: "click a tile to focus · set priority to pin importance"
                         color: "#6b7482"; font.pixelSize: 11
+                    }
+                }
+            }
+
+            // P3-18 / inc 35: read-only premises operations aggregate on the
+            // front layer. Operating hours are evaluated from the persisted
+            // site schedule; other missing sources stay explicitly unavailable.
+            Rectangle {
+                id: siteOperationsPanel
+                objectName: "siteOperationsPanel"
+                property var ops: (typeof siteOps !== "undefined") ? siteOps : null
+                property var snap: ops ? ops.snapshot : ({})
+                property var site: snap.site || ({})
+                property var clock: snap.localClock || ({})
+                property var hours: snap.operatingHours || ({})
+                property var uptime: snap.uptimeLastSeen || ({})
+                property var duration: snap.cumulativeDuration || ({})
+                property var device: snap.devices || ({})
+                property var media: snap.media || ({})
+                property var analysis: snap.analysis || ({})
+                visible: root.tabIndex === 0 && root.showSiteOps && ops !== null
+                width: 390
+                height: 404
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.leftMargin: root.showBrowser ? 264 : 16
+                anchors.topMargin: root.spatialMode ? 52 : 16
+                radius: 10
+                color: Qt.rgba(0.055, 0.063, 0.078, 0.96)
+                border.width: 1
+                border.color: "#354155"
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 5
+                    Text {
+                        text: "Premises operations"
+                        color: "#e8ecf3"; font.pixelSize: 15; font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.site.available
+                              ? (siteOperationsPanel.site.name + " · "
+                                 + siteOperationsPanel.site.floor)
+                              : "Premises unavailable"
+                        color: "#9fb3c8"; font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.clock.available
+                              ? (siteOperationsPanel.clock.date + "  "
+                                 + siteOperationsPanel.clock.time + "  "
+                                 + siteOperationsPanel.clock.zone + " · "
+                                 + siteOperationsPanel.site.timezone)
+                              : ("Local time unavailable · "
+                                 + (siteOperationsPanel.clock.reason || "no timezone"))
+                        color: siteOperationsPanel.clock.available
+                               ? "#62d98b" : "#d1a15c"
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
+                    Rectangle { width: parent.width; height: 1; color: "#2c3441" }
+                    Text {
+                        text: "Operations time"
+                        color: "#cbd3df"; font.pixelSize: 12; font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.hours.available
+                              ? (siteOperationsPanel.hours.stateText + " · "
+                                 + siteOperationsPanel.hours.todayHours + " · "
+                                 + siteOperationsPanel.hours.source
+                                 + (siteOperationsPanel.hours.label
+                                    ? (" (" + siteOperationsPanel.hours.label + ")")
+                                    : ""))
+                              : ("Open/closed  Unavailable · "
+                                 + (siteOperationsPanel.hours.reason || ""))
+                        color: siteOperationsPanel.hours.available
+                               ? (siteOperationsPanel.hours.open
+                                  ? "#62d98b" : "#d1a15c")
+                               : "#7f8998"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.uptime.available
+                              ? (siteOperationsPanel.uptime.stateText + " · last seen "
+                                 + (siteOperationsPanel.uptime.latestLastSeenUtc
+                                    || "not yet") + " UTC")
+                              : ("Uptime / last seen  Unavailable · "
+                                 + (siteOperationsPanel.uptime.reason || ""))
+                        color: siteOperationsPanel.uptime.available
+                               ? "#9fb3c8" : "#7f8998"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.duration.available
+                              ? (siteOperationsPanel.duration.stateText
+                                 + " · " + siteOperationsPanel.duration.segments
+                                 + " completed segment"
+                                 + (siteOperationsPanel.duration.segments === 1 ? "" : "s")
+                                 + " / "
+                                 + siteOperationsPanel.duration.camerasWithFootage
+                                 + " camera"
+                                 + (siteOperationsPanel.duration.camerasWithFootage === 1
+                                    ? "" : "s")
+                                 + (siteOperationsPanel.duration.overlapRemovedSeconds > 0
+                                    ? (" · "
+                                       + siteOperationsPanel.duration.overlapRemovedSeconds
+                                       + "s overlap removed") : "")
+                                 + (siteOperationsPanel.duration.streamingAvailable
+                                    ? "" : " · streaming unavailable"))
+                              : ("Cumulative duration  Unavailable · "
+                                 + (siteOperationsPanel.duration.reason || ""))
+                        color: siteOperationsPanel.duration.available
+                               ? "#9fb3c8" : "#7f8998"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Rectangle { width: parent.width; height: 1; color: "#2c3441" }
+                    Text {
+                        text: "Devices"
+                        color: "#cbd3df"; font.pixelSize: 12; font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.device.available
+                              ? (siteOperationsPanel.device.total + " total · "
+                                 + siteOperationsPanel.device.online + " online · "
+                                 + siteOperationsPanel.device.degraded + " degraded · "
+                                 + siteOperationsPanel.device.offline + " offline"
+                                 + (siteOperationsPanel.device.unassigned > 0
+                                    ? (" · " + siteOperationsPanel.device.unassigned
+                                       + " unassigned") : ""))
+                              : "Device inventory unavailable"
+                        color: "#9fb3c8"; font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.device.available
+                              ? (siteOperationsPanel.device.unknown + " unknown · "
+                                 + siteOperationsPanel.device.unsupported
+                                 + " unsupported · "
+                                 + siteOperationsPanel.device.detached + " detached · "
+                                 + siteOperationsPanel.device.maintenance
+                                 + " maintenance · "
+                                 + siteOperationsPanel.device.attention + " attention")
+                              : (siteOperationsPanel.device.reason || "Unavailable")
+                        color: siteOperationsPanel.device.attention > 0
+                               ? "#e6a39b" : "#7f8998"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Rectangle { width: parent.width; height: 1; color: "#2c3441" }
+                    Text {
+                        text: "Governed media"
+                        color: "#cbd3df"; font.pixelSize: 12; font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.media.available
+                              ? (siteOperationsPanel.media.playing + " playing · "
+                                 + siteOperationsPanel.media.connecting + " connecting · "
+                                 + siteOperationsPanel.media.stalled + " stalled · "
+                                 + siteOperationsPanel.media.paused + " paused"
+                                 + (siteOperationsPanel.media.displayFpsAvailable
+                                    ? (" · " + Number(siteOperationsPanel.media.displayFps)
+                                       .toFixed(1) + " display fps") : ""))
+                              : ("Unavailable · "
+                                 + (siteOperationsPanel.media.reason || "no media source"))
+                        color: siteOperationsPanel.media.available
+                               ? "#9fb3c8" : "#7f8998"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Rectangle { width: parent.width; height: 1; color: "#2c3441" }
+                    Text {
+                        text: "Analysis"
+                        color: "#cbd3df"; font.pixelSize: 12; font.bold: true
+                    }
+                    Text {
+                        width: parent.width
+                        text: (siteOperationsPanel.analysis.stateText || "Unavailable")
+                              + " · " + (siteOperationsPanel.analysis.reason || "")
+                        color: "#7f8998"; font.pixelSize: 11
+                        elide: Text.ElideRight
                     }
                 }
             }

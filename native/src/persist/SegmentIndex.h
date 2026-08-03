@@ -53,6 +53,21 @@ struct AvailabilitySpan {
     int sources = 0;   // segments covering this span (0=gap, 1=available, >=2=overlap)
 };
 
+// Site/premises callers need a cumulative recording-time value rather than a
+// playback range. Duration is the union of completed segment intervals for each
+// requested camera, summed across cameras (camera-hours). Same-camera overlap is
+// removed so duplicate fragments cannot inflate the result. Malformed legacy
+// rows are excluded and reported rather than converted into invented time.
+struct RecordingDuration {
+    std::int64_t seconds = 0;
+    std::int64_t rawSeconds = 0;
+    std::int64_t overlapRemovedSeconds = 0;
+    int segmentCount = 0;              // valid completed segments
+    int camerasWithFootage = 0;
+    int overlappingSegments = 0;
+    int invalidSegments = 0;
+};
+
 // Pure: given the segments overlapping [reqStart, reqEnd) (as SegmentIndex::list
 // returns them), compute the ordered availability spans that tile the requested
 // range end-to-end — every instant of the request is labelled Available, Missing,
@@ -82,6 +97,12 @@ public:
     // endUtc) for one camera (list() + ComputeAvailability()).
     Error availability(const std::string& cameraId, const std::string& startUtc,
                        const std::string& endUtc, std::vector<AvailabilitySpan>& out);
+
+    // Aggregate all completed footage for the requested camera ids. Duplicate
+    // ids are ignored. An empty set or cameras with no rows returns a successful
+    // zero summary: the source was queried and no completed footage exists.
+    Error recordedDuration(const std::vector<std::string>& cameraIds,
+                           RecordingDuration& out);
 
     // Enforce the cap: first delete segments older than maxAgeDays (relative to
     // nowUtc), then delete oldest-first until total bytes <= maxTotalBytes. The

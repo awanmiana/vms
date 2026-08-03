@@ -21,6 +21,7 @@
 #include <QString>
 #include <QTimer>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include <vector>
 
@@ -31,6 +32,8 @@ class WorkspaceController : public QObject {
     // The per-tile model the QML grid repeats over. Each entry is a QVariantMap
     // { id, tier, state, degraded, focused, badge }. Rebuilt on every re-plan.
     Q_PROPERTY(QVariantList tiles READ tiles NOTIFY changed)
+    Q_PROPERTY(QVariantList mediaDiagnostics READ mediaDiagnostics
+               NOTIFY diagnosticsChanged)
     Q_PROPERTY(int columns READ columns NOTIFY changed)
     Q_PROPERTY(int rows READ rows NOTIFY changed)
     Q_PROPERTY(int focusIndex READ focusIndex NOTIFY changed)
@@ -52,6 +55,7 @@ public:
                         QObject* parent = nullptr);
 
     QVariantList tiles() const { return tiles_; }
+    QVariantList mediaDiagnostics() const { return mediaDiagnostics_; }
     int columns() const { return columns_; }
     int rows() const { return rows_; }
     int focusIndex() const { return focusIndex_; }
@@ -63,6 +67,12 @@ public:
     // inc 8: the machine's STATIC capacity ceiling (from the hardware probe /
     // calibration), which the optimizer adjusts down from each sample.
     const vms::CapacityProfile& baseProfile() const { return baseProfile_; }
+
+    // P3-04 / inc 34: merge read-only media observations into the per-tile
+    // model without re-planning the governor or touching the media pipeline.
+    // Each input map is keyed by `id`; absent ids become explicitly unavailable.
+    void setMediaDiagnostics(const QVariantList& diagnostics);
+    void clearMediaDiagnostics(const QString& reason);
 
     // inc 8: apply an optimizer-adjusted capacity profile to the live session. If
     // it differs from the profile currently in force, the session re-plans under
@@ -155,6 +165,7 @@ public:
 
 signals:
     void changed();
+    void diagnosticsChanged();
     // Emitted whenever the plan is (re)built — a sweep, a click, or startup. In
     // --video mode the app connects this to reconfigure the live grid, so the
     // picture follows the chrome no matter what triggered the re-plan.
@@ -175,6 +186,8 @@ private:
     // prototype's grid placement; operator drags override; persisted (v9).
     std::vector<double> posX_, posY_;
     std::vector<double> facingDeg_, fovDeg_;
+    QVariantList mediaDiagnostics_;
+    bool mediaDiagnosticsActive_ = false;
     vms::GovernorResult plan_;
     QVariantList tiles_;
     int columns_ = 1;
