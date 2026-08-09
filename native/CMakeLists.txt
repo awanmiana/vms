@@ -103,7 +103,8 @@ add_test(NAME health_selfcheck COMMAND vms_healthtest)
 # ---------------------------------------------------------------------------
 add_library(vms_command STATIC
     src/command/CommandRegistry.cpp
-    src/command/CoverageCheck.cpp)
+    src/command/CoverageCheck.cpp
+    src/command/VoiceCommandMapper.cpp)
 target_include_directories(vms_command PUBLIC src)
 if(MSVC)
     target_compile_options(vms_command PRIVATE /W4 /permissive-)
@@ -196,6 +197,7 @@ if(WIN32)
         src/persist/SecretStore.cpp
         src/persist/CredentialRepo.cpp
         src/persist/SegmentIndex.cpp
+        src/persist/StreamDurationRepo.cpp
         src/persist/DeviceRepo.cpp
         src/persist/AuditRepo.cpp
     )

@@ -8,9 +8,11 @@
 #include "persist/WorkspaceRepo.h"
 #include "persist/PremisesRepo.h"
 #include "persist/DeviceRepo.h"
+#include "persist/StreamDurationRepo.h"
 
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -53,7 +55,7 @@ int main() {
         check(static_cast<bool>(s.open(dbFile)), "open database file");
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "apply canonical migrations");
-        check(s.schemaVersion() == 13, "schema at version 13");
+        check(s.schemaVersion() == 15, "schema at version 15");
 
         // 2) Insert a device + credential ref + camera (declared tables).
         check(static_cast<bool>(s.exec(
@@ -86,7 +88,7 @@ int main() {
     {
         Store s;
         check(static_cast<bool>(s.open(dbFile)), "reopen database file");
-        check(s.schemaVersion() == 13, "schema still at version 13 after reopen");
+        check(s.schemaVersion() == 15, "schema still at version 15 after reopen");
         check(count(s, "SELECT COUNT(*) FROM devices;") == 1,
               "device persisted across reopen");
         check(count(s, "SELECT COUNT(*) FROM cameras;") == 1,
@@ -94,8 +96,8 @@ int main() {
 
         check(static_cast<bool>(s.migrate(coreMigrations())),
               "re-running migrations is a no-op");
-        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 13,
-              "exactly thirteen migrations recorded (not duplicated)");
+        check(count(s, "SELECT COUNT(*) FROM schema_migrations;") == 15,
+              "exactly fifteen migrations recorded (not duplicated)");
 
         {
             Store::Tx tx(s);
@@ -129,6 +131,28 @@ int main() {
                   "live", "hq-1", "hq", "Ground floor",
                   "file:///plans/hq-ground.png", 2400.0, 1400.0)),
               "configure active floor and plan metadata");
+
+        StreamDurationRepo streams(s);
+        StreamDurationSummary emptyStream;
+        check(static_cast<bool>(streams.summary("hq", emptyStream)) &&
+                  emptyStream.milliseconds == 0 &&
+                  emptyStream.checkpoints == 0,
+              "connected stream-duration source reports honest zero");
+        check(static_cast<bool>(streams.addObservation("hq", 1500, 2)) &&
+                  static_cast<bool>(streams.addObservation("hq", 250, 1)),
+              "playing branches accumulate monotonic camera-time");
+        const Error negativeStream = streams.addObservation("hq", -1, 1);
+        const Error overflowStream = streams.addObservation(
+            "hq", std::numeric_limits<std::int64_t>::max(), 2);
+        check(negativeStream.status == Status::Misuse &&
+                  overflowStream.status == Status::Misuse,
+              "negative and overflowing stream observations are refused");
+        StreamDurationSummary streamTotal;
+        check(static_cast<bool>(streams.summary("hq", streamTotal)) &&
+                  streamTotal.milliseconds == 3250 &&
+                  streamTotal.checkpoints == 2 &&
+                  !streamTotal.updatedAtUtc.empty(),
+              "stream duration preserves milliseconds and checkpoint evidence");
         check(static_cast<bool>(premises.addWeeklyWindow("hq", 1, 540, 720)) &&
                   static_cast<bool>(premises.addWeeklyWindow("hq", 1, 780, 1020)),
               "configure split Monday operating windows");
@@ -220,6 +244,12 @@ int main() {
                   deviceRows[0].lastSeenUtc == "2026-08-03 11:00:00" &&
                   deviceRows[0].onlineSinceUtc == "2026-08-03 11:00:00",
               "reach state, last seen, and restarted uptime run survive reopen");
+        StreamDurationRepo restoredStreams(s);
+        StreamDurationSummary restoredStream;
+        check(static_cast<bool>(restoredStreams.summary("hq", restoredStream)) &&
+                  restoredStream.milliseconds == 3250 &&
+                  restoredStream.checkpoints == 2,
+              "stream duration survives reopen without filling downtime");
 
         // save again (atomic replace) — still one instance row, new tiles.
         InstanceState in2;

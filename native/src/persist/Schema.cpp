@@ -222,6 +222,47 @@ std::vector<Migration> coreMigrations() {
          "  last_seen_utc TEXT,"
          "  online_since_utc TEXT,"
          "  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE);"},
+
+        // v14 — P3-18 persistent decoded-stream branch-time (native increment
+        // 39). The duration is monotonic observer input, stored in milliseconds
+        // so frequent sub-second diagnostics changes do not disappear. UTC is
+        // checkpoint evidence only and is never used to infer elapsed time.
+        {14, "premises_stream_duration",
+         "CREATE TABLE premises_stream_duration ("
+         "  site_id TEXT PRIMARY KEY,"
+         "  total_milliseconds INTEGER NOT NULL DEFAULT 0 "
+         "    CHECK(total_milliseconds >= 0),"
+         "  checkpoint_count INTEGER NOT NULL DEFAULT 0 "
+         "    CHECK(checkpoint_count >= 0),"
+         "  updated_at_utc TEXT NOT NULL,"
+         "  FOREIGN KEY(site_id) REFERENCES premises_site(id) ON DELETE CASCADE);"},
+
+        // v15 — P1-06 structured audit context and externally verified chain
+        // anchors. Existing rows remain canonical version 1; new rows use v2.
+        // Timestamp tokens are RFC 3161 DER encoded as base64 at this Qt-free
+        // storage boundary and are admitted only after caller verification.
+        {15, "structured_audit_and_chain_anchors",
+         "ALTER TABLE audit_log ADD COLUMN canonical_version INTEGER NOT NULL "
+         "DEFAULT 1 CHECK(canonical_version IN (1,2));"
+         "ALTER TABLE audit_log ADD COLUMN category TEXT NOT NULL DEFAULT 'command';"
+         "ALTER TABLE audit_log ADD COLUMN actor_id TEXT NOT NULL DEFAULT '';"
+         "ALTER TABLE audit_log ADD COLUMN subject_id TEXT NOT NULL DEFAULT '';"
+         "ALTER TABLE audit_log ADD COLUMN correlation_id TEXT NOT NULL DEFAULT '';"
+         "ALTER TABLE audit_log ADD COLUMN before_state TEXT NOT NULL DEFAULT '';"
+         "ALTER TABLE audit_log ADD COLUMN after_state TEXT NOT NULL DEFAULT '';"
+         "CREATE TABLE audit_chain_anchor ("
+         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+         "  first_audit_id INTEGER NOT NULL CHECK(first_audit_id > 0),"
+         "  last_audit_id INTEGER NOT NULL CHECK(last_audit_id >= first_audit_id),"
+         "  head_hash TEXT NOT NULL,"
+         "  hash_algorithm TEXT NOT NULL CHECK(hash_algorithm = 'sha-256'),"
+         "  requested_utc TEXT NOT NULL,"
+         "  tsa_uri TEXT NOT NULL,"
+         "  tsa_policy_oid TEXT NOT NULL DEFAULT '',"
+         "  token_base64 TEXT NOT NULL,"
+         "  verified_utc TEXT NOT NULL,"
+         "  verifier TEXT NOT NULL,"
+         "  UNIQUE(last_audit_id, head_hash));"},
     };
 }
 

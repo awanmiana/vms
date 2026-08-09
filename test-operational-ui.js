@@ -6,6 +6,10 @@ const root = __dirname;
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const {
+  WORKSPACE_CONFIGS,
+  renderOperationalWorkspace
+} = require("./shared/operational-workspace");
 
 function section(id, nextId) {
   const start = html.indexOf(`id="${id}"`);
@@ -27,20 +31,24 @@ function run(name, fn) {
 }
 
 run("Live and Playback use the shared layered camera workspace contract", () => {
-  const live = section("operatorView", "devicesView");
-  const playback = section("playbackView", "incidentsView");
+  const live = renderOperationalWorkspace("live");
+  const playback = renderOperationalWorkspace("playback");
   [live, playback].forEach((markup) => {
-    assert.match(markup, /video-workspace-view/);
     assert.match(markup, /video-workspace-panel/);
     assert.match(markup, /video-resource-panel is-overlay-open/);
     assert.match(markup, /video-inspector-panel is-overlay-open/);
     assert.match(markup, /panel-toggle-btn/);
   });
   assert.match(playback, /id="playbackDrawer"/);
+  assert.strictEqual(WORKSPACE_CONFIGS.live.kind, "live");
+  assert.strictEqual(WORKSPACE_CONFIGS.playback.kind, "playback");
+  assert.match(html, /id="operatorView"[^>]*><\/section>/);
+  assert.match(html, /id="playbackView"[^>]*><\/section>/);
+  assert.match(html, /shared\/operational-workspace\.js[\s\S]*app\.js/);
 });
 
 run("Playback keeps its date range, transport, draggable timeline, and footage legend", () => {
-  const playback = section("playbackView", "incidentsView");
+  const playback = renderOperationalWorkspace("playback");
   const scrubberStart = playback.indexOf('id="pbScrubber"');
   const rangeStart = playback.indexOf('id="pbRangeBtn"');
   assert(scrubberStart >= 0);
@@ -71,9 +79,21 @@ run("Operational CSS removes fixed viewport sizing and includes responsive layer
 run("Search and panel behavior is routed by the active operational view", () => {
   assert.match(app, /classList\.toggle\("video-workspace-mode", isVideoWorkspace\)/);
   assert.match(app, /if \(state\.view === "playback"\)[\s\S]*?state\.playbackQuery = event\.target\.value/);
-  assert.match(app, /toggleOperationalPanel\("live", "resource"\)/);
-  assert.match(app, /toggleOperationalPanel\("playback", "inspector"\)/);
-  assert.match(app, /function renderPlaybackDrawer\(\)/);
+  assert.match(app, /toggleOperationalPanel\(kind, "resource"\)/);
+  assert.match(app, /toggleOperationalPanel\(kind, "inspector"\)/);
+  assert.match(app, /function renderWorkspaceResourceTree\(kind\)/);
+  assert.match(app, /function workspaceCameraRowHTML\(kind, camera\)/);
+  assert.match(app, /function renderWorkspaceDrawer\(kind\)/);
+  assert.match(app, /function workspaceDrawerConfiguration\(kind\)/);
+  assert.match(app, /function renderWorkspaceFixedGrid\(kind, camerasToShow, slotCount\)/);
+  assert.match(app, /renderWorkspaceFixedGrid\("live", camerasToShow, slotCount\)/);
+  assert.match(app, /renderWorkspaceFixedGrid\("playback", camerasToShow, slotCount\)/);
+  assert.match(app, /function bindOperationalWorkspaceControls\(kind\)/);
+  assert.match(app, /bindOperationalWorkspaceControls\("live"\)/);
+  assert.match(app, /bindOperationalWorkspaceControls\("playback"\)/);
+  assert.doesNotMatch(app, /function playbackCameraRowHTML\(/);
+  assert.doesNotMatch(app, /function cameraRowHTML\(/);
+  assert.match(app, /toggleOperationalFullscreen\(kind\)/);
 });
 
 if (process.exitCode) {

@@ -9,6 +9,7 @@
 
 #include <QImage>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <iostream>
@@ -199,6 +200,7 @@ struct GridPipeline::Impl {
     std::uint64_t sampledOutputFrames = 0;
     std::chrono::steady_clock::time_point sampledOutputAt =
         std::chrono::steady_clock::now();
+    GridReplanStats replanStats;
 
     // The composited surface is a fixed 1080p; each cell is an equal integer
     // fraction so it aligns with the QML chrome grid.
@@ -306,6 +308,135 @@ static void teardownFront(GridPipeline::Impl* d, Branch* b) {
         b->source = nullptr;
     }
     b->linked.store(false, std::memory_order_release);
+}
+
+static bool syncFrontWithParent(Branch* b, std::string& error) {
+    if (b->decodebin && !gst_element_sync_state_with_parent(b->decodebin)) {
+        error = "decodebin failed to synchronize with the paused pipeline";
+        return false;
+    }
+    if (b->source && !gst_element_sync_state_with_parent(b->source)) {
+        error = "source failed to synchronize with the paused pipeline";
+        return false;
+    }
+    return true;
+}
+
+static void destroyBranch(GridPipeline::Impl* d, Branch* b) {
+    if (!b) return;
+    teardownFront(d, b);
+    if (b->upload && b->compPad) {
+        GstPad* upSrc = gst_element_get_static_pad(b->upload, "src");
+        gst_pad_unlink(upSrc, b->compPad);
+        gst_object_unref(upSrc);
+        gst_element_release_request_pad(d->comp, b->compPad);
+        gst_object_unref(b->compPad);
+        b->compPad = nullptr;
+    }
+    if (b->upload) {
+        gst_element_set_state(b->upload, GST_STATE_NULL);
+        gst_bin_remove(GST_BIN(d->pipeline), b->upload);
+        b->upload = nullptr;
+    }
+    if (b->queue) {
+        gst_element_set_state(b->queue, GST_STATE_NULL);
+        gst_bin_remove(GST_BIN(d->pipeline), b->queue);
+        b->queue = nullptr;
+    }
+    delete b;
+}
+
+static Branch* buildReplacementBranch(GridPipeline::Impl* d, int index,
+                                      vms::Tier tier, std::string& error) {
+    auto* b = new Branch();
+    b->index = index;
+    b->tier = tier;
+    b->queue = gst_element_factory_make("queue", nullptr);
+    b->upload = gst_element_factory_make("d3d11upload", nullptr);
+    if (!b->queue || !b->upload) {
+        error = "failed to create replacement branch elements";
+        delete b;
+        return nullptr;
+    }
+    g_object_set(b->queue, "leaky", 2, "max-size-buffers", 3,
+                 "max-size-time", static_cast<guint64>(0), "max-size-bytes",
+                 0, nullptr);
+    gst_bin_add_many(GST_BIN(d->pipeline), b->queue, b->upload, nullptr);
+
+    GstPad* queueSink = gst_element_get_static_pad(b->queue, "sink");
+    gst_pad_add_probe(queueSink, GST_PAD_PROBE_TYPE_BUFFER,
+                      CountDecodedFrame, b, nullptr);
+    gst_object_unref(queueSink);
+
+    if (!buildFront(d, b, tier, error) ||
+        !gst_element_link(b->queue, b->upload)) {
+        if (error.empty()) error = "failed to link replacement queue -> upload";
+        destroyBranch(d, b);
+        return nullptr;
+    }
+
+    b->compPad = gst_element_request_pad_simple(d->comp, "sink_%u");
+    if (!b->compPad) {
+        error = "failed to request replacement compositor pad";
+        destroyBranch(d, b);
+        return nullptr;
+    }
+    const int cellW = d->outW / d->cols;
+    const int cellH = d->outH / d->rows;
+    const int cx = (index % d->cols) * cellW;
+    const int cy = (index / d->cols) * cellH;
+    g_object_set(b->compPad, "xpos", cx, "ypos", cy, "width", cellW,
+                 "height", cellH, nullptr);
+    GstPad* upSrc = gst_element_get_static_pad(b->upload, "src");
+    const bool linkedPad =
+        gst_pad_link(upSrc, b->compPad) == GST_PAD_LINK_OK;
+    gst_object_unref(upSrc);
+    if (!linkedPad) {
+        error = "failed to link replacement upload -> compositor pad";
+        destroyBranch(d, b);
+        return nullptr;
+    }
+
+    // Synchronize downstream-to-upstream so a newly activated source cannot
+    // push into elements that are still NULL.
+    if (!gst_element_sync_state_with_parent(b->upload) ||
+        !gst_element_sync_state_with_parent(b->queue) ||
+        !syncFrontWithParent(b, error)) {
+        if (error.empty())
+            error = "replacement branch failed to synchronize with pipeline";
+        destroyBranch(d, b);
+        return nullptr;
+    }
+    return b;
+}
+
+static bool rebuildAllFronts(GridPipeline::Impl* d,
+                             const std::vector<vms::Tier>& tiers,
+                             std::string& error) {
+    gst_element_set_state(d->pipeline, GST_STATE_NULL);
+    gst_element_get_state(d->pipeline, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+
+    bool ok = true;
+    for (Branch* b : d->branches) {
+        teardownFront(d, b);
+        const vms::Tier target =
+            b->index >= 0 && b->index < static_cast<int>(tiers.size())
+                ? tiers[b->index]
+                : vms::Tier::Paused;
+        std::string branchError;
+        if (!buildFront(d, b, target, branchError)) {
+            if (error.empty())
+                error = "tile " + std::to_string(b->index) + ": " +
+                        branchError;
+            ok = false;
+        }
+    }
+    if (gst_element_set_state(d->pipeline, GST_STATE_PLAYING) ==
+        GST_STATE_CHANGE_FAILURE) {
+        error = "pipeline failed to return to PLAYING after fallback rebuild";
+        return false;
+    }
+    return ok;
 }
 
 GridPipeline::GridPipeline(VideoItem* sink, int cols, int rows,
@@ -475,32 +606,97 @@ bool GridPipeline::applyPlan(const std::vector<vms::Tier>& tiers,
                    : vms::Tier::Paused;
     };
 
-    bool changed = false;
+    std::vector<Branch*> changed;
     for (Branch* b : d_->branches)
-        if (targetFor(b->index) != b->tier) { changed = true; break; }
-    if (!changed) return true;   // steady load: no rebuild, no flicker
+        if (targetFor(b->index) != b->tier) changed.push_back(b);
+    if (changed.empty()) return true;
 
-    // Whole-graph NULL -> rebuild every front -> PLAYING (the reliable path; a
-    // hot-swap into the running pipeline wedges the D3D12 decoder).
-    gst_element_set_state(d_->pipeline, GST_STATE_NULL);
-    gst_element_get_state(d_->pipeline, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+    const auto started = std::chrono::steady_clock::now();
+    ++d_->replanStats.appliedPlans;
+    d_->replanStats.lastChangedBranches = static_cast<int>(changed.size());
+    d_->replanStats.lastApplyUsedFallback = false;
 
-    bool ok = true;
-    for (Branch* b : d_->branches) {
-        teardownFront(d_, b);
-        std::string ferr;
-        if (!buildFront(d_, b, targetFor(b->index), ferr)) {
-            error = "tile " + std::to_string(b->index) + ": " + ferr;
-            ok = false;
+    // Do not mutate decodebin while it is PLAYING. PAUSED preserves the last
+    // VideoItem frame, unchanged decoders, and every compositor pad while the
+    // changed fronts cross a safe state boundary.
+    bool partialOk = true;
+    const GstStateChangeReturn pauseResult =
+        gst_element_set_state(d_->pipeline, GST_STATE_PAUSED);
+    if (pauseResult == GST_STATE_CHANGE_FAILURE) {
+        error = "pipeline refused PAUSED for branch re-plan";
+        partialOk = false;
+    } else {
+        const GstStateChangeReturn settled = gst_element_get_state(
+            d_->pipeline, nullptr, nullptr, 2 * GST_SECOND);
+        if (settled == GST_STATE_CHANGE_FAILURE ||
+            settled == GST_STATE_CHANGE_ASYNC) {
+            error = "pipeline did not settle in PAUSED for branch re-plan";
+            partialOk = false;
         }
     }
 
-    if (gst_element_set_state(d_->pipeline, GST_STATE_PLAYING) ==
-        GST_STATE_CHANGE_FAILURE) {
-        error = "pipeline failed to return to PLAYING after re-plan";
-        return false;
+    std::size_t partialReplacements = 0;
+    if (partialOk) {
+        for (Branch* b : changed) {
+            std::string branchError;
+            Branch* replacement = buildReplacementBranch(
+                d_, b->index, targetFor(b->index), branchError);
+            if (!replacement) {
+                error = "tile " + std::to_string(b->index) + ": " +
+                        branchError;
+                partialOk = false;
+                break;
+            }
+            const auto slot = std::find(d_->branches.begin(),
+                                        d_->branches.end(), b);
+            if (slot == d_->branches.end()) {
+                destroyBranch(d_, replacement);
+                error = "changed branch disappeared during replacement";
+                partialOk = false;
+                break;
+            }
+            *slot = replacement;
+            destroyBranch(d_, b);
+            ++partialReplacements;
+        }
     }
+
+    if (partialOk &&
+        gst_element_set_state(d_->pipeline, GST_STATE_PLAYING) ==
+            GST_STATE_CHANGE_FAILURE) {
+        error = "pipeline failed to resume after branch re-plan";
+        partialOk = false;
+    }
+
+    bool ok = partialOk;
+    if (partialOk) {
+        d_->replanStats.branchFrontRebuilds += partialReplacements;
+    } else {
+        // Reliability wins over visual continuity. The fallback is explicit in
+        // stats and logs, never silently reported as a seamless apply.
+        ++d_->replanStats.fullPipelineFallbacks;
+        d_->replanStats.lastApplyUsedFallback = true;
+        std::string fallbackError;
+        ok = rebuildAllFronts(d_, tiers, fallbackError);
+        d_->replanStats.branchFrontRebuilds +=
+            partialReplacements + d_->branches.size();
+        if (!ok) {
+            if (!error.empty()) error += "; ";
+            error += "fallback failed: " + fallbackError;
+        } else {
+            error.clear();
+        }
+    }
+
+    d_->tiers = tiers;
+    d_->replanStats.lastApplyMilliseconds =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
     return ok;
+}
+
+GridReplanStats GridPipeline::replanStats() const {
+    return d_->replanStats;
 }
 
 bool GridPipeline::pumpBus(std::string& error) {
@@ -572,17 +768,21 @@ std::vector<GridTileDiagnostics> GridPipeline::diagnostics() {
 }
 
 void GridPipeline::stop() {
+    if (d_->pipeline) {
+        gst_element_set_state(d_->pipeline, GST_STATE_NULL);
+        gst_element_get_state(d_->pipeline, nullptr, nullptr,
+                              GST_CLOCK_TIME_NONE);
+        for (Branch* b : d_->branches) destroyBranch(d_, b);
+        d_->branches.clear();
+    }
     if (d_->bus) {
         gst_object_unref(d_->bus);
         d_->bus = nullptr;
     }
     if (d_->pipeline) {
-        gst_element_set_state(d_->pipeline, GST_STATE_NULL);
         gst_object_unref(d_->pipeline);
         d_->pipeline = nullptr;
     }
-    for (Branch* b : d_->branches) delete b;
-    d_->branches.clear();
 }
 
 std::string GridPipeline::summary() const {
@@ -596,6 +796,7 @@ std::string GridPipeline::summary() const {
     } else {
         for (const auto& d : decoders) out += " " + d;
     }
+    out += "; replan=paused changed-branch replacement";
     return out;
 }
 
@@ -613,6 +814,7 @@ void GridPipeline::stop() {}
 bool GridPipeline::applyPlan(const std::vector<vms::Tier>&, std::string&) {
     return true;
 }
+GridReplanStats GridPipeline::replanStats() const { return {}; }
 bool GridPipeline::pumpBus(std::string&) { return true; }
 std::vector<GridTileDiagnostics> GridPipeline::diagnostics() { return {}; }
 std::string GridPipeline::summary() const { return {}; }

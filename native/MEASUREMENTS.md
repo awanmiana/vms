@@ -508,6 +508,96 @@ The controller performance path remains inside its existing budgets:
 | Release / idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
 | Release / settled pan replan | 5,000 | 0.1120 | 4.00 | PASS |
 
+## Persistent decoded streaming duration (P3-18 increment 39) — 2026-08-05
+
+Schema v14 stores premises-scoped decoded branch-time from monotonic in-process
+observations. Only `playing` branches contribute; connecting, stalled, paused,
+unavailable, and process-downtime intervals do not. Recording and streaming
+camera-time remain separate evidence sources in the panel.
+
+Two Release offscreen runs used the same persistent database. The second run
+therefore verifies reopen durability while the increase—not the wall-clock gap
+between processes—shows the newly observed work:
+
+| run | QML load | playing branches | display FPS | persisted stream time | checkpoints | panel |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| first / 5 s | 189 ms | 4 | 23.9 | 18,708 ms | 14 | loaded |
+| reopen / 3 s | 93 ms | 4 | 25.6 | 29,248 ms | 22 | loaded |
+
+Focused evidence:
+
+- `vms_dbtest` 54/54: schema v14, honest zero, multiplicative branch-time,
+  millisecond preservation, negative/overflow refusal, and reopen durability.
+- `--site-operations-selftest` 30/30: distinct recording/streaming evidence,
+  combined camera-time, site switching, and analytics remaining unavailable.
+- All 13 workspace gates and root regressions pass. Aggregate Debug and Release
+  CTest each pass 10/11 because of the unchanged intermittent ONVIF Windows
+  loader failure; focused ONVIF CTest passes immediately in both builds.
+
+The Release controller hot path remains inside the established limits:
+
+| scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | :--- |
+| idle no-change | 5,000 | 0.0006 | 0.50 | PASS |
+| settled pan replan | 5,000 | 0.1377 | 4.00 | PASS |
+
+## Site-scoped active alarm analysis (P3-18 increment 40) — 2026-08-09
+
+The premises panel now uses the current native alarm engine as its analysis
+authority and joins each active device-health alarm to current device-to-site
+ownership. It reports active/attention/severity/lifecycle/occurrence totals for
+the active site only and labels the result current-session evidence. It does
+not infer VCA results or retained trends.
+
+Focused evidence:
+
+- `--site-operations-selftest` passes 32/32 checks: a missing alarm source stays
+  explicitly unavailable; two active-site alarms and one unassigned alarm
+  verify site isolation; priority and occurrence totals
+  match; acknowledgement refreshes attention immediately; a premises switch
+  reports zero scoped alarms without leaking the prior site.
+- Release offscreen QML smoke loads in 160 ms and reports an available zero-
+  alarm state with the panel loaded.
+- All 13 workspace gates and root regressions pass. Aggregate Release CTest is
+  10/11 only because of the unchanged intermittent ONVIF Windows loader
+  failure; focused ONVIF passes immediately.
+
+The Release controller performance path remains inside its existing budgets:
+
+| scenario | samples | p95 ms | limit | result |
+| :--- | ---: | ---: | ---: | :--- |
+| idle no-change | 5,000 | 0.0009 | 0.50 | PASS |
+| settled pan replan | 5,000 | 0.1717 | 4.00 | PASS |
+
+## Continuity-preserving live re-plan (P3-14 increment 41) — 2026-08-09
+
+Same-layout governor changes no longer take the complete grid pipeline to NULL.
+The graph briefly enters PAUSED while Qt retains the last complete frame. Only
+tier-changed tiles receive new decode/queue/upload/compositor-pad branches;
+unchanged decoders and pads remain alive. A full NULL rebuild remains an
+explicit counted fallback, and layout geometry changes still rebuild normally.
+
+Release offscreen H.265/D3D12 evidence:
+
+| tiles | applied plans | replaced branches | full fallbacks | apply time | decoded result |
+| ---: | ---: | ---: | ---: | :--- | :--- |
+| 4 | 3 | 6 | 0 | 26.2–30.2 ms observed | 4/4 playing, 25.9 FPS |
+| 16 | 5 | 10 | 0 | 21.9–25.5 ms | output active; 14 playing at final immediate sample |
+| 64 | 11 | 23 | 0 | first 274.9 ms; then 25.2–70.8 ms | 16 playing at 29.2 FPS; 46/46 paused honest |
+
+The 64-tile run loaded QML in 82 ms and completed every one-second focus
+change without a hang, fatal bus error, or full-pipeline fallback. The final
+sample was taken immediately after the last apply, so two newly replaced active
+branches were still connecting; all media metadata remained assigned.
+
+Regression evidence:
+
+- All 13 workspace gates and the root regression suite pass.
+- Release 64-tile controller p95 is 0.0006 ms idle / 0.1265 ms active over
+  5,000 samples, within the established 0.50/4.00 ms limits.
+- Aggregate Release CTest passes 10/11 due only to the unchanged intermittent
+  ONVIF Windows loader failure; focused ONVIF passes immediately.
+
 ## What this feeds
 
 Once both tiers are filled in, the two ceilings define the range the decode governor

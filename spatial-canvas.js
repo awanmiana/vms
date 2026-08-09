@@ -7,24 +7,9 @@
 (function (global) {
   "use strict";
 
-  const TIER_RANK = { paused: 0, thumb: 1, sub: 2, main: 3 };
-
-  function resolveTierByZone({ zone, zoomLevel, isFocused, isTracking }) {
-    if (isTracking) return "main";
-    if (isFocused) return "main";
-    if (zone === "offscreen") return "paused";
-    if (zone === "prewarm") return "thumb";
-    const baseTier = zone === "focus" ? "main" : "thumb";
-    const cap = { site: "paused", wing: "thumb", room: "main" }[zoomLevel] || "main";
-    return TIER_RANK[cap] < TIER_RANK[baseTier] ? cap : baseTier;
-  }
-
-  function shouldApplyTierChange({ fromTier, toTier, msSincePanSettled = 0, minPromoteDwellMs = 300 }) {
-    if (fromTier === toTier) return false;
-    const isDowngrade = (TIER_RANK[toTier] ?? 0) < (TIER_RANK[fromTier] ?? 0);
-    if (isDowngrade) return true;
-    return msSincePanSettled >= minPromoteDwellMs;
-  }
+  const mediaPolicy = global.VmsMediaPolicy;
+  if (!mediaPolicy) throw new Error("The shared media policy must load before spatial-canvas.js.");
+  const { TIER_RANK, resolveTierByZone, shouldApplyTierChange } = mediaPolicy;
 
   // Decides which candidate tiles are allowed to actually stream, given a
   // global cap. Focused/tracked cameras always keep a slot; the remaining

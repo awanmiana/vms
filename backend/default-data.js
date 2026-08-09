@@ -27,38 +27,50 @@ const defaultUsers = [
   }
 ];
 
+const DECLARED_TABLES = Object.freeze([
+  "devices",
+  "cameras",
+  "streamProfiles",
+  "groups",
+  "users",
+  "sessions",
+  "cameraSessions",
+  "incidents",
+  "siteCanvases",
+  "cameraPositions",
+  "trackingSessions",
+  "sessionBreadcrumbs",
+  "voiceAliases",
+  "commandLog",
+  "deviceDiscoveryResults",
+  "deviceEvents",
+  "deviceHealthChecks",
+  "ptzCommandLog",
+  "entities",
+  "locations",
+  "cameraLocations",
+  "tagIndex",
+  "complianceTypes",
+  "complianceEvents",
+  "complianceLogs",
+  "complianceLogCameras",
+  "complianceLogLocations",
+  "tickets",
+  "operatorSettings"
+]);
+
+const DECLARED_RECORDS = Object.freeze(["inventoryState"]);
+
 function emptyStore() {
-  return {
-    version: 1,
-    devices: [],
-    cameras: [],
-    streamProfiles: [],
-    groups: [],
-    users: [],
-    sessions: [],
-    cameraSessions: [],
-    incidents: [],
-    siteCanvases: [],
-    cameraPositions: [],
-    trackingSessions: [],
-    sessionBreadcrumbs: [],
-    voiceAliases: [],
-    commandLog: [],
-    entities: [],
-    locations: [],
-    cameraLocations: [],
-    tagIndex: [],
-    complianceTypes: [],
-    complianceEvents: [],
-    complianceLogs: [],
-    complianceLogCameras: [],
-    complianceLogLocations: [],
-    tickets: [],
-    operatorSettings: []
-  };
+  return Object.fromEntries([
+    ["version", 1],
+    ...DECLARED_TABLES.map((name) => [name, []])
+  ]);
 }
 
 module.exports = {
+  DECLARED_RECORDS,
+  DECLARED_TABLES,
   defaultDevices,
   defaultUsers,
   emptyStore

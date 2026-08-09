@@ -4,6 +4,7 @@
         contract: require("./contract"),
         availability: require("./availability-policy"),
         operations: require("./operation-policy"),
+        outcomes: require("./outcome-mapping"),
         health: require("./health-policy"),
         recovery: require("./recovery-policy"),
         resources: require("./resource-policy")
@@ -12,6 +13,7 @@
         contract: root.VmsResilienceContract,
         availability: root.VmsResilienceAvailability,
         operations: root.VmsResilienceOperations,
+        outcomes: root.VmsResilienceOutcomes,
         health: root.VmsResilienceHealth,
         recovery: root.VmsResilienceRecovery,
         resources: root.VmsResilienceResources
@@ -29,6 +31,7 @@
     ...modules.contract,
     ...modules.availability,
     ...modules.operations,
+    ...modules.outcomes,
     ...modules.health,
     ...modules.recovery,
     ...modules.resources

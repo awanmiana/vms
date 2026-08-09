@@ -1,10 +1,6 @@
-const crypto = require("crypto");
+const { createId } = require("../shared/core");
 const { formatDateTime } = require("./datetime");
 const { normalizeLookup } = require("./commands");
-
-function id(prefix) {
-  return `${prefix}-${crypto.randomUUID()}`;
-}
 
 function normalizeTag(value) {
   return normalizeLookup(value);
@@ -22,7 +18,7 @@ class TagIndexService {
       .find((item) => item.tagType === tagType && item.normalizedLabel === normalizedLabel && String(item.referenceId || "") === String(referenceId || ""));
 
     const row = {
-      id: existing?.id || id("tag"),
+      id: existing?.id || createId("tag"),
       tagType,
       referenceId,
       label,
@@ -47,7 +43,7 @@ class EntityLocationService {
 
   createEntity({ id: entityId, name, alias = "", notes = "" }) {
     const entity = {
-      id: entityId || id("ent"),
+      id: entityId || createId("ent"),
       name,
       alias,
       notes
@@ -65,7 +61,7 @@ class EntityLocationService {
     if (!entity) throw new Error(`Entity not found: ${entityId}`);
 
     const location = {
-      id: locationId || id("loc"),
+      id: locationId || createId("loc"),
       entityId,
       name,
       locationType,
@@ -108,7 +104,7 @@ class ComplianceTypeService {
 
   save({ id: typeId, label, category = "non_compliance", createdVia = "preset", reviewStatus = "approved" }) {
     const row = {
-      id: typeId || id("ctype"),
+      id: typeId || createId("ctype"),
       label,
       normalizedLabel: normalizeTag(label),
       category,
@@ -137,7 +133,7 @@ class ComplianceLogService {
     if (!type) throw new Error(`Compliance type not found: ${complianceTypeId}`);
 
     const log = {
-      id: id("clog"),
+      id: createId("clog"),
       entityId,
       entityNameSnapshot: entity.name,
       complianceTypeId,
@@ -195,7 +191,7 @@ class TicketService {
 
   createTicket({ entityId = "", locationId = "", queryType = "other", rawMessageText = "", requestedStartAt = "", requestedEndAt = "", subjectDescriptor = "", whatsappMessageId = "" }) {
     const ticket = {
-      id: id("ticket"),
+      id: createId("ticket"),
       entityId,
       locationId,
       queryType,

@@ -49,6 +49,18 @@ so the media + UI layers are written once.
 - **Same design, two deployments:** standalone = broker runs in-process locally (DPAPI); coordinated
   (later gate) = shared server with a vault, RBAC, and audit. Identical operator/broker interface.
 
+## Decision: bounded standalone external-control surface
+
+- The A0/P1-13 HTTP command surface is off by default and binds loopback only. Every protected
+  route requires the per-session bearer token and command invocations enter the same validation,
+  capability, confirmation, result-mapping, and audit gate as QML and the command palette.
+- Native increment 42 adds a server-wide fixed-window request budget: 120 requests per 60 seconds
+  by default, deployment-configurable with a positive `--api-rate-limit N`. Catalog, invoke,
+  unauthorized, malformed, and unknown-route traffic all consume the same bounded budget.
+- Exhaustion returns structured HTTP 429 at the transport boundary; the command is not executed.
+  Scoped identities, TLS, non-loopback exposure, per-user/distributed limiting, event streaming,
+  and the AI-agent connector remain coordinated P1-02/P1-03/P1-13 gates.
+
 ## The tuning principle (non-negotiable)
 
 Smoothness comes from **intelligence, not brute force**. Detect the machine → adapt codec/tier/decoder
@@ -74,8 +86,9 @@ software refuses to overload itself. (Matches P0-03H / P0-01L / P3-03.)
    verified on hardware), **tier-driven selection of real per-camera RTSP main/sub streams**
    (`--camera "main;sub"`, plumbing verified locally), a cost model **recalibrated** to the corrected
    d3d12h265dec ramp, and the **honest per-tile state model** (live/degraded/paused-offscreen/
-   paused-capacity) are built; the P3-14 Qt/QML visual state UI, a seamless (non-reloading) live
-   apply, and (hardware-blocked) live-camera decode confirmation + low-end calibration remain.
+   paused-capacity), P3-14 Qt/QML visual state UI, and continuity-preserving same-layout live
+   apply are built; valid-credential live-camera confirmation and low-end calibration remain
+   hardware evidence gates.
    Camera profile discovery/negotiation (ONVIF) is a separate later gate (P2-05), not done here.
 5. **[gated] Product shell and services.** Connection broker, production persistence/SQLite,
    credential store, and layered workspace advance only under their controlling P-phase approvals.

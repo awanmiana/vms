@@ -5,6 +5,11 @@ const {
   normalizeAdapterId,
   normalizeOperationId
 } = require("./contract");
+const { adapterOutcome } = require("../../shared/resilience/outcome-mapping");
+
+function withCanonicalOutcome(result) {
+  return { ...result, outcome: adapterOutcome(result) };
+}
 
 class DeviceAdapterRegistry {
   constructor() {
@@ -68,7 +73,7 @@ class DeviceAdapterRegistry {
     const operation = normalizeOperationId(operationId);
     const resolution = this.resolve(adapterId);
     if (!resolution.registered) {
-      return {
+      return withCanonicalOutcome({
         status: "unavailable",
         adapterId: resolution.requestedId,
         operation,
@@ -76,44 +81,44 @@ class DeviceAdapterRegistry {
         message: resolution.reasonCode === "ADAPTER_ID_REQUIRED"
           ? "An explicit adapter id is required."
           : `No adapter is registered for ${resolution.requestedId}.`
-      };
+      });
     }
 
     const handler = resolution.adapter.operations[operation];
     if (!handler) {
       if (resolution.adapter.unsupportedOperations.includes(operation)) {
-        return {
+        return withCanonicalOutcome({
           status: "unsupported",
           adapterId: resolution.manifest.id,
           operation,
           reasonCode: "OPERATION_UNSUPPORTED",
           message: `${resolution.manifest.displayName} declares operation ${operation} unsupported.`
-        };
+        });
       }
-      return {
+      return withCanonicalOutcome({
         status: "unknown",
         adapterId: resolution.manifest.id,
         operation,
         reasonCode: "OPERATION_NOT_VERIFIED",
         message: `${resolution.manifest.displayName} operation ${operation} has not been verified or implemented.`
-      };
+      });
     }
 
     try {
       const data = await handler(context);
-      return {
+      return withCanonicalOutcome({
         status: "succeeded",
         adapterId: resolution.manifest.id,
         operation,
         reasonCode: "",
         message: "",
         data
-      };
+      });
     } catch (error) {
       const outcomeUnknown =
         error instanceof DeviceAdapterOperationError &&
         error.outcomeUnknown === true;
-      return {
+      return withCanonicalOutcome({
         status: outcomeUnknown ? "unknown" : "failed",
         adapterId: resolution.manifest.id,
         operation,
@@ -122,7 +127,7 @@ class DeviceAdapterRegistry {
           ? "The operation may have executed, but its result could not be confirmed."
           : "Adapter operation failed."),
         ...(outcomeUnknown ? { outcomeUnknown: true } : {})
-      };
+      });
     }
   }
 }

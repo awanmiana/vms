@@ -1,7 +1,5 @@
 const assert = require("assert");
-const fs = require("fs");
-const path = require("path");
-const vm = require("vm");
+const { loadAppTestApi } = require("./test-support/app-loader");
 
 const storage = new Map();
 class FixedDate extends Date {
@@ -10,48 +8,11 @@ class FixedDate extends Date {
   }
 }
 
-const context = {
-  __VMS_TEST_MODE__: true,
-  console,
+const { api, context } = loadAppTestApi({
   Date: FixedDate,
-  navigator: {
-    hardwareConcurrency: 8,
-    deviceMemory: 8
-  },
-  localStorage: {
-    getItem(key) {
-      return storage.has(key) ? storage.get(key) : null;
-    },
-    setItem(key, value) {
-      storage.set(key, String(value));
-    },
-    removeItem(key) {
-      storage.delete(key);
-    }
-  },
-  window: {
-    location: { hash: "" },
-    history: { replaceState() {}, pushState() {} }
-  },
-  document: {
-    getElementById() {
-      return null;
-    },
-    querySelector() {
-      return null;
-    },
-    querySelectorAll() {
-      return [];
-    }
-  }
-};
-context.globalThis = context;
-
-vm.createContext(context);
-vm.runInContext(fs.readFileSync(path.join(__dirname, "app.js"), "utf8"), context, { filename: "app.js" });
-
-const api = context.__VMS_TEST_API__;
-assert(api, "app.js should expose the VMS test API");
+  navigator: { hardwareConcurrency: 8, deviceMemory: 8 },
+  storage
+});
 
 const requiredHelpers = [
   "normalizeWorkspaceList",

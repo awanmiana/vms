@@ -83,6 +83,7 @@ CommandController::CommandController(WorkspaceController* live,
         m.insert(QStringLiteral("time"),
                  QDateTime::currentDateTimeUtc().toString(
                      QStringLiteral("HH:mm:ss")));
+        m.insert(QStringLiteral("source"), source_);
         m.insert(QStringLiteral("command"), QString::fromStdString(r.commandId));
         m.insert(QStringLiteral("args"), QString::fromStdString(r.argsText));
         m.insert(QStringLiteral("outcome"),
@@ -802,6 +803,33 @@ QString CommandController::run(const QString& line) {
     return QStringLiteral("%1 · %2")
         .arg(QString::fromLatin1(OutcomeName(r.outcome)))
         .arg(QString::fromStdString(r.message));
+}
+
+QString CommandController::runVoice(const QString& transcript,
+                                    const QString& languageTag,
+                                    double confidence) {
+    source_ = QStringLiteral("voice");
+    const vms::command::VoiceCommand mapped = voiceMapper_.map(
+        transcript.toStdString(), languageTag.toStdString(), confidence);
+    if (!mapped) {
+        // Record every refused voice attempt without persisting arbitrary
+        // transcript text (which may accidentally contain sensitive speech).
+        registry_.invoke("__voice_unrecognized__", {}, capabilities_);
+        source_ = QStringLiteral("ui");
+        return QStringLiteral("%1 · %2")
+            .arg(QString::fromLatin1(vms::command::VoiceStatusName(mapped.status)))
+            .arg(QString::fromStdString(mapped.reason));
+    }
+
+    const CommandResult result = registry_.invoke(
+        mapped.commandId, mapped.args, capabilities_, /*confirmed=*/false);
+    source_ = QStringLiteral("ui");
+    if (result)
+        return QStringLiteral("ok · %1")
+            .arg(QString::fromStdString(result.message));
+    return QStringLiteral("%1 · %2")
+        .arg(QString::fromLatin1(OutcomeName(result.outcome)))
+        .arg(QString::fromStdString(result.message));
 }
 
 QString CommandController::catalogJson() const {

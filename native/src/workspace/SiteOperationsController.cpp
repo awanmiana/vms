@@ -1,11 +1,14 @@
 #include "SiteOperationsController.h"
 
+#include "AlarmController.h"
 #include "DeviceController.h"
 #include "PremisesController.h"
 #include "WorkspaceController.h"
 #include "persist/SegmentIndex.h"
+#include "persist/StreamDurationRepo.h"
 
 #include <QDateTime>
+#include <QSet>
 #include <QStringList>
 #include <QTimeZone>
 #include <QVariantList>
@@ -25,6 +28,8 @@ QString durationText(qint64 seconds) {
     const qint64 days = seconds / 86400;
     const qint64 hours = (seconds % 86400) / 3600;
     const qint64 minutes = (seconds % 3600) / 60;
+    if (seconds < 60)
+        return QStringLiteral("%1s").arg(seconds);
     if (days > 0)
         return QStringLiteral("%1d %2h").arg(days).arg(hours);
     if (hours > 0)
@@ -45,9 +50,10 @@ QDateTime parseUtc(const QString& value) {
 SiteOperationsController::SiteOperationsController(
     PremisesController* premises, DeviceController* devices,
     WorkspaceController* live, vms::persist::SegmentIndex* recordings,
+    vms::persist::StreamDurationRepo* streams, AlarmController* alarms,
     QObject* parent)
     : QObject(parent), premises_(premises), devices_(devices), live_(live),
-      recordings_(recordings) {
+      recordings_(recordings), streams_(streams), alarms_(alarms) {
     if (premises_)
         connect(premises_, &PremisesController::changed, this,
                 &SiteOperationsController::refresh);
@@ -57,10 +63,40 @@ SiteOperationsController::SiteOperationsController(
     if (live_)
         connect(live_, &WorkspaceController::diagnosticsChanged, this,
                 &SiteOperationsController::refresh);
+    if (alarms_)
+        connect(alarms_, &AlarmController::changed, this,
+                &SiteOperationsController::refresh);
     connect(&clock_, &QTimer::timeout, this,
             &SiteOperationsController::refresh);
     clock_.start(1000);
     refresh();
+}
+
+void SiteOperationsController::advanceStreamingObservation(
+    const QString& nextSiteId, int nextPlayingBranches) {
+    qint64 elapsedMilliseconds = 0;
+    if (streamingObservationAge_.isValid())
+        elapsedMilliseconds = streamingObservationAge_.restart();
+    else
+        streamingObservationAge_.start();
+
+    if (streams_ && !observedStreamingSiteId_.isEmpty() &&
+        observedPlayingBranches_ > 0 && elapsedMilliseconds > 0) {
+        const vms::persist::Error error = streams_->addObservation(
+            observedStreamingSiteId_.toStdString(), elapsedMilliseconds,
+            observedPlayingBranches_);
+        if (!error) {
+            streamingCheckpointError_ = QString::fromStdString(error.message);
+        } else {
+            streamingCheckpointError_.clear();
+        }
+    }
+    observedStreamingSiteId_ = nextSiteId;
+    observedPlayingBranches_ = std::max(0, nextPlayingBranches);
+}
+
+void SiteOperationsController::flushStreaming() {
+    advanceStreamingObservation(QString(), 0);
 }
 
 void SiteOperationsController::refresh() {
@@ -292,11 +328,6 @@ void SiteOperationsController::refresh() {
                                 summary.overlappingSegments);
                 duration.insert(QStringLiteral("invalidSegments"),
                                 summary.invalidSegments);
-                duration.insert(QStringLiteral("streamingAvailable"), false);
-                duration.insert(QStringLiteral("partial"), true);
-                duration.insert(QStringLiteral("streamingReason"),
-                                QStringLiteral(
-                                    "No persistent stream-lifecycle source is connected"));
                 if (summary.invalidSegments > 0)
                     duration.insert(QStringLiteral("qualityWarning"),
                                     QStringLiteral("%1 malformed legacy segment(s) excluded")
@@ -307,9 +338,6 @@ void SiteOperationsController::refresh() {
         recordingScopeKey_ = recordingScopeKey;
         recordingCacheAge_.restart();
     }
-    next.insert(QStringLiteral("cumulativeDuration"),
-                recordingDurationCache_);
-
     QVariantMap media;
     int mediaTotal = 0, playing = 0, connecting = 0, stalled = 0;
     int paused = 0, mediaUnavailable = 0, fpsSamples = 0;
@@ -349,8 +377,157 @@ void SiteOperationsController::refresh() {
             "Live media is disabled or has no active/policy-paused observations"));
     next.insert(QStringLiteral("media"), media);
 
-    next.insert(QStringLiteral("analysis"), unavailable(QStringLiteral(
-        "No approved analytics/VCA source is connected")));
+    // P3-18 / inc 39: settle the elapsed interval against the observation that
+    // was in force before this refresh. QElapsedTimer is monotonic, so a wall-
+    // clock adjustment cannot create or erase duration. The current observation
+    // becomes the basis for the next interval. Only decoded `playing` branches
+    // count; connecting/stalled/paused states remain excluded.
+    advanceStreamingObservation(activeSiteId, playing);
+    QVariantMap cumulative = recordingDurationCache_;
+    const bool recordingAvailable =
+        cumulative.value(QStringLiteral("recordingAvailable")).toBool();
+    if (!recordingAvailable) {
+        cumulative.insert(QStringLiteral("recordingAvailable"), false);
+        cumulative.insert(QStringLiteral("recordingReason"),
+                          cumulative.value(QStringLiteral("reason")));
+    }
+
+    bool streamingAvailable = false;
+    qint64 streamingMilliseconds = 0;
+    if (!siteAvailable) {
+        cumulative.insert(QStringLiteral("streamingReason"),
+                          QStringLiteral("No active premises is attached"));
+    } else if (!streams_) {
+        cumulative.insert(QStringLiteral("streamingReason"), QStringLiteral(
+            "No persistent stream-duration source is connected"));
+    } else if (!streamingCheckpointError_.isEmpty()) {
+        cumulative.insert(QStringLiteral("streamingReason"), QStringLiteral(
+            "Stream-duration checkpoint failed: %1")
+            .arg(streamingCheckpointError_));
+    } else {
+        vms::persist::StreamDurationSummary summary;
+        const vms::persist::Error error =
+            streams_->summary(activeSiteId.toStdString(), summary);
+        if (!error) {
+            cumulative.insert(QStringLiteral("streamingReason"), QStringLiteral(
+                "Stream-duration query failed: %1")
+                .arg(QString::fromStdString(error.message)));
+        } else {
+            streamingAvailable = true;
+            streamingMilliseconds = summary.milliseconds;
+            cumulative.insert(QStringLiteral("streamingMilliseconds"),
+                              streamingMilliseconds);
+            cumulative.insert(QStringLiteral("streamingSeconds"),
+                              streamingMilliseconds / 1000);
+            cumulative.insert(QStringLiteral("streamingText"),
+                              durationText(streamingMilliseconds / 1000));
+            cumulative.insert(QStringLiteral("streamingCheckpoints"),
+                              summary.checkpoints);
+            cumulative.insert(QStringLiteral("streamingUpdatedAtUtc"),
+                              QString::fromStdString(summary.updatedAtUtc));
+        }
+    }
+    cumulative.insert(QStringLiteral("streamingAvailable"),
+                      streamingAvailable);
+    cumulative.insert(QStringLiteral("partial"),
+                      !(recordingAvailable && streamingAvailable));
+    cumulative.insert(QStringLiteral("combinedAvailable"),
+                      recordingAvailable && streamingAvailable);
+    if (recordingAvailable && streamingAvailable) {
+        const qint64 combinedSeconds =
+            cumulative.value(QStringLiteral("recordingSeconds")).toLongLong() +
+            streamingMilliseconds / 1000;
+        cumulative.insert(QStringLiteral("combinedSeconds"), combinedSeconds);
+        cumulative.insert(QStringLiteral("combinedText"),
+                          durationText(combinedSeconds));
+        cumulative.insert(QStringLiteral("available"), true);
+        cumulative.insert(QStringLiteral("stateText"),
+                          QStringLiteral("Combined %1")
+                              .arg(durationText(combinedSeconds)));
+    } else if (recordingAvailable) {
+        cumulative.insert(QStringLiteral("available"), true);
+        cumulative.insert(QStringLiteral("stateText"),
+                          QStringLiteral("Recorded %1")
+                              .arg(cumulative.value(
+                                  QStringLiteral("recordingText")).toString()));
+    } else if (streamingAvailable) {
+        cumulative.insert(QStringLiteral("available"), true);
+        cumulative.insert(QStringLiteral("stateText"),
+                          QStringLiteral("Streamed %1")
+                              .arg(durationText(streamingMilliseconds / 1000)));
+    }
+    next.insert(QStringLiteral("cumulativeDuration"), cumulative);
+
+    // P3-18 / inc 40: the first analysis source is deliberately narrow. The
+    // alarm engine is authoritative for current active device-health alarms;
+    // DeviceController is authoritative for each device's current site. This
+    // is a session-scoped operational summary, not retained history or VCA.
+    QVariantMap analysis;
+    if (!siteAvailable) {
+        analysis = unavailable(QStringLiteral(
+            "No active premises is attached"));
+    } else if (!devices_) {
+        analysis = unavailable(QStringLiteral(
+            "No device ownership source is connected"));
+    } else if (!alarms_) {
+        analysis = unavailable(QStringLiteral(
+            "No active alarm source is connected"));
+    } else {
+        QSet<QString> siteDeviceIds;
+        for (const QVariant& value : devices_->devices()) {
+            const QVariantMap device = value.toMap();
+            if (device.value(QStringLiteral("siteId")).toString() == activeSiteId)
+                siteDeviceIds.insert(device.value(QStringLiteral("id")).toString());
+        }
+
+        int active = 0, attention = 0, high = 0, medium = 0, low = 0;
+        int acknowledged = 0, suppressed = 0, occurrences = 0;
+        QSet<QString> affectedDevices;
+        for (const QVariant& value : alarms_->alarms()) {
+            const QVariantMap alarm = value.toMap();
+            const QString deviceId = alarm.value(QStringLiteral("device")).toString();
+            if (!siteDeviceIds.contains(deviceId)) continue;
+            ++active;
+            affectedDevices.insert(deviceId);
+            occurrences += std::max(0, alarm.value(QStringLiteral("count")).toInt());
+            const bool isSuppressed =
+                alarm.value(QStringLiteral("suppressed")).toBool();
+            if (isSuppressed) ++suppressed;
+            const QString state = alarm.value(QStringLiteral("state")).toString();
+            if (state == QLatin1String("acknowledged")) ++acknowledged;
+            if (!isSuppressed &&
+                (state == QLatin1String("new") ||
+                 state == QLatin1String("escalated")))
+                ++attention;
+            const QString priority =
+                alarm.value(QStringLiteral("priority")).toString();
+            if (priority == QLatin1String("high")) ++high;
+            else if (priority == QLatin1String("medium")) ++medium;
+            else if (priority == QLatin1String("low")) ++low;
+        }
+
+        analysis.insert(QStringLiteral("available"), true);
+        analysis.insert(QStringLiteral("source"),
+                        QStringLiteral("Current device-health alarms"));
+        analysis.insert(QStringLiteral("stateText"),
+                        active == 0
+                            ? QStringLiteral("No active device-health alarms")
+                            : QStringLiteral("%1 active · %2 need attention")
+                                  .arg(active).arg(attention));
+        analysis.insert(QStringLiteral("active"), active);
+        analysis.insert(QStringLiteral("needsAttention"), attention);
+        analysis.insert(QStringLiteral("high"), high);
+        analysis.insert(QStringLiteral("medium"), medium);
+        analysis.insert(QStringLiteral("low"), low);
+        analysis.insert(QStringLiteral("acknowledged"), acknowledged);
+        analysis.insert(QStringLiteral("suppressed"), suppressed);
+        analysis.insert(QStringLiteral("occurrences"), occurrences);
+        analysis.insert(QStringLiteral("affectedDevices"),
+                        affectedDevices.size());
+        analysis.insert(QStringLiteral("coverageNote"), QStringLiteral(
+            "Current session and device-health rules only; no VCA or retained trend history"));
+    }
+    next.insert(QStringLiteral("analysis"), analysis);
 
     if (next == snapshot_) return;
     snapshot_ = next;

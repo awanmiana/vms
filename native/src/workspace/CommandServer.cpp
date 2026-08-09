@@ -51,6 +51,18 @@ QHttpServerResponse errorResponse(StatusCode code, const QString& outcome,
     return QHttpServerResponse(body, code);
 }
 
+QHttpServerResponse rateLimitResponse(int limit, int windowMs,
+                                      int retryAfterMs) {
+    QJsonObject body;
+    body.insert(QStringLiteral("outcome"), QStringLiteral("rate-limited"));
+    body.insert(QStringLiteral("message"),
+                QStringLiteral("control API request budget exhausted"));
+    body.insert(QStringLiteral("limit"), limit);
+    body.insert(QStringLiteral("windowMs"), windowMs);
+    body.insert(QStringLiteral("retryAfterMs"), retryAfterMs);
+    return QHttpServerResponse(body, StatusCode::TooManyRequests);
+}
+
 // Constant shape: the bearer token, or empty when absent/malformed.
 QString bearerOf(const QHttpServerRequest& req) {
     const QByteArray auth = req.value("Authorization");
@@ -86,15 +98,20 @@ bool argsFromJson(const QJsonObject& obj, Args& out, QString& why) {
 } // namespace
 
 CommandServer::CommandServer(CommandController* commander, QString token,
-                             QObject* parent)
-    : QObject(parent), commander_(commander), token_(std::move(token)) {
+                             int requestLimit, int windowMs, QObject* parent)
+    : QObject(parent), commander_(commander), token_(std::move(token)),
+      requestLimit_(requestLimit > 0 ? requestLimit : 1),
+      windowMs_(windowMs > 0 ? windowMs : 60000) {
     http_ = std::make_unique<QHttpServer>();
     tcp_ = std::make_unique<QTcpServer>();
+    windowClock_.start();
 
     // GET /v1/commands — the machine-readable catalog (agent discovery).
     http_->route(QStringLiteral("/v1/commands"),
                  QHttpServerRequest::Method::Get,
                  [this](const QHttpServerRequest& req) {
+        if (!admitRequest())
+            return rateLimitResponse(requestLimit_, windowMs_, retryAfterMs());
         if (bearerOf(req) != token_)
             return errorResponse(StatusCode::Unauthorized,
                                  QStringLiteral("unauthorized"),
@@ -109,6 +126,8 @@ CommandServer::CommandServer(CommandController* commander, QString token,
     http_->route(QStringLiteral("/v1/invoke"),
                  QHttpServerRequest::Method::Post,
                  [this](const QHttpServerRequest& req) {
+        if (!admitRequest())
+            return rateLimitResponse(requestLimit_, windowMs_, retryAfterMs());
         if (bearerOf(req) != token_)
             return errorResponse(StatusCode::Unauthorized,
                                  QStringLiteral("unauthorized"),
@@ -143,8 +162,13 @@ CommandServer::CommandServer(CommandController* commander, QString token,
     });
 
     // Anything else: an honest JSON 404 (not an empty body).
-    http_->setMissingHandler(this, [](const QHttpServerRequest&,
-                                      QHttpServerResponder& responder) {
+    http_->setMissingHandler(this, [this](const QHttpServerRequest&,
+                                         QHttpServerResponder& responder) {
+        if (!admitRequest()) {
+            responder.sendResponse(
+                rateLimitResponse(requestLimit_, windowMs_, retryAfterMs()));
+            return;
+        }
         QJsonObject body;
         body.insert(QStringLiteral("outcome"), QStringLiteral("unknown-route"));
         body.insert(QStringLiteral("message"),
@@ -155,6 +179,22 @@ CommandServer::CommandServer(CommandController* commander, QString token,
 }
 
 CommandServer::~CommandServer() = default;
+
+bool CommandServer::admitRequest() {
+    if (!windowClock_.isValid() || windowClock_.elapsed() >= windowMs_) {
+        windowClock_.restart();
+        requestsInWindow_ = 0;
+    }
+    if (requestsInWindow_ >= requestLimit_) return false;
+    ++requestsInWindow_;
+    return true;
+}
+
+int CommandServer::retryAfterMs() const {
+    if (!windowClock_.isValid()) return windowMs_;
+    const qint64 remaining = windowMs_ - windowClock_.elapsed();
+    return static_cast<int>(remaining > 0 ? remaining : 0);
+}
 
 bool CommandServer::listen(quint16 port, QString& error) {
     // Loopback ONLY — remote exposure is a security-reviewed later slice.

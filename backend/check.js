@@ -1,18 +1,14 @@
 const { getSchemaStatements } = require("./schema-loader");
 const { canOpenTier, estimateBitrateKbps, resolveTier } = require("./media-policy");
 const { FileDatabase } = require("./file-db");
-const { CameraService, DeviceService, MediaGuardService } = require("./services");
-const { CommandExecutor } = require("./commands");
+const { createBackendComposition } = require("./composition");
 const { RegexCommandParser, createAliasResolver } = require("./voice-regex");
 
 const statements = getSchemaStatements();
 const db = new FileDatabase();
 db.load();
-
-const devices = new DeviceService(db);
-const cameras = new CameraService(db);
-const guard = new MediaGuardService(db);
-const commands = new CommandExecutor(db, { mediaGuard: guard });
+const composition = createBackendComposition({ db });
+const { devices, cameras, guard, commands } = composition.services;
 
 const device = devices.save({
   id: "dev-check",

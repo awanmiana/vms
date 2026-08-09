@@ -60,6 +60,7 @@
 #include "persist/WorkspaceRepo.h"
 #include "persist/PremisesRepo.h"
 #include "persist/SegmentIndex.h"
+#include "persist/StreamDurationRepo.h"
 #include "persist/DeviceRepo.h"
 #include "persist/SecretStore.h"
 #include "health/HealthMonitor.h"
@@ -477,8 +478,8 @@ int runSpatialSelftest() {
         check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
         check(static_cast<bool>(store.migrate(coreMigrations())),
               "migrate schema");
-        check(store.schemaVersion() == 13,
-              "schema at v13 (site-scoped reachability evidence)");
+        check(store.schemaVersion() == 15,
+              "schema at v15 (structured audit + chain anchors)");
 
         WorkspaceController a(vms::DevBoxProfile(), 4);
         a.setTilePos(2, 777.0, 888.0);
@@ -771,6 +772,22 @@ int runCommandSelftest() {
               .startsWith(QLatin1String("failed")),
           "replay without a recording DB refuses honestly");
 
+    // P1-12 final leg: recognized speech is mapped deterministically, then
+    // traverses this exact envelope. The recognizer remains an adapter.
+    r = cmd.runVoice(QStringLiteral("please focus camera six"),
+                     QStringLiteral("en-US"), 0.95);
+    check(r.startsWith(QLatin1String("ok")) && live.focusIndex() == 6,
+          "deterministic voice mapping drives the real workspace");
+    r = cmd.runVoice(QStringLiteral("focus camera two"),
+                     QStringLiteral("fr-FR"), 0.99);
+    check(r.startsWith(QLatin1String("unsupported-language")) &&
+              live.focusIndex() == 6,
+          "unregistered voice language fails closed without side effects");
+    r = cmd.runVoice(QStringLiteral("remove device cam-1 confirm"),
+                     QStringLiteral("en-US"), 0.99);
+    check(r.startsWith(QLatin1String("needs-confirm")),
+          "spoken confirm cannot cross the dangerous-action gate");
+
     // The dangerous gate through the text leg.
     check(cmd.run(QStringLiteral("device.remove cam-1"))
               .startsWith(QLatin1String("needs-confirm")),
@@ -796,13 +813,19 @@ int runCommandSelftest() {
     // Audit: every attempt above landed in the session trail, refusals too.
     const QVariantList log = cmd.auditLog();
     check(log.size() >= 13, "every attempt audited (refusals included)");
-    int refused = 0, okd = 0;
+    int refused = 0, okd = 0, voiceAttempts = 0;
     for (const QVariant& v : log) {
-        if (v.toMap().value(QStringLiteral("ok")).toBool()) ++okd;
+        const QVariantMap entry = v.toMap();
+        if (entry.value(QStringLiteral("source")).toString() ==
+            QLatin1String("voice"))
+            ++voiceAttempts;
+        if (entry.value(QStringLiteral("ok")).toBool()) ++okd;
         else ++refused;
     }
     check(okd >= 6 && refused >= 6,
           "audit trail carries both executed and refused outcomes");
+    check(voiceAttempts == 3,
+          "accepted and refused voice attempts retain source attribution");
     check(log.first().toMap().value(QStringLiteral("command")).toString() ==
               QLatin1String("workspace.spatial"),
           "audit trail is newest-first");
@@ -839,8 +862,8 @@ int runAuditSelftest() {
         Store store;
         check(static_cast<bool>(store.open(dbf.toStdString())), "open store file");
         check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-        check(store.schemaVersion() == 13,
-              "schema at v13 (site-scoped reachability evidence)");
+        check(store.schemaVersion() == 15,
+              "schema at v15 (structured audit + chain anchors)");
         AuditRepo repo(store);
 
         WorkspaceController live(vms::DevBoxProfile(), 4);
@@ -874,10 +897,83 @@ int runAuditSelftest() {
                   rows[0].source == "api",
               "API attempts attributed to 'api'");
 
+        AuditEntry config;
+        config.timeUtc = "2026-08-09 12:00:00";
+        config.source = "ui";
+        config.command = "device.rename";
+        config.args = "id=cam-1 name=Entrance";
+        config.outcome = "ok";
+        config.message = "configuration changed";
+        config.category = "configuration";
+        config.actorId = "operator:test-admin";
+        config.subjectId = "device:cam-1";
+        config.correlationId = "request:audit-selftest";
+        config.beforeState = "{\"name\":\"Lobby\"}";
+        config.afterState = "{\"name\":\"Entrance\"}";
+        check(static_cast<bool>(repo.append(config, Sha256HexHash())),
+              "append structured configuration before/after evidence");
+        check(static_cast<bool>(repo.list(1, rows)) && rows.size() == 1 &&
+                  rows[0].canonicalVersion == 2 &&
+                  rows[0].category == "configuration" &&
+                  rows[0].actorId == "operator:test-admin" &&
+                  rows[0].beforeState == "{\"name\":\"Lobby\"}" &&
+                  rows[0].afterState == "{\"name\":\"Entrance\"}",
+              "structured identity, subject, correlation, and snapshots round-trip");
+
         std::int64_t broken = -1;
         check(static_cast<bool>(repo.verifyChain(Sha256HexHash(), broken)) &&
                   broken == 0,
               "the untouched chain verifies end-to-end");
+
+        AuditAnchor anchor;
+        check(static_cast<bool>(repo.makeAnchorRequest(
+                  "2026-08-09 12:01:00", anchor)) &&
+                  anchor.firstAuditId == 1 && anchor.lastAuditId == 4 &&
+                  anchor.headHash == config.rowHash &&
+                  anchor.hashAlgorithm == "sha-256",
+              "create an RFC 3161-ready request from the exact chain head");
+        anchor.tsaUri = "https://tsa.invalid/selftest";
+        anchor.tsaPolicyOid = "1.2.3.4";
+        anchor.tokenBase64 = "Zml4dHVyZS10b2tlbg==";
+        anchor.verifiedUtc = "2026-08-09 12:01:01";
+        anchor.verifier = "fixture-rfc3161-verifier";
+        AuditAnchor rejected = anchor;
+        check(repo.recordVerifiedAnchor(
+                  rejected, [](const AuditAnchor&) { return false; }).status ==
+                  Status::Crypto,
+              "unverified timestamp token is rejected and not persisted");
+        check(static_cast<bool>(repo.recordVerifiedAnchor(
+                  anchor, [](const AuditAnchor& a) {
+                      return a.tokenBase64 == "Zml4dHVyZS10b2tlbg==";
+                  })) && anchor.id == 1,
+              "verified timestamp receipt anchors the unchanged chain head");
+        std::vector<AuditAnchor> anchors;
+        check(static_cast<bool>(repo.listAnchors(anchors)) &&
+                  anchors.size() == 1 && anchors[0].lastAuditId == 4 &&
+                  anchors[0].headHash == config.rowHash,
+              "verified anchor receipt round-trips newest-first");
+
+        AuditAnchor stale;
+        check(static_cast<bool>(repo.makeAnchorRequest(
+                  "2026-08-09 12:02:00", stale)),
+              "snapshot another candidate chain head");
+        AuditEntry later;
+        later.timeUtc = "2026-08-09 12:02:01";
+        later.source = "ui";
+        later.command = "workspace.sweep";
+        later.args = "on=true";
+        later.outcome = "ok";
+        later.message = "chain advanced";
+        check(static_cast<bool>(repo.append(later, Sha256HexHash())),
+              "advance the chain after the timestamp request");
+        stale.tsaUri = "https://tsa.invalid/selftest";
+        stale.tokenBase64 = "c3RhbGUtdG9rZW4=";
+        stale.verifiedUtc = "2026-08-09 12:02:02";
+        stale.verifier = "fixture-rfc3161-verifier";
+        check(repo.recordVerifiedAnchor(
+                  stale, [](const AuditAnchor&) { return true; }).status ==
+                  Status::Constraint,
+              "a verified token for a stale chain head is rejected");
 
         AuditEntry bad;
         check(repo.append(bad, nullptr).status == Status::Misuse,
@@ -890,8 +986,11 @@ int runAuditSelftest() {
         check(static_cast<bool>(store.open(dbf.toStdString())), "reopen store");
         AuditRepo repo(store);
         std::int64_t n = 0;
-        check(static_cast<bool>(repo.count(n)) && n == 3,
+        check(static_cast<bool>(repo.count(n)) && n == 5,
               "audit rows survive the reopen (durable)");
+        std::vector<AuditAnchor> anchors;
+        check(static_cast<bool>(repo.listAnchors(anchors)) && anchors.size() == 1,
+              "verified chain anchor survives the reopen");
 
         // Simulated tamper: a direct UPDATE behind the repo's back.
         check(static_cast<bool>(store.exec(
@@ -910,7 +1009,7 @@ int runAuditSelftest() {
         e.args = "on=false";
         e.outcome = "ok";
         e.message = "post-tamper append";
-        check(static_cast<bool>(repo.append(e, Sha256HexHash())) && e.id == 4,
+        check(static_cast<bool>(repo.append(e, Sha256HexHash())) && e.id == 6,
               "appending after the tamper still works");
         check(static_cast<bool>(repo.verifyChain(Sha256HexHash(), broken)) &&
                   broken == 1,
@@ -1208,11 +1307,59 @@ int runApiSelftest(int argc, char** argv) {
     check(okd >= 2 && refused >= 3,
           "API attempts audited through the same trail (refusals included)");
 
+    // 7) Increment 42: a bounded transport rejects excess requests before
+    // they can reach the command envelope or mutate the real workspace.
+    CommandServer limitedServer(&cmd, QStringLiteral("limited-token"), 2,
+                                60000);
+    check(limitedServer.listen(0, err),
+          "rate-limit fixture binds a second loopback port");
+    const QString limitedBase =
+        QStringLiteral("http://127.0.0.1:%1").arg(limitedServer.port());
+    auto limitedInvoke = [&](int tile, int& status) -> QJsonDocument {
+        QNetworkRequest req{QUrl(limitedBase + QStringLiteral("/v1/invoke"))};
+        req.setRawHeader("Authorization", "Bearer limited-token");
+        req.setHeader(QNetworkRequest::ContentTypeHeader,
+                      QStringLiteral("application/json"));
+        QJsonObject requestBody;
+        requestBody.insert(QStringLiteral("command"),
+                           QStringLiteral("workspace.focus"));
+        requestBody.insert(QStringLiteral("args"),
+                           QJsonObject{{QStringLiteral("tile"), tile}});
+        QNetworkReply* limitedReply = nam.post(
+            req, QJsonDocument(requestBody).toJson(QJsonDocument::Compact));
+        QEventLoop loop;
+        QObject::connect(limitedReply, &QNetworkReply::finished,
+                         &loop, &QEventLoop::quit);
+        loop.exec();
+        status = limitedReply
+                     ->attribute(QNetworkRequest::HttpStatusCodeAttribute)
+                     .toInt();
+        const QJsonDocument response =
+            QJsonDocument::fromJson(limitedReply->readAll());
+        limitedReply->deleteLater();
+        return response;
+    };
+    limitedInvoke(6, st);
+    check(st == 200 && live.focusIndex() == 6,
+          "rate limit admits request 1/2");
+    limitedInvoke(7, st);
+    check(st == 200 && live.focusIndex() == 7,
+          "rate limit admits request 2/2");
+    r = limitedInvoke(8, st);
+    check(st == 429 &&
+              r.object().value(QStringLiteral("outcome")).toString() ==
+                  QLatin1String("rate-limited") &&
+              r.object().value(QStringLiteral("limit")).toInt() == 2 &&
+              r.object().value(QStringLiteral("retryAfterMs")).toInt() > 0,
+          "request 3/2 -> structured 429 rate-limited");
+    check(live.focusIndex() == 7,
+          "rate-limited invocation does not mutate the workspace");
+
     if (failures == 0) {
         std::cout << "PASS: loopback external control API verified — bearer "
                      "auth, catalog discovery, real invocation, deterministic "
                      "refusal mapping, dangerous confirm over the wire, and "
-                     "shared audit\n";
+                     "shared audit, and bounded request rate\n";
         return 0;
     }
     std::cout << "FAILED: " << failures << " check(s)\n";
@@ -1368,8 +1515,8 @@ int runDevicesSelftest() {
     Store store;
     check(static_cast<bool>(store.open(":memory:")), "open in-memory store");
     check(static_cast<bool>(store.migrate(coreMigrations())), "migrate schema");
-    check(store.schemaVersion() == 13,
-          "schema at v13 (site-scoped reachability evidence)");
+    check(store.schemaVersion() == 15,
+          "schema at v15 (structured audit + chain anchors)");
     InMemorySecretStore secrets;
     DeviceRepo repo(store, secrets);
     vms::health::HealthMonitor health;
@@ -2706,6 +2853,7 @@ int runSiteOperationsSelftest() {
     devices.reportReach(QStringLiteral("cam-offline"), 0);
 
     SegmentIndex recordings(store);
+    StreamDurationRepo streams(store);
     auto addRecording = [&](const char* cameraId, const char* startUtc,
                             const char* endUtc, const char* path) {
         Segment segment;
@@ -2727,6 +2875,18 @@ int runSiteOperationsSelftest() {
               addRecording("cam-unassigned", "2026-08-03 08:00:00",
                            "2026-08-03 09:00:00", "unassigned.mp4"),
           "index completed recording fixtures including unassigned footage");
+    check(static_cast<bool>(streams.addObservation("hq", 2500, 2)),
+          "checkpoint five seconds of premises decoded branch-time");
+    AlarmController alarms;
+    alarms.onHealthEvent(QStringLiteral("cam-offline"),
+                         QStringLiteral("device-offline"),
+                         QStringLiteral("HQ camera unreachable"));
+    alarms.onHealthEvent(QStringLiteral("cam-online"),
+                         QStringLiteral("device-degraded"),
+                         QStringLiteral("HQ camera stream degraded"));
+    alarms.onHealthEvent(QStringLiteral("cam-unassigned"),
+                         QStringLiteral("device-offline"),
+                         QStringLiteral("Unassigned camera unreachable"));
     check(devices.setChannelDisabled(QStringLiteral("cam-offline"),
                                      QStringLiteral("cam-offline"), true)
               .isEmpty(),
@@ -2747,8 +2907,16 @@ int runSiteOperationsSelftest() {
     diagnostics.push_back(connecting);
     live.setMediaDiagnostics(diagnostics);
 
+    SiteOperationsController missingAlarmSource(&premises, &devices, &live,
+                                                &recordings, &streams);
+    const QVariantMap unavailableAnalysis = missingAlarmSource.snapshot()
+        .value(QStringLiteral("analysis")).toMap();
+    check(!unavailableAnalysis.value(QStringLiteral("available")).toBool() &&
+              !unavailableAnalysis.value(QStringLiteral("reason")).toString().isEmpty(),
+          "a missing alarm source stays explicitly unavailable");
+
     SiteOperationsController operations(&premises, &devices, &live,
-                                        &recordings);
+                                        &recordings, &streams, &alarms);
     const QVariantMap snapshot = operations.snapshot();
     const QVariantMap site = snapshot.value(QStringLiteral("site")).toMap();
     const QVariantMap clock =
@@ -2806,14 +2974,37 @@ int runSiteOperationsSelftest() {
     check(duration.value(QStringLiteral("segments")).toInt() == 3 &&
               duration.value(QStringLiteral("siteCameras")).toInt() == 2 &&
               duration.value(QStringLiteral("camerasWithFootage")).toInt() == 2 &&
-              !duration.value(QStringLiteral("streamingAvailable")).toBool() &&
-              !duration.value(QStringLiteral("streamingReason")).toString().isEmpty(),
-          "duration evidence is site-scoped while streaming remains explicit");
+              duration.value(QStringLiteral("streamingAvailable")).toBool() &&
+              duration.value(QStringLiteral("streamingMilliseconds")).toLongLong() >=
+                  5000 &&
+              duration.value(QStringLiteral("streamingCheckpoints")).toLongLong() >=
+                  1 &&
+              duration.value(QStringLiteral("combinedAvailable")).toBool() &&
+              duration.value(QStringLiteral("combinedSeconds")).toLongLong() >=
+                  1205,
+          "recording and persisted decoded branch-time remain distinct and combine");
     const QVariantMap analysis =
         snapshot.value(QStringLiteral("analysis")).toMap();
-    check(!analysis.value(QStringLiteral("available")).toBool() &&
-              !analysis.value(QStringLiteral("reason")).toString().isEmpty(),
-          "analysis is explicitly unavailable");
+    check(analysis.value(QStringLiteral("available")).toBool() &&
+              analysis.value(QStringLiteral("active")).toInt() == 2 &&
+              analysis.value(QStringLiteral("needsAttention")).toInt() == 2 &&
+              analysis.value(QStringLiteral("high")).toInt() == 1 &&
+              analysis.value(QStringLiteral("medium")).toInt() == 1 &&
+              analysis.value(QStringLiteral("occurrences")).toInt() == 2,
+          "active device-health alarm analysis is scoped to the premises");
+    const QVariantList activeAlarms = alarms.alarms();
+    for (const QVariant& value : activeAlarms) {
+        const QVariantMap alarm = value.toMap();
+        if (alarm.value(QStringLiteral("device")) ==
+            QLatin1String("cam-online"))
+            alarms.acknowledge(alarm.value(QStringLiteral("id")).toDouble());
+    }
+    const QVariantMap acknowledgedAnalysis =
+        operations.snapshot().value(QStringLiteral("analysis")).toMap();
+    check(acknowledgedAnalysis.value(QStringLiteral("active")).toInt() == 2 &&
+              acknowledgedAnalysis.value(QStringLiteral("needsAttention")).toInt() == 1 &&
+              acknowledgedAnalysis.value(QStringLiteral("acknowledged")).toInt() == 1,
+          "alarm lifecycle changes refresh the premises analysis immediately");
 
     check(premises.addOperatingWindow(QStringLiteral("mon"),
                                       QStringLiteral("09:00"),
@@ -2859,13 +3050,19 @@ int runSiteOperationsSelftest() {
                                            QStringLiteral("03:00")).isEmpty(),
           "configure an IANA-zone DST fixture");
     const QVariantMap nySnapshot = operations.snapshot();
+    const QVariantMap nyDuration =
+        nySnapshot.value(QStringLiteral("cumulativeDuration")).toMap();
+    const QVariantMap nyAnalysis =
+        nySnapshot.value(QStringLiteral("analysis")).toMap();
     check(nySnapshot.value(QStringLiteral("devices")).toMap()
                   .value(QStringLiteral("total")).toInt() == 0 &&
               !nySnapshot.value(QStringLiteral("uptimeLastSeen")).toMap()
                    .value(QStringLiteral("available")).toBool() &&
-              !nySnapshot.value(QStringLiteral("cumulativeDuration")).toMap()
-                   .value(QStringLiteral("available")).toBool(),
-          "switching sites excludes prior-site devices, uptime, and recordings");
+              !nyDuration.value(QStringLiteral("recordingAvailable")).toBool() &&
+              nyDuration.value(QStringLiteral("streamingAvailable")).toBool() &&
+              nyAnalysis.value(QStringLiteral("available")).toBool() &&
+              nyAnalysis.value(QStringLiteral("active")).toInt() == 0,
+          "switching sites excludes prior-site devices, uptime, recordings, and alarms");
     const QDateTime springBefore = QDateTime::fromString(
         QStringLiteral("2026-03-08T06:30:00Z"), Qt::ISODate);
     const QDateTime springAfter = QDateTime::fromString(
@@ -2896,8 +3093,9 @@ int runSiteOperationsSelftest() {
     if (failures == 0) {
         std::cout << "PASS: site-scoped operations aggregation, persisted "
                      "reachability uptime/last-seen, overlap-safe recording "
-                     "duration, local schedule/DST rules, health/media counts, "
-                     "and remaining unavailable contracts verified\n";
+                     "duration, decoded stream branch-time, local schedule/DST "
+                     "rules, health/media counts, and site-scoped active alarm "
+                     "analysis verified\n";
         return 0;
     }
     std::cout << "FAILED: " << failures << " check(s)\n";
@@ -2930,6 +3128,7 @@ int main(int argc, char* argv[]) {
     int auditDumpLimit = 20;
     int apiPort = -1;                    // >=0: serve the loopback control API
     std::string apiToken;                // override the generated bearer token
+    int apiRateLimit = 120;              // requests per fixed 60-second window
     bool devicesSelftest = false;        // headless DeviceController check (inc 14)
     bool devicesDemo = false;            // seed demo devices for the Devices tab
     bool video = false;
@@ -2992,6 +3191,8 @@ int main(int argc, char* argv[]) {
             apiPort = std::atoi(argv[++i]);
         } else if (a == "--api-token" && i + 1 < argc) {
             apiToken = argv[++i];
+        } else if (a == "--api-rate-limit" && i + 1 < argc) {
+            apiRateLimit = std::atoi(argv[++i]);
         } else if (a == "--devices-selftest") {
             devicesSelftest = true;
         } else if (a == "--devices-demo") {
@@ -3046,6 +3247,8 @@ int main(int argc, char* argv[]) {
                 "  --command-selftest   headless command-envelope check (inc 25)\n"
                 "  --api-port N         serve the loopback control API (inc 26;\n"
                 "                       prints the bearer token; off by default)\n"
+                "  --api-rate-limit N   max API requests per 60 seconds\n"
+                "                       (default 120; must be positive)\n"
                 "  --api-selftest       headless control-API check (inc 26)\n"
                 "  --alarms-selftest    headless alarm-surface check (inc 27)\n"
                 "  --audit-dump [N]     print the durable audit log + chain verdict\n"
@@ -3061,6 +3264,10 @@ int main(int argc, char* argv[]) {
 
 #ifdef VMS_WITH_API
     if (apiSelftest) return runApiSelftest(argc, argv);
+    if (apiPort >= 0 && apiRateLimit <= 0) {
+        std::cerr << "--api-rate-limit must be a positive integer.\n";
+        return 2;
+    }
 #else
     if (apiSelftest || apiPort >= 0) {
         std::cerr << "the control API needs the Qt HttpServer build.\n";
@@ -3377,6 +3584,7 @@ int main(int argc, char* argv[]) {
     QObject* siteOpsCtrl = nullptr;
 #ifdef VMS_WITH_PERSIST
     SiteOperationsController* siteOps = nullptr;
+    std::unique_ptr<vms::persist::StreamDurationRepo> streamDurationRepo;
 #endif
 #ifdef VMS_WITH_PERSIST
     commander = new CommandController(&liveController, instant, devices,
@@ -3392,8 +3600,12 @@ int main(int argc, char* argv[]) {
                   << " (--audit-dump to read)" << std::endl;
     }
     if (persisting) {
+        streamDurationRepo =
+            std::make_unique<vms::persist::StreamDurationRepo>(store);
         siteOps = new SiteOperationsController(premises, devices,
-                                               &liveController, recIndex, &app);
+                                               &liveController, recIndex,
+                                               streamDurationRepo.get(),
+                                               alarmsCtrl, &app);
         siteOpsCtrl = siteOps;
     }
 #endif
@@ -3414,7 +3626,8 @@ int main(int argc, char* argv[]) {
                         .arg(QRandomGenerator::system()->generate64(), 16, 16,
                              QLatin1Char('0'));
         }
-        auto* apiServer = new CommandServer(commander, token, &app);
+        auto* apiServer = new CommandServer(commander, token, apiRateLimit,
+                                            60000, &app);
         QString apiErr;
         if (!apiServer->listen(static_cast<quint16>(apiPort), apiErr)) {
             std::cerr << "api: failed to listen on 127.0.0.1:" << apiPort
@@ -3423,7 +3636,8 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "api: http://127.0.0.1:" << apiServer->port()
                   << "  (GET /v1/commands · POST /v1/invoke · bearer token: "
-                  << token.toStdString() << ")" << std::endl;
+                  << token.toStdString() << " · rate limit: "
+                  << apiServer->requestLimit() << "/60s)" << std::endl;
     }
 #endif
 
@@ -3597,8 +3811,20 @@ int main(int argc, char* argv[]) {
         QObject::connect(&liveController, &WorkspaceController::planChanged,
                          [&liveController, &grid]() {
             std::string e;
-            if (grid && !grid->applyPlan(liveController.currentTiers(), e))
+            if (!grid) return;
+            const std::uint64_t before = grid->replanStats().appliedPlans;
+            if (!grid->applyPlan(liveController.currentTiers(), e)) {
                 std::cerr << "video: re-plan error: " << e << "\n";
+                return;
+            }
+            const GridReplanStats stats = grid->replanStats();
+            if (stats.appliedPlans > before)
+                std::cout << "video: branch re-plan changed="
+                          << stats.lastChangedBranches << " elapsed-ms="
+                          << std::fixed << std::setprecision(1)
+                          << stats.lastApplyMilliseconds << " fallback="
+                          << (stats.lastApplyUsedFallback ? "yes" : "no")
+                          << std::endl;
         });
 
         // A layout change (different tile count) rebuilds the whole grid pipeline
@@ -3852,6 +4078,9 @@ int main(int argc, char* argv[]) {
     }
 
     const int rc = app.exec();
+#ifdef VMS_WITH_PERSIST
+    if (siteOps) siteOps->flushStreaming();
+#endif
     bool siteOperationsSmokeFailed = false;
 #ifdef VMS_WITH_PERSIST
     if (smokeMs > 0 && siteOps) {
@@ -3870,6 +4099,8 @@ int main(int argc, char* argv[]) {
             snapshot.value(QStringLiteral("uptimeLastSeen")).toMap();
         const QVariantMap duration =
             snapshot.value(QStringLiteral("cumulativeDuration")).toMap();
+        const QVariantMap analysis =
+            snapshot.value(QStringLiteral("analysis")).toMap();
         QObject* panel = engine.rootObjects().isEmpty()
                              ? nullptr
                              : engine.rootObjects().first()->findChild<QObject*>(
@@ -3898,14 +4129,18 @@ int main(int argc, char* argv[]) {
                          .toLongLong()
                   << " recording-segments="
                   << duration.value(QStringLiteral("segments")).toInt()
+                  << " streamed-ms="
+                  << duration.value(QStringLiteral("streamingMilliseconds"))
+                         .toLongLong()
+                  << " stream-checkpoints="
+                  << duration.value(QStringLiteral("streamingCheckpoints"))
+                         .toLongLong()
+                  << " active-alarms="
+                  << analysis.value(QStringLiteral("active")).toInt()
+                  << " alarm-attention="
+                  << analysis.value(QStringLiteral("needsAttention")).toInt()
                   << " panel=" << (panel ? "loaded" : "missing")
                   << std::endl;
-        auto unavailableHonest = [&](const char* key) {
-            const QVariantMap field =
-                snapshot.value(QString::fromLatin1(key)).toMap();
-            return !field.value(QStringLiteral("available")).toBool() &&
-                   !field.value(QStringLiteral("reason")).toString().isEmpty();
-        };
         const bool hoursHonest =
             hours.value(QStringLiteral("available")).toBool()
                 ? (!hours.value(QStringLiteral("stateText")).toString().isEmpty() &&
@@ -3918,15 +4153,32 @@ int main(int argc, char* argv[]) {
                    !uptime.value(QStringLiteral("latestLastSeenUtc"))
                         .toString().isEmpty())
                 : !uptime.value(QStringLiteral("reason")).toString().isEmpty();
+        const bool recordingHonest =
+            duration.value(QStringLiteral("recordingAvailable")).toBool()
+                ? duration.value(QStringLiteral("recordingSeconds")).toLongLong() >= 0
+                : !duration.value(QStringLiteral("recordingReason"))
+                       .toString().isEmpty();
+        const bool streamingHonest =
+            duration.value(QStringLiteral("streamingAvailable")).toBool()
+                ? duration.value(QStringLiteral("streamingMilliseconds"))
+                          .toLongLong() >= 0
+                : !duration.value(QStringLiteral("streamingReason"))
+                       .toString().isEmpty();
         const bool durationHonest =
-            duration.value(QStringLiteral("available")).toBool()
-                ? (duration.value(QStringLiteral("recordingAvailable")).toBool() &&
-                   duration.value(QStringLiteral("recordingSeconds")).toLongLong() >= 0 &&
-                   !duration.value(QStringLiteral("stateText")).toString().isEmpty() &&
-                   !duration.value(QStringLiteral("streamingAvailable")).toBool() &&
-                   !duration.value(QStringLiteral("streamingReason"))
-                        .toString().isEmpty())
-                : !duration.value(QStringLiteral("reason")).toString().isEmpty();
+            duration.value(QStringLiteral("available")).toBool() &&
+            recordingHonest && streamingHonest &&
+            !duration.value(QStringLiteral("stateText")).toString().isEmpty() &&
+            (!video ||
+             (duration.value(QStringLiteral("streamingMilliseconds"))
+                      .toLongLong() > 0 &&
+              duration.value(QStringLiteral("streamingCheckpoints"))
+                      .toLongLong() > 0));
+        const bool analysisHonest =
+            analysis.value(QStringLiteral("available")).toBool() &&
+            !analysis.value(QStringLiteral("source")).toString().isEmpty() &&
+            !analysis.value(QStringLiteral("coverageNote")).toString().isEmpty() &&
+            analysis.value(QStringLiteral("active")).toInt() >= 0 &&
+            analysis.value(QStringLiteral("needsAttention")).toInt() >= 0;
         siteOperationsSmokeFailed =
             !site.value(QStringLiteral("available")).toBool() ||
             !panel || !panel->property("visible").toBool() ||
@@ -3935,7 +4187,7 @@ int main(int argc, char* argv[]) {
             !hoursHonest ||
             !uptimeHonest ||
             !durationHonest ||
-            !unavailableHonest("analysis") ||
+            !analysisHonest ||
             (devicesDemo && device.value(QStringLiteral("total")).toInt() == 0) ||
             (devicesDemo &&
              !uptime.value(QStringLiteral("available")).toBool()) ||
@@ -3947,6 +4199,7 @@ int main(int argc, char* argv[]) {
     }
 #endif
     bool diagnosticsSmokeFailed = false;
+    bool replanSmokeFailed = false;
 #ifdef VMS_WITH_GSTREAMER
     if (smokeMs > 0 && video) {
         int active = 0;
@@ -4014,6 +4267,20 @@ int main(int argc, char* argv[]) {
         if (diagnosticsSmokeFailed)
             std::cerr << "smoke: FAIL honest live diagnostics observation"
                       << std::endl;
+
+        const GridReplanStats replan =
+            grid ? grid->replanStats() : GridReplanStats{};
+        std::cout << "smoke: video replans=" << replan.appliedPlans
+                  << " branch-front-rebuilds=" << replan.branchFrontRebuilds
+                  << " full-pipeline-fallbacks="
+                  << replan.fullPipelineFallbacks << std::endl;
+        const bool replanExpected = sweepIntervalSec > 0 &&
+            smokeMs >= sweepIntervalSec * 1000 + 1500;
+        replanSmokeFailed = replanExpected &&
+            (replan.appliedPlans == 0 || replan.fullPipelineFallbacks != 0);
+        if (replanSmokeFailed)
+            std::cerr << "smoke: FAIL changed-branch video re-plan contract"
+                      << std::endl;
     }
 #endif
     bool spatialVideoSmokeFailed = false;
@@ -4057,5 +4324,6 @@ int main(int argc, char* argv[]) {
     delete irPipe;
 #endif
     return (siteOperationsSmokeFailed || diagnosticsSmokeFailed ||
+            replanSmokeFailed ||
             spatialVideoSmokeFailed) ? 1 : rc;
 }

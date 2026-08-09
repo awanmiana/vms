@@ -15,6 +15,7 @@
 // live video on a focus sweep is 2b-2. GStreamer stays entirely behind this
 // class (pImpl), so the header pulls in no gst headers.
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,15 @@ struct GridTileDiagnostics {
     std::string codec;
     int width = 0;
     int height = 0;
+};
+
+struct GridReplanStats {
+    std::uint64_t appliedPlans = 0;
+    std::uint64_t branchFrontRebuilds = 0;
+    std::uint64_t fullPipelineFallbacks = 0;
+    int lastChangedBranches = 0;
+    double lastApplyMilliseconds = 0.0;
+    bool lastApplyUsedFallback = false;
 };
 
 class GridPipeline {
@@ -49,12 +59,14 @@ public:
     bool start(bool sweepable, std::string& error);
     void stop();
 
-    // Re-plan the LIVE grid to `tiers` (indexed by tile id): take the pipeline to
-    // NULL, rebuild each branch's decode front at its new tier, and go PLAYING —
-    // the reliable path vms_grid uses (a hot-swap into a running pipeline does not
-    // survive the D3D12 decoder + reused compositor pad). A no-op if nothing
-    // changed. The stable queue -> upload -> compositor-pad spine never moves.
+    // Re-plan the LIVE grid to `tiers` (indexed by tile id). The graph briefly
+    // pauses so VideoItem retains the last complete frame, then only changed
+    // branches are replaced with new decode/queue/upload/compositor-pad chains.
+    // Unchanged decoders and compositor pads remain alive. A full NULL rebuild
+    // is a counted reliability fallback, never a silent path. Same-layout only;
+    // layout geometry changes still rebuild the complete pipeline.
     bool applyPlan(const std::vector<vms::Tier>& tiers, std::string& error);
+    GridReplanStats replanStats() const;
 
     // Drain the GStreamer bus for errors/EOS; call from a Qt timer on the GUI
     // thread. Returns false if a fatal pipeline error was seen.

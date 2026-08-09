@@ -13,8 +13,10 @@
 // Security posture (first slice): loopback-only (binds 127.0.0.1, never a
 // public interface), off by default (--api-port enables it), and a per-session
 // bearer token required on every route. Multi-user auth, scoped tokens, TLS,
-// rate limits, and streaming are the rest of the P1-13 gate.
+// streaming are later P1-13 slices. A bounded fixed-window request budget is
+// the increment-42 hardening slice.
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 
@@ -31,6 +33,7 @@ public:
     // Serves `commander`'s registry. `token` is the bearer secret every
     // request must present; `port` 0 picks an ephemeral port (self-test).
     CommandServer(CommandController* commander, QString token,
+                  int requestLimit = 120, int windowMs = 60000,
                   QObject* parent = nullptr);
     ~CommandServer() override;
 
@@ -42,9 +45,19 @@ public:
     // The actually-bound port (after listen; useful with port 0).
     quint16 port() const;
 
+    int requestLimit() const { return requestLimit_; }
+    int windowMs() const { return windowMs_; }
+
 private:
+    bool admitRequest();
+    int retryAfterMs() const;
+
     CommandController* commander_ = nullptr;
     QString token_;
+    int requestLimit_ = 120;
+    int windowMs_ = 60000;
+    int requestsInWindow_ = 0;
+    QElapsedTimer windowClock_;
     std::unique_ptr<QHttpServer> http_;
     std::unique_ptr<QTcpServer> tcp_;
 };

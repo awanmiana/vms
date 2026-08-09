@@ -32,7 +32,36 @@ struct AuditEntry {
     std::string message;
     std::string prevHash;     // chain link (empty-string genesis)
     std::string rowHash;
+    // Canonical v2 adds structured context while preserving v1 verification
+    // for rows written before schema v15.
+    int canonicalVersion = 2;
+    std::string category = "command"; // auth|credential|access|configuration|command
+    std::string actorId;               // stable identity; empty only pre-identity
+    std::string subjectId;             // affected stable entity/resource
+    std::string correlationId;         // request/job/trace correlation
+    std::string beforeState;           // canonical redacted JSON/text snapshot
+    std::string afterState;            // canonical redacted JSON/text snapshot
 };
+
+// An RFC 3161-capable timestamp service signs the request's SHA-256 imprint
+// outside this persistence layer. The DER token is stored as base64 because
+// Store intentionally has no blob type. `verified*` describes the verifier
+// that cryptographically checked the token before it was admitted.
+struct AuditAnchor {
+    std::int64_t id = 0;
+    std::int64_t firstAuditId = 0;
+    std::int64_t lastAuditId = 0;
+    std::string headHash;
+    std::string hashAlgorithm = "sha-256";
+    std::string requestedUtc;
+    std::string tsaUri;
+    std::string tsaPolicyOid;
+    std::string tokenBase64;
+    std::string verifiedUtc;
+    std::string verifier;
+};
+
+using AnchorVerifyFn = std::function<bool(const AuditAnchor&)>;
 
 // Hex digest of the input bytes. Injected so the repo carries no crypto dep.
 using HashFn = std::function<std::string(const std::string&)>;
@@ -59,6 +88,16 @@ public:
     // `brokenAtId` is 0; on a break it is the first row whose stored hashes no
     // longer match (a tampered, re-ordered, or deleted-predecessor row).
     Error verifyChain(const HashFn& hash, std::int64_t& brokenAtId);
+
+    // Snapshot the current chain head for an external RFC 3161 request.
+    Error makeAnchorRequest(const std::string& requestedUtc, AuditAnchor& out);
+
+    // Persist a timestamp receipt only after an injected cryptographic
+    // verifier accepts it and only while it still matches the live chain head.
+    Error recordVerifiedAnchor(AuditAnchor& anchor,
+                               const AnchorVerifyFn& verifier);
+
+    Error listAnchors(std::vector<AuditAnchor>& out);
 
 private:
     Store& store_;

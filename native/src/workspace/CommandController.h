@@ -27,6 +27,7 @@
 #include <set>
 
 #include "command/CommandRegistry.h"
+#include "command/VoiceCommandMapper.h"
 #include "persist/AuditRepo.h"
 
 class WorkspaceController;
@@ -61,6 +62,13 @@ public:
     // The text leg: parse + send one line through the envelope. Returns the
     // deterministic result line the palette shows ("ok · …" / "refused · …").
     Q_INVOKABLE QString run(const QString& line);
+
+    // P1-12 voice leg: a recognizer-neutral, deterministic grammar maps a
+    // language-tagged transcript to typed args, then invokes the same registry.
+    // Voice can never satisfy a dangerous command's confirmation in-band.
+    Q_INVOKABLE QString runVoice(const QString& transcript,
+                                 const QString& languageTag = QStringLiteral("en-US"),
+                                 double confidence = 1.0);
 
     // inc 29 (P1-13): the STRUCTURED leg every UI click uses. Typed arguments
     // (names with spaces, URLs, credentials) go through the same single gate
@@ -98,6 +106,7 @@ private:
     void registerCommands();
 
     vms::command::CommandRegistry registry_;
+    vms::command::VoiceCommandMapper voiceMapper_;
     std::set<std::string> capabilities_;   // Administrator: all named caps
     QVariantList auditLog_;
 

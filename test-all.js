@@ -2,13 +2,19 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const tests = [
+  "test-shared-primitives.js",
+  "test-media-capabilities.js",
+  "test-inventory-contract.js",
   "test-device-model.js",
   "test-workspaces.js",
   "test-operational-ui.js",
   "backend/test-device-onboarding.js",
+  "backend/test-composition.js",
+  "backend/test-file-db.js",
   "backend/test-api-server.js",
   "backend/test-schema-loader.js",
   "backend/test-device-adapter-contract.js",
+  "backend/test-operation-vocabulary.js",
   "backend/test-resilience-availability.js",
   "backend/test-resilience-operations.js",
   "backend/test-resilience-health.js",

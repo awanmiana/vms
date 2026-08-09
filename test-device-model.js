@@ -1,7 +1,7 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
-const vm = require("vm");
+const { loadAppTestApi } = require("./test-support/app-loader");
 
 const storage = new Map();
 function statusElement() {
@@ -26,39 +26,7 @@ const elements = {
   monitorDrawerStatus: statusElement(),
   statusMessage: statusElement()
 };
-const context = {
-  __VMS_TEST_MODE__: true,
-  console,
-  localStorage: {
-    getItem(key) {
-      return storage.has(key) ? storage.get(key) : null;
-    },
-    setItem(key, value) {
-      storage.set(key, String(value));
-    }
-  },
-  window: {
-    location: { hash: "" },
-    history: { replaceState() {}, pushState() {} }
-  },
-  document: {
-    getElementById(id) {
-      return elements[id] || null;
-    },
-    querySelector() {
-      return null;
-    },
-    querySelectorAll() {
-      return [];
-    }
-  }
-};
-context.globalThis = context;
-vm.createContext(context);
-vm.runInContext(fs.readFileSync(path.join(__dirname, "app.js"), "utf8"), context, { filename: "app.js" });
-
-const api = context.__VMS_TEST_API__;
-assert(api, "app.js should expose the device model API in test mode");
+const { api } = loadAppTestApi({ elements, storage });
 
 function testAdministratorOnlyPrototypeContract() {
   assert.strictEqual(api.INITIAL_ROLE, "Administrator");

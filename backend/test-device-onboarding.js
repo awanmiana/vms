@@ -1,43 +1,23 @@
 const assert = require("assert");
-const path = require("path");
-const { FileDatabase } = require("./file-db");
-const { CameraService, DeviceOnboardingService, DeviceService, deviceGroupId } = require("./services");
+const { createBackendComposition } = require("./composition");
+const { deviceGroupId } = require("./services");
+const { device } = require("../test-support/domain-factories");
+const { createTestHarness } = require("../test-support/harness");
+const { createMemoryDatabase } = require("../test-support/memory-database");
+
+const { runSync: run, finish } = createTestHarness("device onboarding");
 
 function freshDb() {
-  const db = new FileDatabase(path.join(__dirname, "test-device-onboarding-unused.json"));
-  db.memoryOnly = true;
-  db.load();
-  return db;
+  return createMemoryDatabase("device-onboarding");
 }
 
-function run(name, fn) {
-  try {
-    fn();
-    console.log(`ok - ${name}`);
-  } catch (error) {
-    console.error(`FAIL - ${name}`);
-    console.error(error);
-    process.exitCode = 1;
-  }
-}
-
-function device(overrides = {}) {
-  return {
-    id: "dev-test",
-    name: "Test Recorder",
-    type: "NVR",
-    vendor: "Test Vendor",
-    host: "192.168.50.10",
-    port: 8000,
-    channelCount: 2,
-    status: "online",
-    ...overrides
-  };
+function servicesFor(db) {
+  return createBackendComposition({ db }).services;
 }
 
 run("onboarding creates a deterministic system group for every supported device type", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
   const types = ["NVR", "DVR", "Hybrid DVR", "IP Camera Direct"];
 
   types.forEach((type, index) => {
@@ -67,7 +47,7 @@ run("onboarding creates a deterministic system group for every supported device 
 
 run("onboarding and channel sync are idempotent", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
   const input = device({ id: "dev-idempotent", name: "Idempotent NVR", channelCount: 2 });
 
   const first = onboarding.onboard(input);
@@ -85,7 +65,7 @@ run("onboarding and channel sync are idempotent", () => {
 
 run("generated camera status stays unknown when parent recorder status is offline or unverified", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
 
   ["offline", "unknown"].forEach((status, index) => {
     const result = onboarding.onboard(device({
@@ -106,7 +86,7 @@ run("generated camera status stays unknown when parent recorder status is offlin
 
 run("device rename updates managed names and group identity while preserving manual camera metadata", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
   const first = onboarding.onboard(device({ id: "dev-rename", name: "Old Recorder", channelCount: 2 }));
   const originalCameraIds = first.cameras.map((camera) => camera.id);
   const manualCamera = first.cameras[0];
@@ -139,7 +119,7 @@ run("device rename updates managed names and group identity while preserving man
 
 run("channel-count reconciliation removes stale rows and repairs deterministic membership", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
   const threeChannels = device({ id: "dev-resize", name: "Resize DVR", type: "DVR", channelCount: 3 });
   const initial = onboarding.onboard(threeChannels);
   const initialIds = initial.cameras.map((camera) => camera.id);
@@ -173,8 +153,7 @@ run("channel-count reconciliation removes stale rows and repairs deterministic m
 
 run("direct camera sync also guarantees the device group", () => {
   const db = freshDb();
-  const devices = new DeviceService(db);
-  const cameras = new CameraService(db);
+  const { devices, cameras } = servicesFor(db);
   const saved = devices.save(device({ id: "dev-direct-sync", name: "Direct IP Camera", type: "IP Camera Direct", channelCount: 1 }));
 
   const emptyGroup = cameras.deviceGroup(saved);
@@ -191,7 +170,7 @@ run("direct camera sync also guarantees the device group", () => {
 
 run("unsupported device types are rejected before persistence", () => {
   const db = freshDb();
-  const onboarding = new DeviceOnboardingService(db);
+  const { onboarding } = servicesFor(db);
 
   assert.throws(
     () => onboarding.onboard(device({ type: "Unknown Recorder" })),
@@ -203,7 +182,7 @@ run("unsupported device types are rejected before persistence", () => {
 
 run("device persistence requires an explicit vendor-neutral port", () => {
   const db = freshDb();
-  const devices = new DeviceService(db);
+  const { devices } = servicesFor(db);
 
   assert.throws(
     () => devices.save(device({ port: undefined })),
@@ -212,8 +191,4 @@ run("device persistence requires an explicit vendor-neutral port", () => {
   assert.strictEqual(db.table("devices").length, 0);
 });
 
-if (process.exitCode) {
-  console.error("\nSome device onboarding tests failed.");
-} else {
-  console.log("\nAll device onboarding tests passed.");
-}
+finish();

@@ -18,18 +18,12 @@
     RETRY_MODES
   } = contract;
 
-  const OPERATION_OUTCOMES = Object.freeze([
-    "allowed",
-    "blocked",
-    "expired",
-    "outcome-unknown"
-  ]);
-
   const OPERATION_IDS = Object.freeze({
     INVENTORY_READ: "inventory.read",
     INVENTORY_WRITE: "inventory.write",
     DEVICE_DISCOVERY: "device.discovery",
     DEVICE_HEALTH: "device.health",
+    DEVICE_FIRMWARE: "device.firmware",
     DEVICE_EVENTS: "device.events",
     LIVE_VIEW: "media.live-view",
     PLAYBACK: "media.playback",
@@ -46,7 +40,8 @@
     FORMAT_STORAGE: "storage.format",
     DELETE_RECORDING: "recording.delete",
     CHANGE_PASSWORD: "device.password-change",
-    UPDATE_FIRMWARE: "device.firmware-update"
+    UPDATE_FIRMWARE: "device.firmware-update",
+    TRACKING_UPDATE: "tracking.update"
   });
 
   class OperationPolicyError extends Error {
@@ -199,6 +194,7 @@
     },
     { id: OPERATION_IDS.DEVICE_DISCOVERY, safetyClass: "safe-read", retryMode: "bounded-safe" },
     { id: OPERATION_IDS.DEVICE_HEALTH, safetyClass: "safe-read", retryMode: "bounded-safe" },
+    { id: OPERATION_IDS.DEVICE_FIRMWARE, safetyClass: "safe-read", retryMode: "bounded-safe" },
     {
       id: OPERATION_IDS.DEVICE_EVENTS,
       safetyClass: "event-ingest",
@@ -289,6 +285,12 @@
       safetyClass: "destructive",
       retryMode: "operator-confirmation",
       requiresDurableAudit: true
+    },
+    {
+      id: OPERATION_IDS.TRACKING_UPDATE,
+      safetyClass: "versioned-mutation",
+      retryMode: "idempotency-required",
+      requiresDurableAudit: true
     }
   ]);
 
@@ -299,7 +301,6 @@
   return Object.freeze({
     DEFAULT_OPERATION_POLICIES,
     OPERATION_IDS,
-    OPERATION_OUTCOMES,
     OperationPolicyError,
     OperationPolicyRegistry,
     assessDeliveryOutcome,

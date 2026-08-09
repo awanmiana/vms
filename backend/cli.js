@@ -1,32 +1,10 @@
-const { FileDatabase } = require("./file-db");
-const { CameraService, DeviceOnboardingService, DeviceService, MediaGuardService } = require("./services");
-const {
-  ComplianceLogService,
-  ComplianceTypeService,
-  EntityLocationService,
-  TagIndexService,
-  TicketService,
-  seedComplianceTypes
-} = require("./compliance-services");
+const { createBackendComposition } = require("./composition");
+const { seedComplianceTypes } = require("./compliance-services");
 const { handleStubRoute } = require("./api-routes");
 
 function createServices() {
-  const db = new FileDatabase();
-  db.load();
-  const tags = new TagIndexService(db);
-  const complianceTypes = new ComplianceTypeService(db, tags);
-  return {
-    cameras: new CameraService(db),
-    complianceLogs: new ComplianceLogService(db),
-    complianceTypes,
-    db,
-    devices: new DeviceService(db),
-    entities: new EntityLocationService(db, tags),
-    guard: new MediaGuardService(db),
-    onboarding: new DeviceOnboardingService(db),
-    tags,
-    tickets: new TicketService(db)
-  };
+  const composition = createBackendComposition();
+  return { ...composition.services, db: composition.database };
 }
 
 function print(value) {

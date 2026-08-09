@@ -73,6 +73,15 @@ function serviceWithFakeAdapter() {
   return { db: freshDb(), registry };
 }
 
+function authorizedPtz(action, params) {
+  return {
+    action,
+    params,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    durableAuditAvailable: true
+  };
+}
+
 async function main() {
   await run("discovery writes adapter-owned candidate rows without inventing a port", async () => {
     const { db, registry } = serviceWithFakeAdapter();
@@ -92,6 +101,9 @@ async function main() {
 
     assert.strictEqual(result.status, "succeeded");
     assert.strictEqual(result.health.status, "online");
+    assert.strictEqual(result.health.reachability, "reachable");
+    assert.strictEqual(result.health.freshness, "current");
+    assert.strictEqual(result.health.functional, "healthy");
     assert.strictEqual(result.health.latencyMs, 18);
   });
 
@@ -111,7 +123,7 @@ async function main() {
     const result = await service.executePtzCommand(
       { id: "dev-1", adapterId: "test-vendor" },
       { id: "cam-1" },
-      { action: "zoom-in", params: { speed: 3 } }
+      authorizedPtz("zoom-in", { speed: 3 })
     );
 
     assert.strictEqual(result.status, "succeeded");
@@ -123,7 +135,7 @@ async function main() {
     const aliasResult = await service.queuePtzCommand(
       { id: "dev-1", adapterId: "test-vendor" },
       { id: "cam-1" },
-      { action: "pan-left", params: { speed: 2 } }
+      authorizedPtz("pan-left", { speed: 2 })
     );
     assert.strictEqual(aliasResult.commandRecord.status, "succeeded");
     assert.strictEqual(db.table("ptzCommandLog").some((row) => row.status === "queued"), false);
@@ -145,7 +157,7 @@ async function main() {
     const result = await service.executePtzCommand(
       { id: "dev-1", adapterId: "uncertain" },
       { id: "cam-1" },
-      { action: "zoom-in", params: { speed: 3 } }
+      authorizedPtz("zoom-in", { speed: 3 })
     );
 
     assert.strictEqual(result.status, "unknown");
@@ -154,6 +166,27 @@ async function main() {
     assert.strictEqual(result.commandRecord.replayAllowed, false);
     assert.strictEqual(db.table("ptzCommandLog").length, 1);
     assert.strictEqual(db.table("ptzCommandLog")[0].reasonCode, "DEVICE_RESPONSE_LOST");
+  });
+
+  await run("PTZ without an expiry is blocked by policy before adapter dispatch", async () => {
+    let dispatched = 0;
+    const db = freshDb();
+    const registry = new DeviceAdapterRegistry().register(createFakeAdapter("expiry-check", {
+      "camera.ptz": async () => {
+        dispatched += 1;
+        return { ok: true };
+      }
+    }));
+    const service = new DeviceIntegrationService(db, registry);
+    const result = await service.executePtzCommand(
+      { id: "dev-1", adapterId: "expiry-check" },
+      { id: "cam-1" },
+      { action: "zoom-in", params: { speed: 3 } }
+    );
+    assert.strictEqual(result.outcome, "blocked");
+    assert.strictEqual(result.reasonCode, "COMMAND_EXPIRY_REQUIRED");
+    assert.strictEqual(dispatched, 0);
+    assert.strictEqual(db.table("ptzCommandLog").length, 0);
   });
 
   await run("free-text vendor and device type never select an adapter", async () => {

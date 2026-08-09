@@ -2,7 +2,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { URL } = require("url");
-const { FileDatabase } = require("./file-db");
+const { createBackendComposition } = require("./composition");
 const { handleInventoryRoute, handleStubRoute } = require("./api-routes");
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -149,16 +149,11 @@ function serveStatic(request, response, staticRoot, pathname) {
   fs.createReadStream(filePath).pipe(response);
 }
 
-function createDatabase(filePath) {
-  const db = new FileDatabase(filePath || undefined);
-  db.load();
-  return db;
-}
-
 function createVmsServer({ db, databasePath, staticRoot = path.join(__dirname, "..") } = {}) {
-  const database = db || createDatabase(databasePath);
+  const composition = createBackendComposition({ db, databasePath });
+  const inventoryRepository = composition.repositories.inventory;
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url || "/", "http://localhost");
       const pathname = requestUrl.pathname;
@@ -175,7 +170,7 @@ function createVmsServer({ db, databasePath, staticRoot = path.join(__dirname, "
           body = await readJsonBody(request);
         }
 
-        const inventoryResponse = handleInventoryRoute(database, request.method, pathname, body);
+        const inventoryResponse = handleInventoryRoute(inventoryRepository, request.method, pathname, body);
         const routeResponse = inventoryResponse || handleStubRoute(request.method, pathname);
         sendJson(response, routeResponse.status, routeResponse.body, routeResponse.headers);
         return;
@@ -189,6 +184,8 @@ function createVmsServer({ db, databasePath, staticRoot = path.join(__dirname, "
       });
     }
   });
+  server.vmsComposition = composition;
+  return server;
 }
 
 function startServer({ host = process.env.HOST || DEFAULT_HOST, port = Number(process.env.PORT) || DEFAULT_PORT } = {}) {

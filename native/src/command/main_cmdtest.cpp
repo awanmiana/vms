@@ -6,6 +6,7 @@
 // Registered with CTest as `command_selfcheck`.
 
 #include "command/CommandRegistry.h"
+#include "command/VoiceCommandMapper.h"
 
 #include <iostream>
 #include <string>
@@ -224,9 +225,60 @@ int main() {
               reg.find("device.remove")->dangerous,
           "find() returns the spec");
 
+    // --- 8) Deterministic recognized-speech leg (P1-12 second slice) -------
+    VoiceCommandMapper voice;
+    VoiceCommand spoken = voice.map("Please focus camera seven", "en-US", 0.96);
+    check(spoken && spoken.commandId == "workspace.focus" &&
+              std::get<std::int64_t>(spoken.args.at("tile")) == 7,
+          "voice grammar maps a language-tagged focus phrase to typed args");
+    r = reg.invoke(spoken.commandId, spoken.args, admin);
+    check(static_cast<bool>(r) && lastTile == 7,
+          "mapped voice command traverses the existing validated envelope");
+
+    spoken = voice.map("set tile three quality thumb", "en-GB", 0.91);
+    check(spoken && spoken.commandId == "workspace.quality" &&
+              std::get<std::string>(spoken.args.at("tier")) == "thumb",
+          "voice grammar preserves typed enum intent deterministically");
+    spoken = voice.map("set layout sixteen", "en", 0.99);
+    check(spoken && spoken.commandId == "workspace.layout" &&
+              std::get<std::int64_t>(spoken.args.at("count")) == 16,
+          "standard number words map without fuzzy interpretation");
+    spoken = voice.map("start replay thirty seconds", "en-US", 0.95);
+    check(spoken && spoken.commandId == "replay.start" &&
+              std::get<std::int64_t>(spoken.args.at("seconds")) == 30,
+          "voice grammar maps bounded instant replay intent");
+    spoken = voice.map("acknowledge alarm twelve", "en-US", 0.93);
+    check(spoken && spoken.commandId == "alarm.ack" &&
+              std::get<std::int64_t>(spoken.args.at("id")) == 12,
+          "voice grammar maps alarm lifecycle intent");
+
+    spoken = voice.map("remove device cam-2 confirm", "en-US", 0.99);
+    check(spoken && spoken.commandId == "device.remove",
+          "dangerous voice phrase can request but not confirm the command");
+    r = reg.invoke(spoken.commandId, spoken.args, admin,
+                   /*confirmed=*/false);
+    check(r.outcome == Outcome::NeedsConfirm && removed == 2,
+          "spoken confirm cannot bypass the separate dangerous-action gate");
+
+    check(voice.map("focus camera five", "fr-FR", 0.99).status ==
+              VoiceStatus::UnsupportedLanguage,
+          "an unregistered language grammar fails closed");
+    check(voice.map("focus camera five", "en-not-a-tag", 0.99).status ==
+              VoiceStatus::UnsupportedLanguage,
+          "an unvalidated language tag cannot inherit English support");
+    check(voice.map("focus camera five", "en-US", 0.42).status ==
+              VoiceStatus::LowConfidence,
+          "recognition below confidence policy fails closed");
+    check(voice.map("focus camera five or six", "en-US", 0.99).status ==
+              VoiceStatus::Ambiguous,
+          "ambiguous alternatives fail closed");
+    check(voice.map("do something clever", "en-US", 0.99).status ==
+              VoiceStatus::NoMatch,
+          "out-of-grammar speech cannot become an executable command");
+
     if (failures == 0) {
         std::cout << "PASS: validation refusals, capability gate, dangerous "
-                     "confirmation, text leg, audit trail, and catalog "
+                     "confirmation, text + deterministic voice legs, audit trail, and catalog "
                      "verified\n";
         return 0;
     }

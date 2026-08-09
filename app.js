@@ -1,4 +1,12 @@
 const isVmsTestMode = typeof globalThis !== "undefined" && globalThis.__VMS_TEST_MODE__ === true;
+const sharedCore = globalThis.VmsSharedCore;
+const mediaPolicy = globalThis.VmsMediaPolicy;
+const inventoryContract = globalThis.VmsInventoryContract;
+if (!sharedCore || !mediaPolicy || !inventoryContract) {
+  throw new Error("Shared core, media policy, and inventory contracts must load before app.js.");
+}
+const { formatDate, formatDateTime, formatTime, stableStringify, compareById } = sharedCore;
+const { estimateBitrateKbps, resolveTier } = mediaPolicy;
 
 const defaultDevices = [
   {
@@ -1184,14 +1192,14 @@ function isIpCameraDirectType(type) {
 }
 
 function deviceChannelCount(device) {
-  if (isIpCameraDirectType(device?.type)) return 1;
-  return Math.round(clampNumber(device?.channels, 1, 256, 1));
+  return inventoryContract.normalizeDeviceChannelCount(
+    device?.type || "NVR",
+    device?.channels ?? device?.channelCount ?? 1
+  );
 }
 
 function cameraBelongsToDevice(camera, device) {
-  if (!camera || !device) return false;
-  if (camera.deviceId) return camera.deviceId === device.id;
-  return camera.nvr === device.name;
+  return inventoryContract.cameraBelongsToDevice(camera, device);
 }
 
 function cameraDevice(camera) {
@@ -1328,7 +1336,7 @@ function requireInventoryMutation() {
 
 function createInventorySnapshot() {
   return {
-    version: 2,
+    version: inventoryContract.INVENTORY_VERSION,
     devices: state.devices.map((device) => {
       const { password: _password, ...safeDevice } = device;
       const channels = deviceChannelCount(device);
@@ -1342,108 +1350,22 @@ function createInventorySnapshot() {
   };
 }
 
-function normalizeRemoteDevice(device, localDevice) {
-  const { password: _remotePassword, ...safeDevice } = device || {};
-  const type = safeDevice.type || "NVR";
-  const channels = deviceChannelCount({
-    type,
-    channels: safeDevice.channels ?? safeDevice.channelCount ?? 1
-  });
-  return {
-    ...safeDevice,
-    id: String(safeDevice.id || ""),
-    name: String(safeDevice.name || safeDevice.host || "Unnamed device"),
-    type,
-    vendor: safeDevice.vendor || "",
-    host: safeDevice.host || "",
-    port: Number(safeDevice.port || 0),
-    channels,
-    channelCount: channels,
-    status: safeDevice.status || "unknown",
-    username: safeDevice.username ?? localDevice?.username ?? "",
-    password: localDevice?.password || "",
-    notes: safeDevice.notes || ""
-  };
-}
-
-function normalizeRemoteCamera(camera, devicesById) {
-  const deviceId = String(camera?.deviceId || "");
-  const device = devicesById.get(deviceId);
-  const channel = Number(camera?.channel ?? camera?.channelNumber ?? 1);
-  const tags = Array.isArray(camera?.tags) ? camera.tags : [];
-  const inferredPlaceholder =
-    camera?.deviceSyncManaged === true &&
-    camera?.discovered === true &&
-    tags.includes("unmapped") &&
-    (camera?.area || "Unassigned") === "Unassigned";
-  return {
-    ...(camera || {}),
-    id: String(camera?.id || ""),
-    name: String(camera?.name || camera?.displayName || `Camera CH-${String(channel).padStart(2, "0")}`),
-    deviceId,
-    nvr: device?.name || camera?.nvr || "Unassigned",
-    channel,
-    area: camera?.area || "Unassigned",
-    floor: camera?.floor || "Unknown",
-    direction: camera?.direction || "Direction not set",
-    status: camera?.status || "unknown",
-    tags,
-    related: Array.isArray(camera?.related) ? camera.related : [],
-    previous: Array.isArray(camera?.previous) ? camera.previous : [],
-    next: Array.isArray(camera?.next) ? camera.next : [],
-    managedPlaceholder: camera?.managedPlaceholder ?? inferredPlaceholder
-  };
-}
-
-function normalizeRemoteGroup(group) {
-  return {
-    ...(group || {}),
-    id: String(group?.id || ""),
-    name: String(group?.name || "Unnamed group"),
-    purpose: group?.purpose || "",
-    grid: Number(group?.grid ?? group?.preferredGrid ?? group?.preferred_grid ?? 4),
-    cameraIds: Array.isArray(group?.cameraIds) ? [...group.cameraIds] : [],
-    notes: group?.notes || "",
-    system: Boolean(group?.system ?? group?.isSystem ?? group?.is_system),
-    deviceId: group?.deviceId || group?.device_id || ""
-  };
-}
-
 function normalizeInventoryPayload(payload) {
-  const snapshot = payload?.inventory || payload;
-  if (!snapshot || !Array.isArray(snapshot.devices) || !Array.isArray(snapshot.cameras) || !Array.isArray(snapshot.groups)) {
-    throw new Error("The inventory service returned an invalid snapshot.");
-  }
-
+  const normalized = inventoryContract.normalizeInventory(payload);
   const localDevicesById = new Map(state.devices.map((device) => [device.id, device]));
-  const devices = snapshot.devices
-    .map((device) => normalizeRemoteDevice(device, localDevicesById.get(device?.id)))
-    .filter((device) => device.id);
-  const devicesById = new Map(devices.map((device) => [device.id, device]));
-  const cameras = snapshot.cameras
-    .map((camera) => normalizeRemoteCamera(camera, devicesById))
-    .filter((camera) => camera.id);
-  const groups = snapshot.groups
-    .map(normalizeRemoteGroup)
-    .filter((group) => group.id);
-
-  return { devices, cameras, groups };
-}
-
-function stableStringify(value) {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
+  return {
+    version: normalized.version,
+    devices: normalized.devices.map((device) => ({
+      ...device,
+      password: localDevicesById.get(device.id)?.password || ""
+    })),
+    cameras: normalized.cameras,
+    groups: normalized.groups
+  };
 }
 
 function inventoryFingerprint(payload) {
   const normalized = normalizeInventoryPayload(payload);
-  const sortById = (left, right) => String(left.id).localeCompare(String(right.id));
   const canonical = {
     devices: normalized.devices.map((device) => ({
       id: device.id,
@@ -1458,7 +1380,7 @@ function inventoryFingerprint(payload) {
       notes: device.notes || "",
       maxConcurrentMainstream: Number(device.maxConcurrentMainstream || 4),
       maxConcurrentSubstream: Number(device.maxConcurrentSubstream || 32)
-    })).sort(sortById),
+    })).sort(compareById),
     cameras: normalized.cameras.map((camera) => ({
       id: camera.id,
       name: camera.name,
@@ -1476,7 +1398,7 @@ function inventoryFingerprint(payload) {
       next: [...(camera.next || [])],
       discovered: Boolean(camera.discovered),
       managedPlaceholder: Boolean(camera.managedPlaceholder)
-    })).sort(sortById),
+    })).sort(compareById),
     groups: normalized.groups.map((group) => ({
       id: group.id,
       name: group.name,
@@ -1486,7 +1408,7 @@ function inventoryFingerprint(payload) {
       notes: group.notes || "",
       system: Boolean(group.system),
       deviceId: group.deviceId || ""
-    })).sort(sortById)
+    })).sort(compareById)
   };
   return stableStringify(canonical);
 }
@@ -1674,69 +1596,23 @@ async function retryPendingInventorySave() {
 }
 
 function channelCameraId(device, channel) {
-  const channelSuffix = `CH${String(channel).padStart(2, "0")}`;
-  const preferred = `${slug(device.name || device.host || "DEVICE")}-${channelSuffix}`;
-  if (!state.cameras.some((camera) => camera.id === preferred)) return preferred;
-
-  const stableBase = slug(device.id || device.host || "DEVICE");
-  let candidate = `${stableBase}-${channelSuffix}`;
-  let suffix = 2;
-  while (state.cameras.some((camera) => camera.id === candidate)) {
-    candidate = `${stableBase}-${channelSuffix}-${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
+  return inventoryContract.channelCameraId(device, channel);
 }
 
 function deviceGroupId(device) {
-  return `grp-device-${device.id}`;
+  return inventoryContract.deviceGroupId(device);
 }
 
 function ensureDeviceGroups() {
-  state.devices.forEach((device) => {
-    const groupId = deviceGroupId(device);
-    const cameraIds = state.cameras
-      .filter((camera) => cameraBelongsToDevice(camera, device))
-      .sort((a, b) => Number(a.channel || 0) - Number(b.channel || 0))
-      .map((camera) => camera.id);
-    const existing = state.groups.find((group) => group.id === groupId);
-
-    if (existing) {
-      existing.name = `${device.name} (Assigned)`;
-      existing.purpose = existing.purpose || "Auto-assigned device channels";
-      existing.grid = existing.grid || 4;
-      existing.cameraIds = cameraIds;
-      existing.system = true;
-      existing.deviceId = device.id;
-      existing.notes = existing.notes || "Created automatically from this device's channels.";
-    } else {
-      state.groups.push({
-        id: groupId,
-        name: `${device.name} (Assigned)`,
-        purpose: "Auto-assigned device channels",
-        grid: 4,
-        cameraIds,
-        notes: "Created automatically from this device's channels.",
-        system: true,
-        deviceId: device.id
-      });
-    }
-  });
-
-  const deviceIds = new Set(state.devices.map((device) => device.id));
-  state.groups = state.groups.filter((group) => !group.system || deviceIds.has(group.deviceId));
+  state.groups = inventoryContract.buildSystemDeviceGroups(
+    state.devices,
+    state.cameras,
+    state.groups
+  );
 }
 
 function isManagedChannelPlaceholder(camera) {
-  if (camera.managedPlaceholder === true) return true;
-  if (camera.managedPlaceholder === false) return false;
-  return (
-    camera.discovered === true &&
-    (camera.tags || []).includes("unmapped") &&
-    camera.area === "Unassigned" &&
-    camera.floor === "Unknown" &&
-    camera.direction === "Direction not set"
-  );
+  return inventoryContract.isManagedChannelPlaceholder(camera);
 }
 
 function removeCameraReferences(removedIds) {
@@ -1754,89 +1630,16 @@ function removeCameraReferences(removedIds) {
 
 function syncDeviceChannels(device) {
   migrateCameraDeviceLinks();
-  const channelCount = deviceChannelCount(device);
-  device.channels = channelCount;
-  const removedIds = new Set();
-  let detachedCount = 0;
-
-  state.cameras = state.cameras.flatMap((camera) => {
-    if (!cameraBelongsToDevice(camera, device)) return [camera];
-    const channel = Number(camera.channel);
-    const managedPlaceholder = isManagedChannelPlaceholder(camera);
-
-    if (!Number.isInteger(channel) || channel < 1 || channel > channelCount) {
-      if (managedPlaceholder) {
-        removedIds.add(camera.id);
-        return [];
-      }
-      detachedCount += 1;
-      return [{ ...camera, deviceId: "", nvr: "Unassigned", managedPlaceholder: false }];
-    }
-
-    return [{
-      ...camera,
-      deviceId: device.id,
-      nvr: device.name,
-      name: managedPlaceholder ? `${device.name} CH-${String(channel).padStart(2, "0")}` : camera.name,
-      managedPlaceholder
-    }];
-  });
-
-  const camerasByChannel = new Map();
-  state.cameras
-    .filter((camera) => cameraBelongsToDevice(camera, device))
-    .forEach((camera) => {
-      const channel = Number(camera.channel);
-      const cameras = camerasByChannel.get(channel) || [];
-      cameras.push(camera);
-      camerasByChannel.set(channel, cameras);
-    });
-
-  camerasByChannel.forEach((cameras) => {
-    if (cameras.length < 2) return;
-    const configured = cameras.filter((camera) => !isManagedChannelPlaceholder(camera));
-    const keep = configured[0] || cameras[0];
-    cameras.forEach((camera) => {
-      if (camera !== keep && isManagedChannelPlaceholder(camera)) removedIds.add(camera.id);
-    });
-  });
-
-  if (removedIds.size) {
-    state.cameras = state.cameras.filter((camera) => !removedIds.has(camera.id));
-    removeCameraReferences(removedIds);
-  }
-
-  const existingByDeviceChannel = new Set(
-    state.cameras
-      .filter((camera) => cameraBelongsToDevice(camera, device))
-      .map((camera) => Number(camera.channel))
-  );
-  let addedCount = 0;
-
-  for (let channel = 1; channel <= channelCount; channel += 1) {
-    if (existingByDeviceChannel.has(channel)) continue;
-    state.cameras.push({
-      id: channelCameraId(device, channel),
-      name: `${device.name} CH-${String(channel).padStart(2, "0")}`,
-      area: "Unassigned",
-      floor: "Unknown",
-      direction: "Direction not set",
-      deviceId: device.id,
-      nvr: device.name,
-      channel,
-      // A recorder state is not direct evidence of a channel/camera state.
-      status: "unknown",
-      tags: ["unmapped"],
-      related: [],
-      next: [],
-      previous: [],
-      discovered: true,
-      managedPlaceholder: true
-    });
-    addedCount += 1;
-  }
-
-  return { addedCount, removedCount: removedIds.size, detachedCount };
+  const result = inventoryContract.reconcileDeviceChannels(device, state.cameras);
+  device.channels = result.channelCount;
+  device.channelCount = result.channelCount;
+  state.cameras = result.cameras;
+  removeCameraReferences(new Set(result.removedIds));
+  return {
+    addedCount: result.addedCount,
+    removedCount: result.removedCount,
+    detachedCount: result.detachedCount
+  };
 }
 
 function mediaStatusText(camera, mode) {
@@ -1846,46 +1649,8 @@ function mediaStatusText(camera, mode) {
   return `${cameraDeviceName(camera)} CH-${camera.channel} | ${deviceLabel} | ${profile}`;
 }
 
-function resolveTier(context) {
-  if (context.zone) {
-    return resolveTierByZone(context);
-  }
-  if (context.isVisible === false) return "paused";
-  if (context.isTracking) return "main";
-  if (context.isFocused) return "main";
-  if (context.paneContext === "playback" && context.tileCount >= 4) return "sub";
-  if (context.tileCount >= 9) return "thumb";
-  if (context.tileCount >= 2) return "sub";
-  return "main";
-}
-
-function resolveTierByZone(context) {
-  if (context.isTracking || context.isFocused) return "main";
-  if (context.zone === "offscreen") return "paused";
-  if (context.zone === "prewarm") return "thumb";
-
-  const baseTier = context.zone === "focus" ? "main" : "thumb";
-  return applyZoomCap(baseTier, context.zoomLevel || "room");
-}
-
-function applyZoomCap(baseTier, zoomLevel) {
-  const rank = { paused: 0, thumb: 1, sub: 2, main: 3 };
-  const cap = {
-    site: "paused",
-    wing: "thumb",
-    room: "main"
-  }[zoomLevel] || "main";
-
-  return rank[cap] < rank[baseTier] ? cap : baseTier;
-}
-
 function tierBitrate(tier) {
-  return {
-    paused: 0,
-    thumb: 256,
-    sub: 1000,
-    main: 4000
-  }[tier] || 0;
+  return estimateBitrateKbps(tier);
 }
 
 function mediaPolicyLine(tier) {
@@ -2121,10 +1886,11 @@ function groupSectionsForCameras(cameraList) {
   };
 }
 
-function cameraRowHTML(camera) {
+function workspaceCameraRowHTML(kind, camera) {
+  const playback = kind === "playback";
   const cameraTags = (camera.tags || []).slice(0, 3);
   return `
-    <article class="camera-row ${camera.id === state.selectedId ? "active" : ""}" data-camera-row="${escapeHtml(camera.id)}" tabindex="0">
+    <article class="camera-row ${camera.id === (playback ? state.playbackSelectedId : state.selectedId) ? "active" : ""}" ${playback ? "data-pb-camera-row" : "data-camera-row"}="${escapeHtml(camera.id)}" tabindex="0">
       <div class="camera-row-main">
         <div class="camera-row-header">
           <div class="camera-name"><span class="tree-icon">&#9673;</span>${escapeHtml(camera.name)}</div>
@@ -2146,68 +1912,94 @@ function renderStatusBar() {
   renderInventoryAuthorityStatus();
 }
 
-function renderCameraList() {
-  const filtered = state.cameras.filter(cameraMatches);
-  els.cameraCount.textContent = `${filtered.length} shown`;
-  renderCheckedCameraCount();
+function workspaceTreeConfiguration(kind) {
+  const playback = kind === "playback";
+  return {
+    kind,
+    query: playback ? state.playbackQuery : state.query,
+    list: playback ? els.pbCameraList : els.cameraList,
+    count: playback ? els.pbCameraCount : els.cameraCount,
+    rowSelector: playback ? "[data-pb-camera-row]" : "[data-camera-row]",
+    rowId: (row) => playback ? row.dataset.pbCameraRow : row.dataset.cameraRow,
+    rowMarkup: (camera) => workspaceCameraRowHTML(kind, camera),
+    openGroup: playback ? openPlaybackGroup : openGroup
+  };
+}
 
+function renderWorkspaceResourceTree(kind) {
+  const config = workspaceTreeConfiguration(kind);
+  const query = config.query.trim().toLowerCase();
+  const filtered = kind === "live"
+    ? state.cameras.filter(cameraMatches)
+    : state.cameras.filter((camera) => {
+        if (!query) return true;
+        return [camera.id, camera.name, camera.area, camera.floor, cameraDeviceName(camera), ...(camera.tags || [])]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      });
+
+  config.count.textContent = `${filtered.length} shown`;
+  if (kind === "live") renderCheckedCameraCount();
   if (!filtered.length) {
-    els.cameraList.innerHTML = `<div class="empty-state">No matching cameras.</div>`;
+    config.list.innerHTML = `<div class="empty-state">No matching cameras.</div>`;
     return;
   }
+
   const grouped = groupSectionsForCameras(filtered);
-  const groupHtml = grouped.sections
-    .map(({ group, members }) => {
-      const isOpen = Boolean(state.query);
-      return `
-        <details class="camera-group-section" ${isOpen ? "open" : ""}>
-          <summary>
-            <span class="camera-group-title"><span class="tree-icon">&#128193;</span><span class="camera-group-name">${escapeHtml(group.name)}</span>${group.system ? ` <span class="group-badge-system">device</span>` : ""}</span>
-            <span class="camera-group-actions">
-              <span class="camera-group-count">${members.length}</span>
-              <button class="tree-action-btn" data-open-list-group="${escapeHtml(group.id)}" type="button" title="Open all cameras in group" aria-label="Open all cameras in ${escapeHtml(group.name)}">&#9654;</button>
-            </span>
-          </summary>
-          <div class="camera-group-members">
-            ${members.map(cameraRowHTML).join("")}
-          </div>
-        </details>
-      `;
-    })
-    .join("");
-  const ungroupedHtml = grouped.ungrouped.length
-    ? `
-      <details class="camera-group-section" open>
-        <summary>
-          <span class="camera-group-title"><span class="camera-group-name">Ungrouped</span></span>
-          <span class="camera-group-count">${grouped.ungrouped.length}</span>
-        </summary>
-        <div class="camera-group-members">
-          ${grouped.ungrouped.map(cameraRowHTML).join("")}
-        </div>
-      </details>
-    `
-    : "";
-  els.cameraList.innerHTML = groupHtml + ungroupedHtml;
-  els.cameraList.querySelectorAll("[data-open-list-group]").forEach((button) => {
+  const renderSection = ({ group, members }) => `
+    <details class="camera-group-section" ${query ? "open" : ""}>
+      <summary>
+        <span class="camera-group-title"><span class="tree-icon">&#128193;</span><span class="camera-group-name">${escapeHtml(group.name)}</span>${group.system ? ` <span class="group-badge-system">device</span>` : ""}</span>
+        <span class="camera-group-actions">
+          <span class="camera-group-count">${members.length}</span>
+          <button class="tree-action-btn" data-workspace-tree-group="${escapeHtml(group.id)}" type="button" title="Open all cameras in group" aria-label="Open all cameras in ${escapeHtml(group.name)}">&#9654;</button>
+        </span>
+      </summary>
+      <div class="camera-group-members">${members.map(config.rowMarkup).join("")}</div>
+    </details>`;
+  const ungroupedHtml = grouped.ungrouped.length ? `
+    <details class="camera-group-section" open>
+      <summary><span class="camera-group-title"><span class="camera-group-name">Ungrouped</span></span><span class="camera-group-count">${grouped.ungrouped.length}</span></summary>
+      <div class="camera-group-members">${grouped.ungrouped.map(config.rowMarkup).join("")}</div>
+    </details>` : "";
+  config.list.innerHTML = grouped.sections.map(renderSection).join("") + ungroupedHtml;
+
+  config.list.querySelectorAll("[data-workspace-tree-group]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openGroup(button.dataset.openListGroup);
+      config.openGroup(button.dataset.workspaceTreeGroup);
     });
   });
-  els.cameraList.querySelectorAll("[data-camera-row]").forEach((row) => {
+  config.list.querySelectorAll(config.rowSelector).forEach((row) => {
+    const cameraId = () => config.rowId(row);
     bindClickAndDoubleClick(row, {
-      onClick: () => selectOrOpenLiveCamera(row.dataset.cameraRow),
+      onClick: () => {
+        if (kind === "playback") addToPlaybackGrid(cameraId());
+        else selectOrOpenLiveCamera(cameraId());
+      },
       onDoubleClick: () => {
-        selectOrOpenLiveCamera(row.dataset.cameraRow);
-        toggleLiveCameraMaximize(row.dataset.cameraRow);
+        if (kind === "playback") {
+          addToPlaybackGrid(cameraId());
+          maximizedPlaybackCameraId = maximizedPlaybackCameraId === cameraId() ? "" : cameraId();
+          renderPlaybackTileGrid();
+        } else {
+          selectOrOpenLiveCamera(cameraId());
+          toggleLiveCameraMaximize(cameraId());
+        }
       }
     });
     row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") selectOrOpenLiveCamera(row.dataset.cameraRow);
+      if (event.key !== "Enter") return;
+      if (kind === "playback") addToPlaybackGrid(cameraId());
+      else selectOrOpenLiveCamera(cameraId());
     });
   });
+}
+
+function renderCameraList() {
+  renderWorkspaceResourceTree("live");
 }
 
 function renderCheckedCameraCount() {
@@ -2389,6 +2181,112 @@ function gridMatrix(slotCount) {
   return { columns, rows };
 }
 
+function workspaceFixedGridConfiguration(kind) {
+  const playback = kind === "playback";
+  return {
+    kind,
+    grid: playback ? els.playbackTileGrid : els.simpleLiveGrid,
+    gridClasses: `simple-live-grid ${playback ? "playback-tile-grid " : ""}`,
+    selectedId: playback ? state.playbackSelectedId : state.selectedId,
+    tileAttribute: playback ? "data-pb-tile" : "data-simple-live-camera",
+    tileSelector: playback ? "[data-pb-tile]" : "[data-simple-live-camera]",
+    tileId: (tile) => playback ? tile.dataset.pbTile : tile.dataset.simpleLiveCamera,
+    paneContext: playback ? "playback" : "grid",
+    mediaContext: playback ? "playback" : "live",
+    bridgeLabel: playback ? "Playback bridge pending" : "Live bridge pending",
+    ignore: playback ? (event) => Boolean(event.target.closest("[data-pb-report], [data-pb-remove]")) : undefined,
+    select: (id) => {
+      if (!playback) {
+        selectLiveCamera(id);
+        return;
+      }
+      state.playbackSelectedId = id;
+      persist();
+      renderPlaybackTileGrid();
+    },
+    toggleMaximize: (id) => {
+      if (!playback) {
+        toggleLiveCameraMaximize(id);
+        return;
+      }
+      maximizedPlaybackCameraId = maximizedPlaybackCameraId === id ? "" : id;
+      state.playbackSelectedId = id;
+      persist();
+      renderPlaybackTileGrid();
+    }
+  };
+}
+
+function workspaceTileBodyMarkup(config, camera, tier) {
+  const liveZoom = config.kind === "live"
+    ? ` class="digital-zoom-stage" style="transform: scale(${camera.id === config.selectedId ? state.liveDigitalZoom : 1})"`
+    : "";
+  return `<div${liveZoom}><strong>${config.bridgeLabel}</strong>${mediaStatusText(camera, config.mediaContext)}${mediaPolicyLine(tier)}</div>`;
+}
+
+function workspaceTileActionsMarkup(kind, camera) {
+  if (kind !== "playback") return "";
+  return `
+    <span class="pb-tile-actions">
+      <button class="secondary" data-pb-report="${escapeHtml(camera.id)}" type="button">Report</button>
+      <button class="danger" data-pb-remove="${escapeHtml(camera.id)}" type="button">X</button>
+    </span>`;
+}
+
+function renderWorkspaceFixedGrid(kind, camerasToShow, slotCount) {
+  const config = workspaceFixedGridConfiguration(kind);
+  config.grid.style.display = "grid";
+  config.grid.className = `${config.gridClasses}${slotCount === 1 ? "focused-feed-grid" : ""}`;
+  applyGridLayout(config.grid, slotCount);
+
+  const tileHtml = camerasToShow.map((camera) => {
+    const tier = resolveTier({
+      tileCount: camerasToShow.length,
+      isFocused: camera.id === config.selectedId || camerasToShow.length === 1,
+      isTracking: false,
+      paneContext: config.paneContext,
+      isVisible: true
+    });
+    return `
+      <article class="simple-video-tile ${camera.id === config.selectedId ? "active" : ""}" ${config.tileAttribute}="${escapeHtml(camera.id)}">
+        <div class="tile-header">
+          <strong>${escapeHtml(camera.name)}</strong>
+          <span class="status ${escapeHtml(camera.status)}">${escapeHtml(tier)}</span>
+        </div>
+        <div class="simple-video-body">${workspaceTileBodyMarkup(config, camera, tier)}</div>
+        <div class="tile-footer">
+          <span>${escapeHtml(camera.id)}</span>
+          <span>${escapeHtml(camera.area)}</span>
+          ${workspaceTileActionsMarkup(kind, camera)}
+        </div>
+      </article>`;
+  });
+  const emptyCount = Math.max(0, slotCount - camerasToShow.length);
+  config.grid.innerHTML = tileHtml.join("") + `<div class="simple-video-tile empty-slot">Empty channel</div>`.repeat(emptyCount);
+
+  config.grid.querySelectorAll(config.tileSelector).forEach((tile) => {
+    bindClickAndDoubleClick(tile, {
+      ignore: config.ignore,
+      onClick: () => config.select(config.tileId(tile)),
+      onDoubleClick: () => config.toggleMaximize(config.tileId(tile))
+    });
+  });
+  if (kind === "playback") {
+    config.grid.querySelectorAll("[data-pb-remove]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        removeFromPlaybackGrid(button.dataset.pbRemove);
+      });
+    });
+    config.grid.querySelectorAll("[data-pb-report]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        preparePlaybackReport(button.dataset.pbReport);
+      });
+    });
+  }
+}
+
 function renderSimpleLiveGrid() {
   if (els.spatialCanvasEl) {
     els.spatialCanvasEl.style.display = "none";
@@ -2400,50 +2298,7 @@ function renderSimpleLiveGrid() {
   const slotCount = maximizedCamera ? 1 : Math.max(1, state.gridDivision);
   const camerasToShow = maximizedCamera ? [maximizedCamera] : openCameras.slice(0, slotCount);
 
-  els.simpleLiveGrid.style.display = "grid";
-  els.simpleLiveGrid.className = `simple-live-grid ${slotCount === 1 ? "focused-feed-grid" : ""}`;
-  applyGridLayout(els.simpleLiveGrid, slotCount);
-
-  if (!camerasToShow.length) {
-  }
-
-  const tileHtml = camerasToShow.map((camera) => {
-    const tier = resolveTier({
-      tileCount: camerasToShow.length,
-      isFocused: camera.id === state.selectedId || camerasToShow.length === 1,
-      isTracking: false,
-      paneContext: "grid",
-      isVisible: true
-    });
-    return `
-      <article class="simple-video-tile ${camera.id === state.selectedId ? "active" : ""}" data-simple-live-camera="${camera.id}">
-        <div class="tile-header">
-          <strong>${camera.name}</strong>
-          <span class="status ${camera.status}">${tier}</span>
-        </div>
-        <div class="simple-video-body">
-          <div class="digital-zoom-stage" style="transform: scale(${camera.id === state.selectedId ? state.liveDigitalZoom : 1})">
-            <strong>Live bridge pending</strong>
-            ${mediaStatusText(camera, "live")}${mediaPolicyLine(tier)}
-          </div>
-        </div>
-        <div class="tile-footer">
-          <span>${camera.id}</span>
-          <span>${camera.area}</span>
-        </div>
-      </article>
-    `;
-  });
-  const emptySlotHtml = `<div class="simple-video-tile empty-slot">Empty channel</div>`;
-  const emptyCount = Math.max(0, slotCount - camerasToShow.length);
-  els.simpleLiveGrid.innerHTML = tileHtml.join("") + emptySlotHtml.repeat(emptyCount);
-
-  els.simpleLiveGrid.querySelectorAll("[data-simple-live-camera]").forEach((tile) => {
-    bindClickAndDoubleClick(tile, {
-      onClick: () => selectLiveCamera(tile.dataset.simpleLiveCamera),
-      onDoubleClick: () => toggleLiveCameraMaximize(tile.dataset.simpleLiveCamera)
-    });
-  });
+  renderWorkspaceFixedGrid("live", camerasToShow, slotCount);
 }
 
 function setLiveDigitalZoom(value) {
@@ -2500,24 +2355,8 @@ function relatedCameraButtonsMarkup(camera, dataAttribute) {
     : `<span class="detail-muted">No related cameras mapped yet.</span>`;
 }
 
-function renderMonitorDrawer() {
-  if (!els.monitorDrawerBody) return;
-  const camera = byId.get(state.selectedId);
-  if (!camera) {
-    els.monitorDrawerTitle.textContent = "No camera selected";
-    els.monitorDrawerStatus.textContent = "idle";
-    els.monitorDrawerBody.innerHTML = `<div class="empty-state">Select a camera from the tree or live stage.</div>`;
-    return;
-  }
-
-  const relatedHtml = relatedCameraButtonsMarkup(camera, "data-drawer-open-camera");
-
-  els.monitorDrawerTitle.textContent = camera.name;
-  els.monitorDrawerStatus.textContent = camera.status || "unknown";
-  els.monitorDrawerStatus.className = `status ${camera.status || "idle"}`;
-  els.monitorDrawerBody.innerHTML = `
-    ${cameraOverviewMarkup(camera)}
-
+function liveDrawerExtensionMarkup() {
+  return `
     <section class="drawer-section">
       <div class="drawer-section-title">Digital Zoom</div>
       <div class="zoom-control-row">
@@ -2546,45 +2385,23 @@ function renderMonitorDrawer() {
         <button data-ptz-action="zoom-out" type="button">PTZ Zoom -</button>
       </div>
     </section>
-
-    <section class="drawer-section">
-      <div class="drawer-section-title">Nearby</div>
-      <div class="drawer-actions">${relatedHtml}</div>
-    </section>
   `;
+}
 
-  els.monitorDrawerBody.querySelectorAll("[data-drawer-open-camera]").forEach((button) => {
-    button.addEventListener("click", () => openSingleCamera(button.dataset.drawerOpenCamera));
-  });
-  els.monitorDrawerBody.querySelectorAll("[data-live-zoom]").forEach((button) => {
+function bindLiveDrawerExtension(body) {
+  body.querySelectorAll("[data-live-zoom]").forEach((button) => {
     button.addEventListener("click", () => setLiveDigitalZoom(state.liveDigitalZoom + Number(button.dataset.liveZoom)));
   });
-  els.monitorDrawerBody.querySelector("[data-live-zoom-range]")?.addEventListener("input", (event) => {
+  body.querySelector("[data-live-zoom-range]")?.addEventListener("input", (event) => {
     setLiveDigitalZoom(event.target.value);
   });
-  els.monitorDrawerBody.querySelectorAll("[data-ptz-action]").forEach((button) => {
+  body.querySelectorAll("[data-ptz-action]").forEach((button) => {
     button.addEventListener("click", () => queuePtzAction(button.dataset.ptzAction));
   });
 }
 
-function renderPlaybackDrawer() {
-  if (!els.playbackDrawerBody) return;
-  const camera = byId.get(state.playbackSelectedId);
-  if (!camera) {
-    els.playbackDrawerTitle.textContent = "No camera selected";
-    els.playbackDrawerStatus.textContent = "idle";
-    els.playbackDrawerStatus.className = "status idle";
-    els.playbackDrawerBody.innerHTML = `<div class="empty-state">Select a camera from the tree or playback stage.</div>`;
-    return;
-  }
-
-  const relatedHtml = relatedCameraButtonsMarkup(camera, "data-playback-drawer-open-camera");
-  els.playbackDrawerTitle.textContent = camera.name;
-  els.playbackDrawerStatus.textContent = camera.status || "unknown";
-  els.playbackDrawerStatus.className = `status ${camera.status || "idle"}`;
-  els.playbackDrawerBody.innerHTML = `
-    ${cameraOverviewMarkup(camera)}
-
+function playbackDrawerExtensionMarkup() {
+  return `
     <section class="drawer-section">
       <div class="drawer-section-title">Playback</div>
       <div class="detail-row"><span>Position</span><strong data-playback-current-time>${escapeHtml(formatDateTime(playbackCursorDate))}</strong></div>
@@ -2597,17 +2414,11 @@ function renderPlaybackDrawer() {
         <button data-playback-drawer-action="report" type="button">Report</button>
       </div>
     </section>
-
-    <section class="drawer-section">
-      <div class="drawer-section-title">Nearby</div>
-      <div class="drawer-actions">${relatedHtml}</div>
-    </section>
   `;
+}
 
-  els.playbackDrawerBody.querySelectorAll("[data-playback-drawer-open-camera]").forEach((button) => {
-    button.addEventListener("click", () => addToPlaybackGrid(button.dataset.playbackDrawerOpenCamera));
-  });
-  els.playbackDrawerBody.querySelectorAll("[data-playback-drawer-action]").forEach((button) => {
+function bindPlaybackDrawerExtension(body, camera) {
+  body.querySelectorAll("[data-playback-drawer-action]").forEach((button) => {
     button.addEventListener("click", () => {
       const action = button.dataset.playbackDrawerAction;
       if (action === "step-back") {
@@ -2625,6 +2436,57 @@ function renderPlaybackDrawer() {
       }
     });
   });
+}
+
+function workspaceDrawerConfiguration(kind) {
+  const playback = kind === "playback";
+  return {
+    body: playback ? els.playbackDrawerBody : els.monitorDrawerBody,
+    title: playback ? els.playbackDrawerTitle : els.monitorDrawerTitle,
+    status: playback ? els.playbackDrawerStatus : els.monitorDrawerStatus,
+    selectedId: playback ? state.playbackSelectedId : state.selectedId,
+    emptyContext: playback ? "playback" : "live",
+    extensionMarkup: playback ? playbackDrawerExtensionMarkup : liveDrawerExtensionMarkup,
+    bindExtension: playback ? bindPlaybackDrawerExtension : bindLiveDrawerExtension,
+    openRelated: playback ? addToPlaybackGrid : openSingleCamera
+  };
+}
+
+function renderWorkspaceDrawer(kind) {
+  const config = workspaceDrawerConfiguration(kind);
+  if (!config.body) return;
+  const camera = byId.get(config.selectedId);
+  if (!camera) {
+    config.title.textContent = "No camera selected";
+    config.status.textContent = "idle";
+    config.status.className = "status idle";
+    config.body.innerHTML = `<div class="empty-state">Select a camera from the tree or ${config.emptyContext} stage.</div>`;
+    return;
+  }
+
+  config.title.textContent = camera.name;
+  config.status.textContent = camera.status || "unknown";
+  config.status.className = `status ${camera.status || "idle"}`;
+  config.body.innerHTML = `
+    ${cameraOverviewMarkup(camera)}
+    ${config.extensionMarkup(camera)}
+    <section class="drawer-section">
+      <div class="drawer-section-title">Nearby</div>
+      <div class="drawer-actions">${relatedCameraButtonsMarkup(camera, "data-workspace-related-camera")}</div>
+    </section>
+  `;
+  config.body.querySelectorAll("[data-workspace-related-camera]").forEach((button) => {
+    button.addEventListener("click", () => config.openRelated(button.dataset.workspaceRelatedCamera));
+  });
+  config.bindExtension(config.body, camera);
+}
+
+function renderMonitorDrawer() {
+  renderWorkspaceDrawer("live");
+}
+
+function renderPlaybackDrawer() {
+  renderWorkspaceDrawer("playback");
 }
 
 const checkedDeviceIds = new Set(); // ephemeral, table bulk-select only
@@ -3376,18 +3238,6 @@ function padTimePart(value) {
   return String(value).padStart(2, "0");
 }
 
-function formatDate(date) {
-  return `${date.getFullYear()}-${padTimePart(date.getMonth() + 1)}-${padTimePart(date.getDate())}`;
-}
-
-function formatTime(date) {
-  return `${padTimePart(date.getHours())}:${padTimePart(date.getMinutes())}:${padTimePart(date.getSeconds())}`;
-}
-
-function formatDateTime(date = new Date()) {
-  return `${formatDate(date)} ${formatTime(date)}`;
-}
-
 let playbackActiveDay = startOfDay(parseStoredDateTime(state.playbackRangeStart));
 let playbackCursorDate = clampDateToDay(parseStoredDateTime(state.playbackRangeStart), playbackActiveDay);
 let playbackPlaying = false;
@@ -3422,91 +3272,10 @@ function shortDateTime(date) {
 // --- Playback camera tree (mirrors the Live View resource tree) --------
 
 function renderPlaybackTree() {
-  const filtered = state.cameras.filter((camera) => {
-    const query = state.playbackQuery.trim().toLowerCase();
-    if (!query) return true;
-    const haystack = [camera.id, camera.name, camera.area, camera.floor, cameraDeviceName(camera), ...(camera.tags || [])]
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(query);
-  });
-
-  els.pbCameraCount.textContent = `${filtered.length} shown`;
-
-  if (!filtered.length) {
-    els.pbCameraList.innerHTML = `<div class="empty-state">No matching cameras.</div>`;
-    return;
-  }
-
-  const grouped = groupSectionsForCameras(filtered);
-  const groupHtml = grouped.sections
-    .map(({ group, members }) => {
-      const isOpen = Boolean(state.playbackQuery);
-      return `
-      <details class="camera-group-section" ${isOpen ? "open" : ""}>
-        <summary>
-          <span class="camera-group-title"><span class="tree-icon">&#128193;</span><span class="camera-group-name">${escapeHtml(group.name)}</span>${group.system ? ` <span class="group-badge-system">device</span>` : ""}</span>
-          <span class="camera-group-actions">
-            <span class="camera-group-count">${members.length}</span>
-            <button class="tree-action-btn" data-open-pb-list-group="${escapeHtml(group.id)}" type="button" title="Open all cameras in group for playback" aria-label="Open all cameras in ${escapeHtml(group.name)} for playback">&#9654;</button>
-          </span>
-        </summary>
-        <div class="camera-group-members">${members.map(playbackCameraRowHTML).join("")}</div>
-      </details>
-    `;
-    })
-    .join("");
-  const ungroupedHtml = grouped.ungrouped.length
-    ? `
-      <details class="camera-group-section" open>
-        <summary>
-          <span class="camera-group-title"><span class="camera-group-name">Ungrouped</span></span>
-          <span class="camera-group-count">${grouped.ungrouped.length}</span>
-        </summary>
-        <div class="camera-group-members">${grouped.ungrouped.map(playbackCameraRowHTML).join("")}</div>
-      </details>
-    `
-    : "";
-  els.pbCameraList.innerHTML = groupHtml + ungroupedHtml;
-
-  els.pbCameraList.querySelectorAll("[data-open-pb-list-group]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openPlaybackGroup(button.dataset.openPbListGroup);
-    });
-  });
-  els.pbCameraList.querySelectorAll("[data-pb-camera-row]").forEach((row) => {
-    bindClickAndDoubleClick(row, {
-      onClick: () => addToPlaybackGrid(row.dataset.pbCameraRow),
-      onDoubleClick: () => {
-        const id = row.dataset.pbCameraRow;
-        addToPlaybackGrid(id);
-        maximizedPlaybackCameraId = maximizedPlaybackCameraId === id ? "" : id;
-        renderPlaybackTileGrid();
-      }
-    });
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") addToPlaybackGrid(row.dataset.pbCameraRow);
-    });
-  });
+  renderWorkspaceResourceTree("playback");
 }
 
-function playbackCameraRowHTML(camera) {
-  const cameraTags = (camera.tags || []).slice(0, 3);
-  return `
-    <article class="camera-row ${camera.id === state.playbackSelectedId ? "active" : ""}" data-pb-camera-row="${escapeHtml(camera.id)}" tabindex="0">
-      <div class="camera-row-main">
-        <div class="camera-row-header">
-          <div class="camera-name"><span class="tree-icon">&#9673;</span>${escapeHtml(camera.name)}</div>
-          <span class="status ${escapeHtml(camera.status)}">${escapeHtml(camera.status)}</span>
-        </div>
-        <div class="camera-meta">${escapeHtml(camera.id)} - ${escapeHtml(camera.area)} - ${escapeHtml(cameraDeviceName(camera))} CH-${escapeHtml(camera.channel)}</div>
-        <div class="tag-line">${cameraTags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
-      </div>
-    </article>
-  `;
-}
+
 
 // --- Playback grid (reuses the simple-live-grid tile look from Live View) ---
 
@@ -3618,74 +3387,7 @@ function renderPlaybackTileGrid() {
   }
 
   if (els.playbackSpatialCanvasEl) els.playbackSpatialCanvasEl.style.display = "none";
-  els.playbackTileGrid.className = `simple-live-grid playback-tile-grid ${slotCount === 1 ? "focused-feed-grid" : ""}`;
-  els.playbackTileGrid.style.display = "grid";
-  applyGridLayout(els.playbackTileGrid, slotCount);
-
-  const tileHtml = camerasToShow.map((camera) => {
-    const tier = resolveTier({
-      tileCount: camerasToShow.length,
-      isFocused: camera.id === state.playbackSelectedId || camerasToShow.length === 1,
-      isTracking: false,
-      paneContext: "playback",
-      isVisible: true
-    });
-    return `
-      <article class="simple-video-tile ${camera.id === state.playbackSelectedId ? "active" : ""}" data-pb-tile="${camera.id}">
-        <div class="tile-header">
-          <strong>${camera.name}</strong>
-          <span class="status ${camera.status}">${tier}</span>
-        </div>
-        <div class="simple-video-body">
-          <div>
-            <strong>Playback bridge pending</strong>
-            ${mediaStatusText(camera, "playback")}${mediaPolicyLine(tier)}
-          </div>
-        </div>
-        <div class="tile-footer">
-          <span>${camera.id}</span>
-          <span>${camera.area}</span>
-          <span class="pb-tile-actions">
-            <button class="secondary" data-pb-report="${camera.id}" type="button">Report</button>
-            <button class="danger" data-pb-remove="${camera.id}" type="button">X</button>
-          </span>
-        </div>
-      </article>
-    `;
-  });
-  const emptySlotHtml = `<div class="simple-video-tile empty-slot">Empty channel</div>`;
-  const emptyCount = Math.max(0, slotCount - camerasToShow.length);
-  els.playbackTileGrid.innerHTML = tileHtml.join("") + emptySlotHtml.repeat(emptyCount);
-
-  els.playbackTileGrid.querySelectorAll("[data-pb-tile]").forEach((tile) => {
-    bindClickAndDoubleClick(tile, {
-      ignore: (event) => Boolean(event.target.closest("[data-pb-report], [data-pb-remove]")),
-      onClick: () => {
-        state.playbackSelectedId = tile.dataset.pbTile;
-        persist();
-        renderPlaybackTileGrid();
-      },
-      onDoubleClick: () => {
-        const id = tile.dataset.pbTile;
-        maximizedPlaybackCameraId = maximizedPlaybackCameraId === id ? "" : id;
-        state.playbackSelectedId = id;
-        persist();
-        renderPlaybackTileGrid();
-      }
-    });
-  });
-  els.playbackTileGrid.querySelectorAll("[data-pb-remove]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      removeFromPlaybackGrid(button.dataset.pbRemove);
-    });
-  });
-  els.playbackTileGrid.querySelectorAll("[data-pb-report]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      preparePlaybackReport(button.dataset.pbReport);
-    });
-  });
+  renderWorkspaceFixedGrid("playback", camerasToShow, slotCount);
 }
 
 function preparePlaybackReport(cameraId) {
@@ -4459,6 +4161,10 @@ function setOverlayPanelOpen(button, panel, isOpen) {
   syncOverlayToggle(button, panel);
 }
 
+function operationalWorkspaceComponent(kind) {
+  return globalThis.VmsOperationalWorkspaces?.[kind] || null;
+}
+
 function toggleOperationalPanel(kind, panelKind) {
   const isPlayback = kind === "playback";
   const resourcePanel = isPlayback ? els.playbackResourcePanel : els.liveResourcePanel;
@@ -4475,20 +4181,21 @@ function toggleOperationalPanel(kind, panelKind) {
       false
     );
   }
+  const component = operationalWorkspaceComponent(kind);
+  if (component) component.setOverlay(panelKind, willOpen);
   setOverlayPanelOpen(button, panel, willOpen);
 }
 
-[
-  [els.liveResourceToggleBtn, els.liveResourcePanel],
-  [els.liveInspectorToggleBtn, els.monitorDrawer],
-  [els.playbackResourceToggleBtn, els.playbackResourcePanel],
-  [els.playbackInspectorToggleBtn, els.playbackDrawer]
-].forEach(([button, panel]) => syncOverlayToggle(button, panel));
-
-els.liveResourceToggleBtn?.addEventListener("click", () => toggleOperationalPanel("live", "resource"));
-els.liveInspectorToggleBtn?.addEventListener("click", () => toggleOperationalPanel("live", "inspector"));
-els.playbackResourceToggleBtn?.addEventListener("click", () => toggleOperationalPanel("playback", "resource"));
-els.playbackInspectorToggleBtn?.addEventListener("click", () => toggleOperationalPanel("playback", "inspector"));
+function toggleOperationalFullscreen(kind) {
+  const component = operationalWorkspaceComponent(kind);
+  if (component) {
+    Promise.resolve(component.toggleFullscreen(document)).catch(() => {});
+    return;
+  }
+  const target = kind === "playback" ? els.playbackView : (els.liveView || els.livePanel);
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (target?.requestFullscreen) target.requestFullscreen().catch(() => {});
+}
 
 els.inventoryRetryBtn?.addEventListener("click", () => {
   void retryPendingInventorySave();
@@ -4542,29 +4249,6 @@ function setGridDivision(division) {
   renderGrid();
 }
 
-els.gridLayoutBtn?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  const willShow = els.layoutPopover.hidden;
-  closeAllGridPopovers();
-  els.layoutPopover.hidden = !willShow;
-  if (willShow && els.gridDivisionCustomInput) els.gridDivisionCustomInput.value = state.gridDivision;
-});
-
-els.layoutPopover?.querySelectorAll("[data-division]").forEach((button) => {
-  button.addEventListener("click", () => {
-    setGridDivision(Number(button.dataset.division));
-    closeAllGridPopovers();
-  });
-});
-
-els.gridDivisionCustomBtn?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  if (!els.gridDivisionCustomInput?.value) return;
-  setGridDivision(els.gridDivisionCustomInput.value);
-  closeAllGridPopovers();
-});
-els.layoutPopover?.addEventListener("click", (event) => event.stopPropagation());
-
 els.gridZoomOutBtn?.addEventListener("click", (event) => {
   event.stopPropagation();
   setLiveDigitalZoom(state.liveDigitalZoom - 0.25);
@@ -4587,16 +4271,6 @@ els.ptzPopover?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-ptz-action]");
   if (!button) return;
   queuePtzAction(button.dataset.ptzAction);
-});
-
-els.gridCloseAllBtn?.addEventListener("click", clearLiveGrid);
-
-els.gridFullscreenBtn?.addEventListener("click", () => {
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    requestLiveFullscreen();
-  }
 });
 
 els.gridSettingsBtn?.addEventListener("click", (event) => {
@@ -4789,38 +4463,61 @@ function closeAllPlaybackPopovers() {
   if (els.pbRangePopover) els.pbRangePopover.hidden = true;
 }
 
-els.pbLayoutBtn?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  const willShow = els.pbLayoutPopover.hidden;
-  closeAllPlaybackPopovers();
-  els.pbLayoutPopover.hidden = !willShow;
-  if (willShow && els.pbDivisionCustomInput) els.pbDivisionCustomInput.value = state.playbackGridDivision;
-});
+function operationalWorkspaceControlConfiguration(kind) {
+  const playback = kind === "playback";
+  return {
+    kind,
+    resourceButton: playback ? els.playbackResourceToggleBtn : els.liveResourceToggleBtn,
+    resourcePanel: playback ? els.playbackResourcePanel : els.liveResourcePanel,
+    inspectorButton: playback ? els.playbackInspectorToggleBtn : els.liveInspectorToggleBtn,
+    inspectorPanel: playback ? els.playbackDrawer : els.monitorDrawer,
+    layoutButton: playback ? els.pbLayoutBtn : els.gridLayoutBtn,
+    layoutPopover: playback ? els.pbLayoutPopover : els.layoutPopover,
+    divisionSelector: playback ? "[data-pb-division]" : "[data-division]",
+    divisionFromButton: (button) => Number(playback ? button.dataset.pbDivision : button.dataset.division),
+    customInput: playback ? els.pbDivisionCustomInput : els.gridDivisionCustomInput,
+    customButton: playback ? els.pbDivisionCustomBtn : els.gridDivisionCustomBtn,
+    division: () => playback ? state.playbackGridDivision : state.gridDivision,
+    setDivision: playback ? setPlaybackDivision : setGridDivision,
+    closePopovers: playback ? closeAllPlaybackPopovers : closeAllGridPopovers,
+    closeButton: playback ? els.pbCloseAllBtn : els.gridCloseAllBtn,
+    clearGrid: playback ? clearPlaybackGrid : clearLiveGrid,
+    fullscreenButton: playback ? els.pbFullscreenBtn : els.gridFullscreenBtn
+  };
+}
 
-els.pbLayoutPopover?.querySelectorAll("[data-pb-division]").forEach((button) => {
-  button.addEventListener("click", () => {
-    setPlaybackDivision(Number(button.dataset.pbDivision));
-    closeAllPlaybackPopovers();
+function bindOperationalWorkspaceControls(kind) {
+  const config = operationalWorkspaceControlConfiguration(kind);
+  syncOverlayToggle(config.resourceButton, config.resourcePanel);
+  syncOverlayToggle(config.inspectorButton, config.inspectorPanel);
+  config.resourceButton?.addEventListener("click", () => toggleOperationalPanel(kind, "resource"));
+  config.inspectorButton?.addEventListener("click", () => toggleOperationalPanel(kind, "inspector"));
+  config.layoutButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willShow = config.layoutPopover.hidden;
+    config.closePopovers();
+    config.layoutPopover.hidden = !willShow;
+    if (willShow && config.customInput) config.customInput.value = config.division();
   });
-});
+  config.layoutPopover?.querySelectorAll(config.divisionSelector).forEach((button) => {
+    button.addEventListener("click", () => {
+      config.setDivision(config.divisionFromButton(button));
+      config.closePopovers();
+    });
+  });
+  config.customButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!config.customInput?.value) return;
+    config.setDivision(config.customInput.value);
+    config.closePopovers();
+  });
+  config.layoutPopover?.addEventListener("click", (event) => event.stopPropagation());
+  config.closeButton?.addEventListener("click", config.clearGrid);
+  config.fullscreenButton?.addEventListener("click", () => toggleOperationalFullscreen(kind));
+}
 
-els.pbDivisionCustomBtn?.addEventListener("click", (event) => {
-  event.stopPropagation();
-  if (!els.pbDivisionCustomInput?.value) return;
-  setPlaybackDivision(els.pbDivisionCustomInput.value);
-  closeAllPlaybackPopovers();
-});
-els.pbLayoutPopover?.addEventListener("click", (event) => event.stopPropagation());
-
-els.pbCloseAllBtn?.addEventListener("click", clearPlaybackGrid);
-
-els.pbFullscreenBtn?.addEventListener("click", () => {
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else if (els.playbackView?.requestFullscreen) {
-    els.playbackView.requestFullscreen().catch(() => {});
-  }
-});
+bindOperationalWorkspaceControls("live");
+bindOperationalWorkspaceControls("playback");
 
 els.pbRangeBtn?.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -4835,8 +4532,6 @@ els.pbRangeApplyBtn?.addEventListener("click", (event) => {
 });
 
 els.pbRangePopover?.addEventListener("click", (event) => event.stopPropagation());
-els.pbLayoutPopover?.addEventListener("click", (event) => event.stopPropagation());
-
 document.addEventListener("click", () => closeAllPlaybackPopovers());
 
 els.pbJumpStartBtn?.addEventListener("click", () => {

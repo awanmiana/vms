@@ -239,13 +239,18 @@ The delivered runtime is the fully-native C++ client under [`native/`](native/)
 (approved 2026-07-20, Approval Log row N0). Backend implementation and testing continue
 through this web shell as the reference specification and interaction/test harness.
 
-The native track advances by measurement spikes verified on real hardware before each
-next step (increments 1–3 and the 4a grid spike are built and verified). Product features
-still flow through their own gates: P3-03 governor scope is approved and its first native
-pass is in progress (including a live-probe capacity seed and governed grid harness), while data
-authority, stable inventory/layout/playback/resource-lease contracts, central resource
-admission, measured workstation/codec profiles, and a verified real-media path map to
-P0-04 through P0-13, P1, P3, and P5 in the controlling guide. True operating-system-detached
+The native track advances by hardware-verified increments and separately gated product
+slices. Through native increment 42, the standalone runtime includes the governed media,
+persistence, inventory, playback, spatial, command/API/audit, alarm, diagnostics, and
+premises-operations foundations recorded in the controlling plan. P3-18's approved
+standalone scope is complete: operations-time sources include persistent decoded streaming
+branch-time, and site analysis uses current, site-attributable device-health alarms without
+claiming VCA or retained history. Same-layout governor changes now replace only changed
+media branches while preserving unchanged decoders and the visible last frame. The loopback
+external-control API now enforces a default/configurable fixed-window request budget and
+returns structured 429 backpressure before an excess command can execute. Central resource admission,
+measured low-end workstation/codec profiles, broader authority/coordination, and verified
+real-camera paths remain under their P0/P1/P3/P5 gates. True operating-system-detached
 workspaces still depend on central resource admission from those gates.
 
 ## Development plan

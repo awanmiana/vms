@@ -1134,7 +1134,7 @@ Window {
                 property var analysis: snap.analysis || ({})
                 visible: root.tabIndex === 0 && root.showSiteOps && ops !== null
                 width: 390
-                height: 404
+                height: 420
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.leftMargin: root.showBrowser ? 264 : 16
@@ -1215,20 +1215,27 @@ Window {
                         width: parent.width
                         text: siteOperationsPanel.duration.available
                               ? (siteOperationsPanel.duration.stateText
-                                 + " · " + siteOperationsPanel.duration.segments
-                                 + " completed segment"
-                                 + (siteOperationsPanel.duration.segments === 1 ? "" : "s")
-                                 + " / "
-                                 + siteOperationsPanel.duration.camerasWithFootage
-                                 + " camera"
-                                 + (siteOperationsPanel.duration.camerasWithFootage === 1
-                                    ? "" : "s")
+                                 + (siteOperationsPanel.duration.recordingAvailable
+                                    ? (" · recorded "
+                                       + siteOperationsPanel.duration.recordingText
+                                       + " / " + siteOperationsPanel.duration.segments
+                                       + " segment"
+                                       + (siteOperationsPanel.duration.segments === 1
+                                          ? "" : "s"))
+                                    : " · recording unavailable")
                                  + (siteOperationsPanel.duration.overlapRemovedSeconds > 0
                                     ? (" · "
                                        + siteOperationsPanel.duration.overlapRemovedSeconds
                                        + "s overlap removed") : "")
                                  + (siteOperationsPanel.duration.streamingAvailable
-                                    ? "" : " · streaming unavailable"))
+                                    ? (" · streamed "
+                                       + siteOperationsPanel.duration.streamingText
+                                       + " / "
+                                       + siteOperationsPanel.duration.streamingCheckpoints
+                                       + " checkpoint"
+                                       + (siteOperationsPanel.duration.streamingCheckpoints === 1
+                                          ? "" : "s"))
+                                    : " · streaming unavailable"))
                               : ("Cumulative duration  Unavailable · "
                                  + (siteOperationsPanel.duration.reason || ""))
                         color: siteOperationsPanel.duration.available
@@ -1300,9 +1307,27 @@ Window {
                     }
                     Text {
                         width: parent.width
-                        text: (siteOperationsPanel.analysis.stateText || "Unavailable")
-                              + " · " + (siteOperationsPanel.analysis.reason || "")
-                        color: "#7f8998"; font.pixelSize: 11
+                        text: siteOperationsPanel.analysis.available
+                              ? ((siteOperationsPanel.analysis.stateText || "No active alarms")
+                                 + " · H " + siteOperationsPanel.analysis.high
+                                 + " / M " + siteOperationsPanel.analysis.medium
+                                 + " / L " + siteOperationsPanel.analysis.low)
+                              : ("Unavailable · "
+                                 + (siteOperationsPanel.analysis.reason || "no source"))
+                        color: siteOperationsPanel.analysis.needsAttention > 0
+                               ? "#e6a39b" : "#9fb3c8"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: siteOperationsPanel.analysis.available
+                              ? (siteOperationsPanel.analysis.affectedDevices
+                                 + " affected devices · "
+                                 + siteOperationsPanel.analysis.occurrences
+                                 + " occurrences · session only")
+                              : ""
+                        color: "#7f8998"; font.pixelSize: 10
                         elide: Text.ElideRight
                     }
                 }

@@ -1,5 +1,11 @@
-const crypto = require("crypto");
+const { createId } = require("../shared/core");
 const { formatDateTime } = require("./datetime");
+const {
+  OPERATION_IDS,
+  ResiliencePolicyService,
+  commandOutcome,
+  policyOutcome
+} = require("./resilience");
 
 const VALID_INTENTS = new Set([
   "OPEN_CAMERA",
@@ -19,9 +25,21 @@ const VALID_INTENTS = new Set([
 
 const VALID_SOURCES = new Set(["gesture", "voice_regex", "voice_agent", "ui_click"]);
 
-function id(prefix) {
-  return `${prefix}-${crypto.randomUUID()}`;
-}
+const COMMAND_OPERATION_IDS = Object.freeze({
+  OPEN_CAMERA: OPERATION_IDS.LIVE_VIEW,
+  CLOSE_CAMERA: OPERATION_IDS.LIVE_VIEW,
+  OPEN_GROUP: OPERATION_IDS.INVENTORY_READ,
+  CLOSE_GROUP: OPERATION_IDS.INVENTORY_READ,
+  PAN_TO_ZONE: OPERATION_IDS.PTZ,
+  ZOOM_TO: OPERATION_IDS.PTZ,
+  START_TRACKING: OPERATION_IDS.TRACKING_UPDATE,
+  PAUSE_SESSION: OPERATION_IDS.TRACKING_UPDATE,
+  RESUME_SESSION: OPERATION_IDS.TRACKING_UPDATE,
+  ESCALATE_SESSION: OPERATION_IDS.TRACKING_UPDATE,
+  SEARCH: OPERATION_IDS.INVENTORY_READ,
+  STOP_ALL: OPERATION_IDS.LIVE_VIEW,
+  SET_MEDIA_POLICY_VISIBILITY: OPERATION_IDS.LIVE_VIEW
+});
 
 function createCommand({ intent, target, params = {}, source = "ui_click", confidence, rawText }) {
   if (!VALID_INTENTS.has(intent)) {
@@ -31,7 +49,7 @@ function createCommand({ intent, target, params = {}, source = "ui_click", confi
     throw new Error(`Unsupported command source: ${source}`);
   }
   return {
-    id: id("cmd"),
+    id: createId("cmd"),
     intent,
     target,
     params,
@@ -46,11 +64,28 @@ class CommandExecutor {
   constructor(db, services = {}) {
     this.db = db;
     this.services = services;
+    this.resiliencePolicy = services.resiliencePolicy || new ResiliencePolicyService();
   }
 
   execute(command) {
     const normalized = createCommand(command);
-    const result = this.dispatch(normalized);
+    const operationId = COMMAND_OPERATION_IDS[normalized.intent];
+    const preflight = this.resiliencePolicy.operationPreflight(operationId, {
+      authorizationAvailable: normalized.params.authorizationAvailable !== false,
+      durableAuditAvailable: !this.db.persistenceFallback,
+      expiresAt: normalized.params.expiresAt,
+      now: normalized.params.now
+    });
+    const result = preflight.allowed
+      ? { ...this.dispatch(normalized), operationId }
+      : {
+          status: "rejected",
+          reason: `Operation ${operationId} was blocked by resilience policy.`,
+          reasonCode: preflight.reasonCode,
+          operationId,
+          outcome: policyOutcome(preflight)
+        };
+    if (!result.outcome) result.outcome = commandOutcome(result);
     this.log(normalized, result.status, result);
     return result;
   }
@@ -118,7 +153,7 @@ class CommandExecutor {
     if (!camera) return { status: "rejected", reason: "Camera not found", target: command.target };
 
     const session = {
-      id: id("track"),
+      id: createId("track"),
       caseType: command.params.caseType || "other",
       status: "active",
       priority: command.params.priority || "normal",
@@ -159,7 +194,7 @@ class CommandExecutor {
   addBreadcrumb(sessionId, cameraId, command) {
     const position = this.db.table("cameraPositions").find((item) => item.cameraId === cameraId);
     this.db.upsert("sessionBreadcrumbs", {
-      id: id("crumb"),
+      id: createId("crumb"),
       sessionId,
       cameraId,
       enteredAt: formatDateTime(),
@@ -219,6 +254,7 @@ function normalizeLookup(value) {
 }
 
 module.exports = {
+  COMMAND_OPERATION_IDS,
   CommandExecutor,
   createCommand,
   normalizeLookup

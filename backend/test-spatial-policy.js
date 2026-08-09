@@ -2,11 +2,12 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { resolveTierByZone, shouldApplyTierChange } = require("./media-policy");
+const mediaPolicy = require("./media-policy");
+const { resolveTierByZone, shouldApplyTierChange } = mediaPolicy;
 
 const source = fs.readFileSync(path.join(__dirname, "..", "spatial-canvas.js"), "utf8");
 const sandbox = {
-  window: {},
+  window: { VmsMediaPolicy: mediaPolicy },
   performance: { now: () => 0 },
   requestAnimationFrame: () => 0,
   cancelAnimationFrame: () => {}
@@ -126,6 +127,7 @@ run("bandwidth cap: a cap larger than the candidate count keeps everyone active"
 function createCanvasRuntime(ResizeObserverCtor) {
   const windowListeners = new Map();
   const runtimeWindow = {
+    VmsMediaPolicy: mediaPolicy,
     addEventListener(type, listener) {
       windowListeners.set(type, listener);
     },

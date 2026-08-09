@@ -1,21 +1,23 @@
-const crypto = require("crypto");
+const { createId } = require("../shared/core");
 const { formatDateTime } = require("./datetime");
 const {
   DeviceAdapterRegistry,
   createDefaultDeviceAdapterRegistry
 } = require("./device-adapters");
+const {
+  OPERATION_IDS,
+  ResiliencePolicyService,
+  fromLegacyStatus,
+  policyOutcome
+} = require("./resilience");
 
 const DEVICE_OPERATIONS = Object.freeze({
-  DISCOVERY: "device.discovery",
-  HEALTH: "device.health",
-  FIRMWARE: "device.firmware",
-  EVENTS: "device.events",
-  PTZ: "camera.ptz"
+  DISCOVERY: OPERATION_IDS.DEVICE_DISCOVERY,
+  HEALTH: OPERATION_IDS.DEVICE_HEALTH,
+  FIRMWARE: OPERATION_IDS.DEVICE_FIRMWARE,
+  EVENTS: OPERATION_IDS.DEVICE_EVENTS,
+  PTZ: OPERATION_IDS.PTZ
 });
-
-function id(prefix) {
-  return `${prefix}-${crypto.randomUUID()}`;
-}
 
 function explicitAdapterId(deviceOrQuery = {}) {
   if (typeof deviceOrQuery === "string") return deviceOrQuery;
@@ -23,27 +25,50 @@ function explicitAdapterId(deviceOrQuery = {}) {
 }
 
 class DeviceIntegrationService {
-  constructor(db, registry = createDefaultDeviceAdapterRegistry()) {
+  constructor(db, registry = createDefaultDeviceAdapterRegistry(), {
+    resiliencePolicy = new ResiliencePolicyService()
+  } = {}) {
     if (!(registry instanceof DeviceAdapterRegistry)) {
       throw new TypeError("DeviceIntegrationService requires a DeviceAdapterRegistry.");
     }
     this.db = db;
     this.registry = registry;
+    this.resiliencePolicy = resiliencePolicy;
   }
 
   adapterFor(deviceOrQuery = {}) {
     return this.registry.resolve(explicitAdapterId(deviceOrQuery));
   }
 
+  async executeAdapter(adapterId, operationId, adapterContext, policyContext = {}) {
+    const preflight = this.resiliencePolicy.operationPreflight(operationId, {
+      authorizationAvailable: true,
+      durableAuditAvailable: !this.db.persistenceFallback,
+      ...policyContext
+    });
+    if (!preflight.allowed) {
+      return {
+        status: "failed",
+        outcome: policyOutcome(preflight),
+        adapterId: explicitAdapterId(adapterId),
+        operation: operationId,
+        reasonCode: preflight.reasonCode,
+        message: `Operation ${operationId} was blocked by resilience policy.`,
+        policyDecision: preflight
+      };
+    }
+    return this.registry.execute(explicitAdapterId(adapterId), operationId, adapterContext);
+  }
+
   async discover({ range = "", adapterId = "" } = {}) {
-    const outcome = await this.registry.execute(adapterId, DEVICE_OPERATIONS.DISCOVERY, { range });
+    const outcome = await this.executeAdapter(adapterId, DEVICE_OPERATIONS.DISCOVERY, { range });
     if (outcome.status !== "succeeded") return { ...outcome, devices: [] };
 
     const discovered = Array.isArray(outcome.data) ? outcome.data : [];
     discovered.forEach((device) => {
       const port = Number(device.port);
       this.db.upsert("deviceDiscoveryResults", {
-        id: device.id || id("disc"),
+        id: device.id || createId("disc"),
         adapterId: outcome.adapterId,
         vendor: device.vendor || "",
         host: device.host,
@@ -58,19 +83,33 @@ class DeviceIntegrationService {
   }
 
   async testConnection(device) {
-    const outcome = await this.registry.execute(
-      explicitAdapterId(device),
+    const outcome = await this.executeAdapter(
+      device,
       DEVICE_OPERATIONS.HEALTH,
       { device }
     );
     if (outcome.status !== "succeeded") return { ...outcome, health: null };
 
     const result = outcome.data || {};
+    const observedAt = formatDateTime();
+    const dimensions = fromLegacyStatus(
+      result.ok === true ? "online" : result.ok === false ? "offline" : "unknown",
+      {
+        resourceId: device.id,
+        adapter: "available",
+        lastObservedAt: observedAt,
+        message: result.message || ""
+      }
+    );
     const row = {
-      id: id("health"),
+      id: createId("health"),
       deviceId: device.id,
-      checkedAt: formatDateTime(),
-      status: result.ok ? "online" : "offline",
+      checkedAt: observedAt,
+      status: result.ok === true ? "online" : result.ok === false ? "offline" : "unknown",
+      reachability: dimensions.reachability,
+      freshness: dimensions.freshness,
+      functional: dimensions.functional,
+      adapter: dimensions.adapter,
       latencyMs: result.latencyMs ?? null,
       firmwareVersion: result.firmwareVersion || "",
       message: result.message || "",
@@ -81,8 +120,8 @@ class DeviceIntegrationService {
   }
 
   async inspectFirmware(device) {
-    const outcome = await this.registry.execute(
-      explicitAdapterId(device),
+    const outcome = await this.executeAdapter(
+      device,
       DEVICE_OPERATIONS.FIRMWARE,
       { device }
     );
@@ -103,8 +142,8 @@ class DeviceIntegrationService {
   }
 
   async ingestEvents(device, { since } = {}) {
-    const outcome = await this.registry.execute(
-      explicitAdapterId(device),
+    const outcome = await this.executeAdapter(
+      device,
       DEVICE_OPERATIONS.EVENTS,
       { device, since }
     );
@@ -113,7 +152,7 @@ class DeviceIntegrationService {
     const events = Array.isArray(outcome.data) ? outcome.data : [];
     events.forEach((event) => {
       this.db.upsert("deviceEvents", {
-        id: event.id || id("event"),
+        id: event.id || createId("event"),
         deviceId: device.id,
         cameraId: event.cameraId || "",
         eventType: event.eventType || "device",
@@ -129,10 +168,16 @@ class DeviceIntegrationService {
   }
 
   async executePtzCommand(device, camera, command) {
-    const outcome = await this.registry.execute(
-      explicitAdapterId(device),
+    const outcome = await this.executeAdapter(
+      device,
       DEVICE_OPERATIONS.PTZ,
-      { device, camera, command }
+      { device, camera, command },
+      {
+        now: command.now,
+        expiresAt: command.expiresAt,
+        authorizationAvailable: command.authorizationAvailable !== false,
+        durableAuditAvailable: command.durableAuditAvailable ?? !this.db.persistenceFallback
+      }
     );
 
     if (outcome.outcomeUnknown === true) {
@@ -162,7 +207,7 @@ class DeviceIntegrationService {
 
   recordPtzOutcome(device, camera, command, { status, message = "", reasonCode = "" }) {
     const row = {
-      id: id("ptz"),
+      id: createId("ptz"),
       deviceId: device.id,
       cameraId: camera.id,
       command: command.action,

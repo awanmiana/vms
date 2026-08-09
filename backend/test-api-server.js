@@ -1,85 +1,13 @@
 const assert = require("assert");
 const fs = require("fs");
-const http = require("http");
 const os = require("os");
 const path = require("path");
-const { FileDatabase } = require("./file-db");
-const { createVmsServer } = require("./server");
+const { createTestHarness } = require("../test-support/harness");
+const { withServer, request } = require("../test-support/http-server");
+const { createMemoryDatabase } = require("../test-support/memory-database");
 
-function memoryDb() {
-  const db = new FileDatabase(path.join(__dirname, "unused-api-test-db.json"));
-  db.memoryOnly = true;
-  return db;
-}
-
-function listen(server) {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(server));
-  });
-}
-
-function close(server) {
-  return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-}
-
-function request(server, { method = "GET", pathname = "/", body } = {}) {
-  return new Promise((resolve, reject) => {
-    const address = server.address();
-    const payload = body === undefined ? null : JSON.stringify(body);
-    const req = http.request(
-      {
-        host: "127.0.0.1",
-        port: address.port,
-        method,
-        path: pathname,
-        headers: payload
-          ? {
-              "Content-Type": "application/json",
-              "Content-Length": Buffer.byteLength(payload)
-            }
-          : undefined
-      },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          const isJson = String(response.headers["content-type"] || "").includes("application/json");
-          resolve({
-            status: response.statusCode,
-            headers: response.headers,
-            text,
-            body: isJson && text ? JSON.parse(text) : null
-          });
-        });
-      }
-    );
-    req.on("error", reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-async function withServer(options, fn) {
-  const server = await listen(createVmsServer(options));
-  try {
-    return await fn(server);
-  } finally {
-    await close(server);
-  }
-}
-
-async function run(name, fn) {
-  try {
-    await fn();
-    console.log(`ok - ${name}`);
-  } catch (error) {
-    console.error(`FAIL - ${name}`);
-    console.error(error);
-    process.exitCode = 1;
-  }
-}
+const { run, finish } = createTestHarness("API server");
+const memoryDb = () => createMemoryDatabase("api-server");
 
 const sampleInventory = {
   devices: [
@@ -331,7 +259,7 @@ async function main() {
 
       const stored = JSON.parse(fs.readFileSync(databasePath, "utf8"));
       assert.strictEqual(stored.inventoryState.initialized, true);
-      assert.strictEqual(stored.inventoryState.version, 1);
+      assert.strictEqual(stored.inventoryState.version, 2);
 
       await withServer({ databasePath }, async (server) => {
         const response = await request(server, { pathname: "/api/inventory" });
@@ -368,11 +296,7 @@ async function main() {
     });
   });
 
-  if (process.exitCode) {
-    console.error("\nSome API server tests failed.");
-  } else {
-    console.log("\nAll API server tests passed.");
-  }
+  finish();
 }
 
 main().catch((error) => {
