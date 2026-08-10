@@ -114,6 +114,9 @@ public:
     // Machine-readable catalog (JSON array of specs) — the P1-13 discovery
     // seed an external agent will read.
     std::string catalogJson() const;
+    // Capability-filtered catalog for a scoped external identity. A client is
+    // never advertised commands it cannot invoke.
+    std::string catalogJson(const std::set<std::string>& capabilities) const;
 
     // Ordered command ids (for the palette's command list).
     std::vector<std::string> ids() const;

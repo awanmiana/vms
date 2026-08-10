@@ -44,6 +44,9 @@
 #include <iostream>
 #include <numeric>
 #include <string>
+#include <vector>
+
+#include "media/RtspTransportPolicy.h"
 
 #ifdef VMS_WITH_PERSIST
 #include <map>
@@ -63,6 +66,7 @@
 #include "persist/StreamDurationRepo.h"
 #include "persist/DeviceRepo.h"
 #include "persist/SecretStore.h"
+#include "persist/CredentialRepo.h"
 #include "health/HealthMonitor.h"
 #include "PlaybackController.h"
 #include "InstantReplayController.h"
@@ -73,6 +77,10 @@
 #include "PremisesController.h"
 #include "SiteOperationsController.h"
 #include "command/CoverageCheck.h"
+#ifdef VMS_WITH_BROKER_MEDIA
+#include "broker/ConnectionBroker.h"
+#include "media/BrokerGridLiveSource.h"
+#endif
 #ifdef VMS_WITH_API
 #include <QEventLoop>
 #include <QJsonArray>
@@ -890,12 +898,17 @@ int runAuditSelftest() {
               "rows hash-chain to their predecessors (genesis is empty)");
 
         // API attribution through the same sink.
-        cmd.setSource(QStringLiteral("api"));
+        cmd.setAuditContext(QStringLiteral("api"),
+                            QStringLiteral("agent:selftest"),
+                            QStringLiteral("request:http-001"));
         cmd.registry().invoke("workspace.focus", {{"tile", std::int64_t{1}}},
                               cmd.capabilities());
         check(static_cast<bool>(repo.list(1, rows)) && rows.size() == 1 &&
-                  rows[0].source == "api",
-              "API attempts attributed to 'api'");
+                  rows[0].source == "api" &&
+                  rows[0].actorId == "agent:selftest" &&
+                  rows[0].correlationId == "request:http-001",
+              "API actor and request correlation persist in the v2 chain row");
+        cmd.setAuditContext(QStringLiteral("ui"), QString(), QString());
 
         AuditEntry config;
         config.timeUtc = "2026-08-09 12:00:00";
@@ -1188,7 +1201,12 @@ int runApiSelftest(int argc, char** argv) {
 
     WorkspaceController live(vms::DevBoxProfile(), 16);
     CommandController cmd(&live, nullptr, nullptr);
-    CommandServer server(&cmd, QStringLiteral("test-token-123"));
+    CommandServer server(
+        &cmd,
+        std::vector<ApiIdentity>{
+            {QStringLiteral("test-admin"), QStringLiteral("test-token-123"),
+             cmd.capabilities()},
+            {QStringLiteral("catalog-only"), QStringLiteral("view-token"), {}}});
     QString err;
     check(server.listen(0, err), "server binds a loopback ephemeral port");
     const quint16 port = server.port();
@@ -1203,6 +1221,7 @@ int runApiSelftest(int argc, char** argv) {
         QNetworkRequest req{QUrl(base + path)};
         if (!token.isEmpty())
             req.setRawHeader("Authorization", "Bearer " + token.toUtf8());
+        req.setRawHeader("X-Correlation-ID", "api-selftest-001");
         req.setHeader(QNetworkRequest::ContentTypeHeader,
                       QStringLiteral("application/json"));
         QNetworkReply* rep = (qstrcmp(method, "GET") == 0)
@@ -1239,14 +1258,37 @@ int runApiSelftest(int argc, char** argv) {
             hasFocus = true;
     check(hasFocus, "catalog carries the drivable command specs");
 
+    QJsonDocument scopedCat = http("GET", QStringLiteral("/v1/commands"),
+                                   QStringLiteral("view-token"), {}, st);
+    check(st == 200 && scopedCat.isArray() && scopedCat.array().isEmpty(),
+          "scoped identity sees only its capability-filtered catalog");
+    const int beforeDenied = live.focusIndex();
+    QJsonObject deniedBody;
+    deniedBody.insert(QStringLiteral("command"),
+                      QStringLiteral("workspace.focus"));
+    deniedBody.insert(QStringLiteral("args"),
+                      QJsonObject{{QStringLiteral("tile"), 9}});
+    QJsonDocument denied = http(
+        "POST", QStringLiteral("/v1/invoke"), QStringLiteral("view-token"),
+        QJsonDocument(deniedBody).toJson(QJsonDocument::Compact), st);
+    check(st == 403 &&
+              denied.object().value(QStringLiteral("outcome")).toString() ==
+                  QLatin1String("capability-denied") &&
+              live.focusIndex() == beforeDenied,
+          "scoped identity cannot invoke an ungranted command");
+
     // 3) A valid invocation moves the REAL workspace.
     QJsonObject body;
     body.insert(QStringLiteral("command"), QStringLiteral("workspace.focus"));
     body.insert(QStringLiteral("args"), QJsonObject{{QStringLiteral("tile"), 5}});
     QJsonDocument r = invoke(body, st);
     check(st == 200 && r.object().value(QStringLiteral("outcome")).toString() ==
-              QLatin1String("ok"),
-          "POST /v1/invoke workspace.focus -> 200 ok");
+              QLatin1String("ok") &&
+              r.object().value(QStringLiteral("identity")).toString() ==
+                  QLatin1String("test-admin") &&
+              r.object().value(QStringLiteral("correlationId")).toString() ==
+                  QLatin1String("api-selftest-001"),
+          "invoke -> 200 with scoped identity and request correlation");
     check(live.focusIndex() == 5, "the API call moved the real working set");
 
     body = QJsonObject();
@@ -1295,6 +1337,22 @@ int runApiSelftest(int argc, char** argv) {
     check(rep->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 400,
           "malformed JSON body -> 400");
     rep->deleteLater();
+    body = QJsonObject{{QStringLiteral("command"),
+                        QStringLiteral("workspace.focus")},
+                       {QStringLiteral("args"), QStringLiteral("not-an-object")}};
+    r = invoke(body, st);
+    check(st == 400 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("bad-param"),
+          "non-object args fail closed at the transport boundary");
+    body = QJsonObject{{QStringLiteral("command"),
+                        QStringLiteral("workspace.focus")},
+                       {QStringLiteral("args"),
+                        QJsonObject{{QStringLiteral("tile"), 5}}},
+                       {QStringLiteral("confirm"), QStringLiteral("yes")}};
+    r = invoke(body, st);
+    check(st == 400 && r.object().value(QStringLiteral("outcome")).toString() ==
+              QLatin1String("bad-param"),
+          "non-boolean destructive confirmation fails closed");
     http("GET", QStringLiteral("/nope"), QStringLiteral("test-token-123"), {}, st);
     check(st == 404, "unknown route -> honest JSON 404");
 
@@ -1306,6 +1364,17 @@ int runApiSelftest(int argc, char** argv) {
     }
     check(okd >= 2 && refused >= 3,
           "API attempts audited through the same trail (refusals included)");
+    bool attributed = false;
+    for (const QVariant& v : cmd.auditLog()) {
+        const QVariantMap row = v.toMap();
+        if (row.value(QStringLiteral("actor")).toString() ==
+                QLatin1String("test-admin") &&
+            row.value(QStringLiteral("correlation")).toString() ==
+                QLatin1String("api-selftest-001"))
+            attributed = true;
+    }
+    check(attributed,
+          "API audit records carry stable actor and correlation identities");
 
     // 7) Increment 42: a bounded transport rejects excess requests before
     // they can reach the command envelope or mutate the real workspace.
@@ -1465,6 +1534,12 @@ int runAlarmsSelftest() {
     check(cmd.run(QStringLiteral("alarm.ack 9999"))
               .startsWith(QLatin1String("failed")),
           "an unknown alarm id fails honestly through the envelope");
+    r = cmd.run(QStringLiteral("alarm.assign %1 operator-42").arg(alarmId));
+    check(r.startsWith(QLatin1String("ok")) &&
+              alarms.alarms()[0].toMap()
+                      .value(QStringLiteral("assignedTo")).toString() ==
+                  QLatin1String("operator-42"),
+          "'alarm.assign' routes assignment through the audited envelope");
 
     // Recovery auto-clears via the same live feed.
     fakeProbe.reachable["cam-1"] = true;
@@ -1488,8 +1563,10 @@ int runAlarmsSelftest() {
           "maintenance suppresses notification, never the alarm itself");
 
     // The alarm verbs are in the machine-readable catalog (palette + API).
-    check(cmd.catalogJson().contains(QLatin1String("\"id\":\"alarm.ack\"")),
-          "alarm verbs discoverable in the command catalog");
+    check(cmd.catalogJson().contains(QLatin1String("\"id\":\"alarm.ack\"")) &&
+              cmd.catalogJson().contains(
+                  QLatin1String("\"id\":\"alarm.assign\"")),
+          "alarm lifecycle and assignment verbs discoverable in the catalog");
 
     if (failures == 0) {
         std::cout << "PASS: health transitions raise deduplicated alarms end-"
@@ -3128,10 +3205,16 @@ int main(int argc, char* argv[]) {
     int auditDumpLimit = 20;
     int apiPort = -1;                    // >=0: serve the loopback control API
     std::string apiToken;                // override the generated bearer token
+    std::string apiIdentity = "session"; // stable audit actor for this token
+    std::string apiCapabilities;         // comma-separated least-privilege scope
+    bool apiCapabilitiesSet = false;
     int apiRateLimit = 120;              // requests per fixed 60-second window
     bool devicesSelftest = false;        // headless DeviceController check (inc 14)
     bool devicesDemo = false;            // seed demo devices for the Devices tab
     bool video = false;
+    std::vector<std::string> liveCameraIds; // inventory ids, tile order
+    vms::media::RtspTransportPolicy rtspPolicy;
+    int brokerMaxSessions = 4;
     bool noPersist = false;
     std::string dbPathArg;
     std::string recDbArg = "rec.db";     // recording index for the Playback tab
@@ -3191,6 +3274,11 @@ int main(int argc, char* argv[]) {
             apiPort = std::atoi(argv[++i]);
         } else if (a == "--api-token" && i + 1 < argc) {
             apiToken = argv[++i];
+        } else if (a == "--api-identity" && i + 1 < argc) {
+            apiIdentity = argv[++i];
+        } else if (a == "--api-capabilities" && i + 1 < argc) {
+            apiCapabilities = argv[++i];
+            apiCapabilitiesSet = true;
         } else if (a == "--api-rate-limit" && i + 1 < argc) {
             apiRateLimit = std::atoi(argv[++i]);
         } else if (a == "--devices-selftest") {
@@ -3199,6 +3287,30 @@ int main(int argc, char* argv[]) {
             devicesDemo = true;
         } else if (a == "--video") {
             video = true;
+        } else if (a == "--live-camera") {
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() ||
+                std::string(argv[i + 1]).rfind("--", 0) == 0) {
+                std::cerr << "--live-camera requires a non-empty inventory camera id\n";
+                return 2;
+            }
+            liveCameraIds.emplace_back(argv[++i]);
+            video = true;
+        } else if (a == "--rtsp-transport") {
+            if (i + 1 >= argc) {
+                std::cerr << "--rtsp-transport requires auto, tcp, udp, or multicast\n";
+                return 2;
+            }
+            if (!vms::media::ParseRtspTransportMode(argv[++i],
+                                                    rtspPolicy.mode)) {
+                std::cerr << "--rtsp-transport must be auto, tcp, udp, or multicast\n";
+                return 2;
+            }
+        } else if (a == "--broker-max-sessions") {
+            if (i + 1 >= argc) {
+                std::cerr << "--broker-max-sessions requires a positive integer\n";
+                return 2;
+            }
+            brokerMaxSessions = std::atoi(argv[++i]);
         } else if (a == "--no-persist") {
             noPersist = true;
         } else if (a == "--db" && i + 1 < argc) {
@@ -3236,6 +3348,10 @@ int main(int argc, char* argv[]) {
                 "  --sweep-interval S   seconds between focus re-plans (default 4)\n"
                 "  --video              render live video under the state chrome\n"
                 "                       (slice 2; needs the GStreamer build)\n"
+                "  --live-camera ID     use an inventory camera in tile order\n"
+                "                       (repeatable; implies --video)\n"
+                "  --rtsp-transport M   auto|tcp|udp|multicast (default auto)\n"
+                "  --broker-max-sessions N  per-device live-session ceiling\n"
                 "  --selftest           headless plan check, no window\n"
                 "  --instant-selftest   headless instant-replay check (inc 23)\n"
                 "  --spatial            start the Live tab on the spatial canvas\n"
@@ -3249,6 +3365,9 @@ int main(int argc, char* argv[]) {
                 "                       prints the bearer token; off by default)\n"
                 "  --api-rate-limit N   max API requests per 60 seconds\n"
                 "                       (default 120; must be positive)\n"
+                "  --api-identity ID    stable actor id for API audit rows\n"
+                "  --api-capabilities C comma-separated least-privilege scopes\n"
+                "                       (default: session capabilities)\n"
                 "  --api-selftest       headless control-API check (inc 26)\n"
                 "  --alarms-selftest    headless alarm-surface check (inc 27)\n"
                 "  --audit-dump [N]     print the durable audit log + chain verdict\n"
@@ -3260,6 +3379,16 @@ int main(int argc, char* argv[]) {
                 "  --devices-demo       seed demo devices in the Devices tab\n";
             return 0;
         }
+    }
+
+    if (!liveCameraIds.empty()) count = static_cast<int>(liveCameraIds.size());
+    if (brokerMaxSessions <= 0) {
+        std::cerr << "--broker-max-sessions must be positive\n";
+        return 2;
+    }
+    if (!liveCameraIds.empty() && noPersist) {
+        std::cerr << "--live-camera requires the persistent inventory and secret store\n";
+        return 2;
     }
 
 #ifdef VMS_WITH_API
@@ -3318,6 +3447,13 @@ int main(int argc, char* argv[]) {
     if (video) {
         std::cerr << "--video needs the GStreamer build; this binary was built "
                      "without it.\n";
+        return 2;
+    }
+#endif
+
+#ifndef VMS_WITH_BROKER_MEDIA
+    if (!liveCameraIds.empty()) {
+        std::cerr << "--live-camera needs the broker-backed Windows workspace build\n";
         return 2;
     }
 #endif
@@ -3398,6 +3534,12 @@ int main(int argc, char* argv[]) {
                       << store.schemaVersion() << ")" << std::endl;
         }
     }
+    if (!liveCameraIds.empty() && !persisting) {
+        std::cerr << "live media: could not open the persistent inventory store\n";
+        return 2;
+    }
+    if (!liveCameraIds.empty())
+        liveController.setTileCount(static_cast<int>(liveCameraIds.size()));
 #endif
 
     // inc 31 (P3-15): canonical active site/floor metadata for the spatial
@@ -3427,6 +3569,11 @@ int main(int argc, char* argv[]) {
 #ifdef VMS_WITH_PERSIST
     std::unique_ptr<vms::persist::SecretStore> deviceSecrets;
     std::unique_ptr<vms::persist::DeviceRepo> deviceRepo;
+#ifdef VMS_WITH_BROKER_MEDIA
+    std::unique_ptr<vms::persist::CredentialRepo> mediaCredentials;
+    std::unique_ptr<vms::broker::ConnectionBroker> mediaBroker;
+    std::unique_ptr<vms::media::BrokerGridLiveSource> workspaceLiveSource;
+#endif
     vms::health::HealthMonitor deviceHealth;
     DeviceController* devices = nullptr;
     if (persisting) {
@@ -3440,6 +3587,24 @@ int main(int argc, char* argv[]) {
 #endif
         deviceRepo =
             std::make_unique<vms::persist::DeviceRepo>(store, *deviceSecrets);
+#ifdef VMS_WITH_BROKER_MEDIA
+        if (!liveCameraIds.empty()) {
+            mediaCredentials = std::make_unique<vms::persist::CredentialRepo>(
+                store, *deviceSecrets);
+            vms::broker::BrokerConfig mediaBrokerConfig;
+            mediaBrokerConfig.maxSessionsPerDevice = brokerMaxSessions;
+            mediaBroker = std::make_unique<vms::broker::ConnectionBroker>(
+                store, *mediaCredentials, mediaBrokerConfig);
+            workspaceLiveSource =
+                std::make_unique<vms::media::BrokerGridLiveSource>(
+                    *mediaBroker, liveCameraIds);
+            std::cout << "live media: " << liveCameraIds.size()
+                      << " inventory camera(s), RTSP transport="
+                      << vms::media::RtspTransportModeName(rtspPolicy.mode)
+                      << ", per-device session ceiling=" << brokerMaxSessions
+                      << " (credentials hidden)" << std::endl;
+        }
+#endif
         // inc 16: wire the ONVIF discovery source. --devices-demo uses a
         // fixture-backed fake so the Discover panel is populated without a LAN;
         // a real run uses the live UDP+HTTP source (null when the transports
@@ -3626,8 +3791,36 @@ int main(int argc, char* argv[]) {
                         .arg(QRandomGenerator::system()->generate64(), 16, 16,
                              QLatin1Char('0'));
         }
-        auto* apiServer = new CommandServer(commander, token, apiRateLimit,
-                                            60000, &app);
+        std::set<std::string> granted = commander->capabilities();
+        if (apiCapabilitiesSet) {
+            granted.clear();
+            std::size_t start = 0;
+            while (start <= apiCapabilities.size()) {
+                const std::size_t comma = apiCapabilities.find(',', start);
+                const std::string capability = apiCapabilities.substr(
+                    start, comma == std::string::npos ? std::string::npos
+                                                      : comma - start);
+                if (capability.empty() ||
+                    commander->capabilities().find(capability) ==
+                        commander->capabilities().end()) {
+                    std::cerr << "api: unknown or empty capability '"
+                              << capability << "'" << std::endl;
+                    return 2;
+                }
+                granted.insert(capability);
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+        if (apiIdentity.empty()) {
+            std::cerr << "api: --api-identity must not be empty" << std::endl;
+            return 2;
+        }
+        auto* apiServer = new CommandServer(
+            commander,
+            std::vector<ApiIdentity>{{QString::fromStdString(apiIdentity), token,
+                                      granted}},
+            apiRateLimit, 60000, &app);
         QString apiErr;
         if (!apiServer->listen(static_cast<quint16>(apiPort), apiErr)) {
             std::cerr << "api: failed to listen on 127.0.0.1:" << apiPort
@@ -3637,7 +3830,9 @@ int main(int argc, char* argv[]) {
         std::cout << "api: http://127.0.0.1:" << apiServer->port()
                   << "  (GET /v1/commands · POST /v1/invoke · bearer token: "
                   << token.toStdString() << " · rate limit: "
-                  << apiServer->requestLimit() << "/60s)" << std::endl;
+                  << apiServer->requestLimit() << "/60s Â· identity: "
+                  << apiIdentity << " Â· capabilities: " << granted.size()
+                  << ")" << std::endl;
     }
 #endif
 
@@ -3706,13 +3901,23 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Slice 2b: the governed d3d11-composited grid IS the video source, built
-        // from the same plan the chrome shows, so tile-for-tile they agree.
-        // `sweepable` pre-encodes every tier's clip so a focus sweep (2b-2) can
-        // move any tile to any tier.
-        grid = new GridPipeline(item, liveController.columns(),
-                                liveController.rows(),
-                                liveController.currentTiers(), "h265");
+        const bool inventoryLive = !liveCameraIds.empty();
+        // One construction authority is reused for initial start and layout
+        // rebuilds. Synthetic remains the default; inventory-live uses the
+        // credential broker provider and never accepts a raw URL.
+        auto makeGrid = [&]() -> GridPipeline* {
+#ifdef VMS_WITH_BROKER_MEDIA
+            if (workspaceLiveSource)
+                return new GridPipeline(
+                    item, liveController.columns(), liveController.rows(),
+                    liveController.currentTiers(), workspaceLiveSource.get(),
+                    rtspPolicy);
+#endif
+            return new GridPipeline(item, liveController.columns(),
+                                    liveController.rows(),
+                                    liveController.currentTiers(), "h265");
+        };
+        grid = makeGrid();
         std::string err;
         if (!grid->start(/*sweepable=*/true, err)) {
             std::cerr << "video: " << err << "\n";
@@ -3723,12 +3928,13 @@ int main(int argc, char* argv[]) {
         videoRunning = true;
 
         // P3-04 / inc 34: publish only observations the governed media path
-        // really owns. Decoded FPS is measured at branch buffers; codec and
-        // resolution are the active source tier. This synthetic source has no
-        // RTCP/transport feed, so bitrate/latency/loss stay typed unavailable.
+        // really owns. Live codec/resolution come from negotiated decoded caps;
+        // synthetic values come from the generated tier. RTP/RTCP metrics are a
+        // later slice, so bitrate/latency/loss remain typed unavailable.
         liveController.clearMediaDiagnostics(
             QStringLiteral("Waiting for decoded media samples"));
-        auto publishDiagnostics = [&liveController, &grid]() {
+        auto publishDiagnostics =
+            [&liveController, &grid, inventoryLive]() {
             if (!grid) return;
             QVariantList observed;
             for (const GridTileDiagnostics& sample : grid->diagnostics()) {
@@ -3747,6 +3953,9 @@ int main(int argc, char* argv[]) {
                 } else if (sample.streamState == "stalled") {
                     stateText = QStringLiteral("Stalled");
                     stateReason = QStringLiteral("No decoded buffer for two seconds");
+                } else if (sample.streamState == "unavailable") {
+                    stateText = QStringLiteral("Unavailable");
+                    stateReason = QString::fromStdString(sample.reason);
                 } else {
                     stateText = QStringLiteral("Paused by policy");
                     stateReason = QStringLiteral(
@@ -3755,7 +3964,8 @@ int main(int argc, char* argv[]) {
                 d.insert(QStringLiteral("streamStateText"), stateText);
                 d.insert(QStringLiteral("streamReason"), stateReason);
 
-                const bool mediaAssigned = sample.streamState != "paused";
+                const bool mediaAssigned = sample.streamState != "paused" &&
+                                           sample.streamState != "unavailable";
                 d.insert(QStringLiteral("codecAvailable"),
                          mediaAssigned && !sample.codec.empty());
                 QString codec = QString::fromStdString(sample.codec).toUpper();
@@ -3772,16 +3982,28 @@ int main(int argc, char* argv[]) {
 
                 d.insert(QStringLiteral("bitrateAvailable"), false);
                 d.insert(QStringLiteral("bitrateKbps"), 0.0);
-                d.insert(QStringLiteral("bitrateReason"), QStringLiteral(
-                    "Synthetic source exposes no transport bitrate"));
+                d.insert(QStringLiteral("bitrateReason"),
+                         inventoryLive
+                             ? QStringLiteral(
+                                   "RTP/RTCP bitrate extraction is not built yet")
+                             : QStringLiteral(
+                                   "Synthetic source exposes no transport bitrate"));
                 d.insert(QStringLiteral("latencyAvailable"), false);
                 d.insert(QStringLiteral("latencyMs"), 0.0);
-                d.insert(QStringLiteral("latencyReason"), QStringLiteral(
-                    "Synthetic source exposes no capture/network timestamp"));
+                d.insert(QStringLiteral("latencyReason"),
+                         inventoryLive
+                             ? QStringLiteral(
+                                   "No trusted capture/network timestamp is available yet")
+                             : QStringLiteral(
+                                   "Synthetic source exposes no capture/network timestamp"));
                 d.insert(QStringLiteral("packetLossAvailable"), false);
                 d.insert(QStringLiteral("packetLossPct"), 0.0);
-                d.insert(QStringLiteral("packetLossReason"), QStringLiteral(
-                    "Synthetic source has no RTP/RTCP packet statistics"));
+                d.insert(QStringLiteral("packetLossReason"),
+                         inventoryLive
+                             ? QStringLiteral(
+                                   "RTP/RTCP packet statistics are not extracted yet")
+                             : QStringLiteral(
+                                   "Synthetic source has no RTP/RTCP packet statistics"));
                 observed.push_back(d);
             }
             liveController.setMediaDiagnostics(observed);
@@ -3830,13 +4052,11 @@ int main(int argc, char* argv[]) {
         // A layout change (different tile count) rebuilds the whole grid pipeline
         // for the new geometry; encoded clips are cached so this is fast.
         QObject::connect(&liveController, &WorkspaceController::layoutChanged,
-                         [&liveController, &grid, item]() {
+                         [&liveController, &grid, &makeGrid]() {
             liveController.clearMediaDiagnostics(
                 QStringLiteral("Media pipeline is rebuilding"));
             if (grid) { grid->stop(); delete grid; }
-            grid = new GridPipeline(item, liveController.columns(),
-                                    liveController.rows(),
-                                    liveController.currentTiers(), "h265");
+            grid = makeGrid();
             std::string e;
             if (!grid->start(/*sweepable=*/true, e))
                 std::cerr << "video: layout rebuild failed: " << e << "\n";
@@ -4172,7 +4392,12 @@ int main(int argc, char* argv[]) {
              (duration.value(QStringLiteral("streamingMilliseconds"))
                       .toLongLong() > 0 &&
               duration.value(QStringLiteral("streamingCheckpoints"))
-                      .toLongLong() > 0));
+                      .toLongLong() > 0) ||
+             (!liveCameraIds.empty() &&
+              media.value(QStringLiteral("total")).toInt() > 0 &&
+              media.value(QStringLiteral("playing")).toInt() == 0 &&
+              media.value(QStringLiteral("unavailable")).toInt() ==
+                  media.value(QStringLiteral("total")).toInt()));
         const bool analysisHonest =
             analysis.value(QStringLiteral("available")).toBool() &&
             !analysis.value(QStringLiteral("source")).toString().isEmpty() &&
@@ -4191,8 +4416,10 @@ int main(int argc, char* argv[]) {
             (devicesDemo && device.value(QStringLiteral("total")).toInt() == 0) ||
             (devicesDemo &&
              !uptime.value(QStringLiteral("available")).toBool()) ||
-            (video && (!media.value(QStringLiteral("available")).toBool() ||
-                       media.value(QStringLiteral("playing")).toInt() == 0));
+            (video && liveCameraIds.empty() &&
+             !media.value(QStringLiteral("available")).toBool()) ||
+            (video && liveCameraIds.empty() &&
+             media.value(QStringLiteral("playing")).toInt() == 0);
         if (siteOperationsSmokeFailed)
             std::cerr << "smoke: FAIL premises operations panel contract"
                       << std::endl;
@@ -4208,6 +4435,9 @@ int main(int argc, char* argv[]) {
         int mediaKnown = 0;
         int paused = 0;
         int pausedHonest = 0;
+        int unavailable = 0;
+        int unavailableHonest = 0;
+        int activeStateKnown = 0;
         int transportUnavailable = 0;
         double minFps = 0.0;
         double maxFps = 0.0;
@@ -4232,8 +4462,20 @@ int main(int argc, char* argv[]) {
                     ++pausedHonest;
             } else {
                 ++active;
+                if (state == QLatin1String("playing") ||
+                    state == QLatin1String("connecting") ||
+                    state == QLatin1String("stalled") ||
+                    state == QLatin1String("unavailable"))
+                    ++activeStateKnown;
             }
             if (state == QLatin1String("playing")) ++playing;
+            if (state == QLatin1String("unavailable")) {
+                ++unavailable;
+                if (!d.value(QStringLiteral("fpsAvailable")).toBool() &&
+                    !d.value(QStringLiteral("codecAvailable")).toBool() &&
+                    !d.value(QStringLiteral("streamReason")).toString().isEmpty())
+                    ++unavailableHonest;
+            }
             if (d.value(QStringLiteral("fpsAvailable")).toBool()) {
                 const double fps = d.value(QStringLiteral("fps")).toDouble();
                 if (fps > 0.0) {
@@ -4258,11 +4500,15 @@ int main(int argc, char* argv[]) {
                   << " active=" << active << " playing=" << playing
                   << " fps-known=" << fpsKnown << " media-known=" << mediaKnown
                   << " paused-honest=" << pausedHonest << "/" << paused
+                  << " unavailable-honest=" << unavailableHonest << "/"
+                  << unavailable
                   << " fps-range=" << std::fixed << std::setprecision(1)
                   << minFps << ".." << maxFps << std::endl;
-        diagnosticsSmokeFailed =
-            total == 0 || active == 0 || playing == 0 || fpsKnown != playing ||
-            mediaKnown < playing || pausedHonest != paused ||
+        diagnosticsSmokeFailed = total == 0 || active == 0 ||
+            (liveCameraIds.empty() && playing == 0) ||
+            (!liveCameraIds.empty() && activeStateKnown != active) ||
+            fpsKnown != playing || mediaKnown < playing ||
+            pausedHonest != paused || unavailableHonest != unavailable ||
             transportUnavailable != total;
         if (diagnosticsSmokeFailed)
             std::cerr << "smoke: FAIL honest live diagnostics observation"

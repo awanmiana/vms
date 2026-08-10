@@ -13,6 +13,7 @@
 // Usage:
 //   vms_grid "rtsp://u:p%40host:port/path" [more urls...] [--count N]
 //            [--seconds N] [--width W] [--height H]
+//            [--rtsp-transport auto|tcp|udp|multicast]
 //   --count N   replicate the single provided URL N times (ramp to find ceiling)
 //   --seconds N run time; 0 = until the window/console is closed (default 30)
 //   (or set VMS_RTSP_URL for a single source)
@@ -54,6 +55,7 @@
 #include <gst/gst.h>
 
 #include "governor/Governor.h"
+#include "media/GstRtspPolicy.h"
 #ifdef _WIN32
 #include "hardware/HardwareProbe.h"
 #endif
@@ -183,6 +185,7 @@ struct GridState {
     // Governed-RTSP state: real per-camera streams selected by tier (see Camera).
     bool rtsp = false;                           // build fronts from cameras, not clips
     std::vector<Camera> cameras;                 // one entry per branch, id == index
+    vms::media::RtspTransportPolicy rtspPolicy;
 #ifdef _WIN32
     ULARGE_INTEGER lastKernel{}, lastUser{};
     ULARGE_INTEGER lastWall{};
@@ -294,13 +297,9 @@ bool EncodePattern(const std::string& codec, int sw, int sh, int frames,
     return ok;
 }
 
-// Lower the RTSP jitter buffer and prefer TCP (more reliable through NAT/GRE).
-void OnSourceSetup(GstElement* /*bin*/, GstElement* source, gpointer /*data*/) {
-    GObjectClass* klass = G_OBJECT_GET_CLASS(source);
-    if (g_object_class_find_property(klass, "latency"))
-        g_object_set(source, "latency", static_cast<guint>(150), nullptr);
-    if (g_object_class_find_property(klass, "protocols"))
-        g_object_set(source, "protocols", 0x4 /* GST_RTSP_LOWER_TRANS_TCP */, nullptr);
+void OnSourceSetup(GstElement* /*bin*/, GstElement* source, gpointer data) {
+    auto* state = static_cast<GridState*>(data);
+    if (state) vms::media::ApplyRtspTransportPolicy(source, state->rtspPolicy);
 }
 
 // Find the active decoder factory name inside a decodebin (d3d11h265dec,
@@ -591,7 +590,7 @@ bool BuildBranchFront(GridState* s, Branch* b, vms::Tier tier) {
         if (!b->decodebin) return false;
         const std::string& uri = UriForTier(s->cameras[b->index], tier);
         g_object_set(b->decodebin, "uri", uri.c_str(), nullptr);
-        g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
+        g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), s);
         g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
         gst_bin_add(GST_BIN(s->pipeline), b->decodebin);
         b->decoder = "(pending)";
@@ -853,6 +852,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> provisionSpecs;  // --provision "id|user:pass|main[|sub]"
     std::vector<std::string> cameraIds;   // --camera-id <id>: which cameras to open (broker)
     bool brokerSelftest = false;          // --broker-selftest: headless integration check
+    vms::media::RtspTransportPolicy rtspPolicy;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--count" && i + 1 < argc)        count = std::atoi(argv[++i]);
@@ -880,6 +880,12 @@ int main(int argc, char* argv[]) {
         else if (a == "--provision" && i + 1 < argc)   provisionSpecs.push_back(argv[++i]);
         else if (a == "--camera-id" && i + 1 < argc)   cameraIds.push_back(argv[++i]);
         else if (a == "--broker-selftest")             brokerSelftest = true;
+        else if (a == "--rtsp-transport" && i + 1 < argc) {
+            if (!vms::media::ParseRtspTransportMode(argv[++i], rtspPolicy.mode)) {
+                std::cerr << "--rtsp-transport must be auto, tcp, udp, or multicast\n";
+                return 2;
+            }
+        }
         else if (a.rfind("--", 0) != 0)            urls.push_back(a);
     }
 
@@ -933,6 +939,7 @@ int main(int argc, char* argv[]) {
                          "       (or set VMS_RTSP_URL). Encode any '@' in the password as %40.\n"
                          "   governed live: vms_grid --govern [--sweep] "
                          "--camera \"rtsp://MAIN;rtsp://SUB\" [--camera ...] [--count N]\n"
+                         "   RTSP media: --rtsp-transport auto|tcp|udp|multicast (default auto)\n"
                          "   or: vms_grid --test-pattern --count N [--codec h265|h264] "
                          "[--srcw W] [--srch H] [--seconds N]\n";
             return 2;
@@ -1151,6 +1158,10 @@ int main(int argc, char* argv[]) {
     s.focusIndex = 0;                // tile 0 is the initially focused tile
     s.rtsp = governedRtsp;           // BuildBranchFront opens real streams by tier
     s.cameras = cameras;             // one entry per branch, id == index
+    s.rtspPolicy = rtspPolicy;
+    if (!testPattern)
+        std::cout << "RTSP lower transport policy: "
+                  << vms::media::RtspTransportModeName(s.rtspPolicy.mode) << "\n";
 
     for (int i = 0; i < n; ++i) {
         auto* b = new Branch();
@@ -1204,7 +1215,7 @@ int main(int argc, char* argv[]) {
                 return 3;
             }
             g_object_set(b->decodebin, "uri", urls[i].c_str(), nullptr);
-            g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
+            g_signal_connect(b->decodebin, "source-setup", G_CALLBACK(OnSourceSetup), &s);
             g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
             gst_bin_add_many(GST_BIN(s.pipeline), b->queue, b->upload, b->decodebin, nullptr);
         }

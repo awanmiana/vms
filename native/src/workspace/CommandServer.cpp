@@ -7,7 +7,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTcpServer>
+#include <QRegularExpression>
+#include <QUuid>
 
+#include <algorithm>
 #include <cmath>
 
 #include "CommandController.h"
@@ -35,11 +38,15 @@ StatusCode statusFor(Outcome o) {
     return StatusCode::InternalServerError;
 }
 
-QHttpServerResponse resultResponse(const CommandResult& r) {
+QHttpServerResponse resultResponse(const CommandResult& r,
+                                   const QString& identityId,
+                                   const QString& correlationId) {
     QJsonObject body;
     body.insert(QStringLiteral("outcome"),
                 QString::fromLatin1(OutcomeName(r.outcome)));
     body.insert(QStringLiteral("message"), QString::fromStdString(r.message));
+    body.insert(QStringLiteral("identity"), identityId);
+    body.insert(QStringLiteral("correlationId"), correlationId);
     return QHttpServerResponse(body, statusFor(r.outcome));
 }
 
@@ -68,6 +75,26 @@ QString bearerOf(const QHttpServerRequest& req) {
     const QByteArray auth = req.value("Authorization");
     if (!auth.startsWith("Bearer ")) return QString();
     return QString::fromUtf8(auth.mid(7)).trimmed();
+}
+
+QString correlationOf(const QHttpServerRequest& req) {
+    QString value = QString::fromUtf8(req.value("X-Correlation-ID")).trimmed();
+    static const QRegularExpression safe(
+        QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"));
+    if (!safe.match(value).hasMatch())
+        value = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return value;
+}
+
+bool constantTimeEqual(const QByteArray& a, const QByteArray& b) {
+    const int count = std::max(a.size(), b.size());
+    unsigned int diff = static_cast<unsigned int>(a.size() ^ b.size());
+    for (int i = 0; i < count; ++i) {
+        const unsigned char ac = i < a.size() ? static_cast<unsigned char>(a[i]) : 0;
+        const unsigned char bc = i < b.size() ? static_cast<unsigned char>(b[i]) : 0;
+        diff |= static_cast<unsigned int>(ac ^ bc);
+    }
+    return diff == 0;
 }
 
 // JSON args -> the envelope's typed Args. Returns false + fills `why` on an
@@ -99,9 +126,30 @@ bool argsFromJson(const QJsonObject& obj, Args& out, QString& why) {
 
 CommandServer::CommandServer(CommandController* commander, QString token,
                              int requestLimit, int windowMs, QObject* parent)
-    : QObject(parent), commander_(commander), token_(std::move(token)),
+    : CommandServer(
+          commander,
+          std::vector<ApiIdentity>{{QStringLiteral("session"), std::move(token),
+                                    commander ? commander->capabilities()
+                                              : std::set<std::string>{}}},
+          requestLimit, windowMs, parent) {}
+
+CommandServer::CommandServer(CommandController* commander,
+                             std::vector<ApiIdentity> identities,
+                             int requestLimit, int windowMs, QObject* parent)
+    : QObject(parent), commander_(commander),
       requestLimit_(requestLimit > 0 ? requestLimit : 1),
       windowMs_(windowMs > 0 ? windowMs : 60000) {
+    std::set<QString> ids;
+    std::set<QString> tokens;
+    for (ApiIdentity& identity : identities) {
+        identity.id = identity.id.trimmed();
+        identity.token = identity.token.trimmed();
+        if (identity.id.isEmpty() || identity.token.isEmpty() ||
+            !ids.insert(identity.id).second ||
+            !tokens.insert(identity.token).second)
+            continue;
+        identities_.push_back(std::move(identity));
+    }
     http_ = std::make_unique<QHttpServer>();
     tcp_ = std::make_unique<QTcpServer>();
     windowClock_.start();
@@ -112,12 +160,14 @@ CommandServer::CommandServer(CommandController* commander, QString token,
                  [this](const QHttpServerRequest& req) {
         if (!admitRequest())
             return rateLimitResponse(requestLimit_, windowMs_, retryAfterMs());
-        if (bearerOf(req) != token_)
+        const ApiIdentity* identity = authenticate(bearerOf(req));
+        if (!identity)
             return errorResponse(StatusCode::Unauthorized,
                                  QStringLiteral("unauthorized"),
                                  QStringLiteral("missing or invalid bearer token"));
         const QJsonDocument doc = QJsonDocument::fromJson(
-            commander_->catalogJson().toUtf8());
+            QByteArray::fromStdString(
+                commander_->registry().catalogJson(identity->capabilities)));
         return QHttpServerResponse(doc.array());
     });
 
@@ -128,7 +178,8 @@ CommandServer::CommandServer(CommandController* commander, QString token,
                  [this](const QHttpServerRequest& req) {
         if (!admitRequest())
             return rateLimitResponse(requestLimit_, windowMs_, retryAfterMs());
-        if (bearerOf(req) != token_)
+        const ApiIdentity* identity = authenticate(bearerOf(req));
+        if (!identity)
             return errorResponse(StatusCode::Unauthorized,
                                  QStringLiteral("unauthorized"),
                                  QStringLiteral("missing or invalid bearer token"));
@@ -146,27 +197,46 @@ CommandServer::CommandServer(CommandController* commander, QString token,
                                  QStringLiteral("bad-param"),
                                  QStringLiteral("'command' is required"));
 
+        const QJsonValue argsValue = o.value(QStringLiteral("args"));
+        if (!argsValue.isUndefined() && !argsValue.isObject())
+            return errorResponse(StatusCode::BadRequest,
+                                 QStringLiteral("bad-param"),
+                                 QStringLiteral("'args' must be a JSON object"));
+        const QJsonValue confirmValue = o.value(QStringLiteral("confirm"));
+        if (!confirmValue.isUndefined() && !confirmValue.isBool())
+            return errorResponse(StatusCode::BadRequest,
+                                 QStringLiteral("bad-param"),
+                                 QStringLiteral("'confirm' must be a boolean"));
+
         Args args;
         QString why;
-        if (!argsFromJson(o.value(QStringLiteral("args")).toObject(), args, why))
+        if (!argsFromJson(argsValue.toObject(), args, why))
             return errorResponse(StatusCode::BadRequest,
                                  QStringLiteral("bad-param"), why);
-        const bool confirmed = o.value(QStringLiteral("confirm")).toBool(false);
+        const bool confirmed = confirmValue.toBool(false);
+        const QString correlation = correlationOf(req);
 
-        // Durable-audit source attribution (inc 28): this attempt came over HTTP.
-        commander_->setSource(QStringLiteral("api"));
+        // Durable structured attribution: scoped identity + request correlation.
+        commander_->setAuditContext(QStringLiteral("api"), identity->id,
+                                    correlation);
         const CommandResult r = commander_->registry().invoke(
-            id.toStdString(), args, commander_->capabilities(), confirmed);
-        commander_->setSource(QStringLiteral("ui"));
-        return resultResponse(r);
+            id.toStdString(), args, identity->capabilities, confirmed);
+        commander_->setAuditContext(QStringLiteral("ui"), QString(), QString());
+        return resultResponse(r, identity->id, correlation);
     });
 
     // Anything else: an honest JSON 404 (not an empty body).
-    http_->setMissingHandler(this, [this](const QHttpServerRequest&,
+    http_->setMissingHandler(this, [this](const QHttpServerRequest& req,
                                          QHttpServerResponder& responder) {
         if (!admitRequest()) {
             responder.sendResponse(
                 rateLimitResponse(requestLimit_, windowMs_, retryAfterMs()));
+            return;
+        }
+        if (!authenticate(bearerOf(req))) {
+            responder.sendResponse(errorResponse(
+                StatusCode::Unauthorized, QStringLiteral("unauthorized"),
+                QStringLiteral("missing or invalid bearer token")));
             return;
         }
         QJsonObject body;
@@ -179,6 +249,16 @@ CommandServer::CommandServer(CommandController* commander, QString token,
 }
 
 CommandServer::~CommandServer() = default;
+
+const ApiIdentity* CommandServer::authenticate(const QString& bearer) const {
+    if (bearer.isEmpty()) return nullptr;
+    const QByteArray supplied = bearer.toUtf8();
+    const ApiIdentity* match = nullptr;
+    for (const ApiIdentity& identity : identities_) {
+        if (constantTimeEqual(supplied, identity.token.toUtf8())) match = &identity;
+    }
+    return match;
+}
 
 bool CommandServer::admitRequest() {
     if (!windowClock_.isValid() || windowClock_.elapsed() >= windowMs_) {
@@ -197,6 +277,10 @@ int CommandServer::retryAfterMs() const {
 }
 
 bool CommandServer::listen(quint16 port, QString& error) {
+    if (!commander_ || identities_.empty()) {
+        error = QStringLiteral("at least one valid API identity is required");
+        return false;
+    }
     // Loopback ONLY — remote exposure is a security-reviewed later slice.
     if (!tcp_->listen(QHostAddress::LocalHost, port)) {
         error = tcp_->errorString();

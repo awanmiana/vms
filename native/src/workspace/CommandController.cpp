@@ -84,6 +84,8 @@ CommandController::CommandController(WorkspaceController* live,
                  QDateTime::currentDateTimeUtc().toString(
                      QStringLiteral("HH:mm:ss")));
         m.insert(QStringLiteral("source"), source_);
+        m.insert(QStringLiteral("actor"), actorId_);
+        m.insert(QStringLiteral("correlation"), correlationId_);
         m.insert(QStringLiteral("command"), QString::fromStdString(r.commandId));
         m.insert(QStringLiteral("args"), QString::fromStdString(r.argsText));
         m.insert(QStringLiteral("outcome"),
@@ -108,6 +110,8 @@ CommandController::CommandController(WorkspaceController* live,
             e.args = r.argsText;
             e.outcome = OutcomeName(r.outcome);
             e.message = r.message;
+            e.actorId = actorId_.toStdString();
+            e.correlationId = correlationId_.toStdString();
             if (vms::persist::Error err = auditRepo_->append(e, Sha256HexHash());
                 !err)
                 std::cerr << "audit: durable append failed: " << err.message
@@ -746,6 +750,20 @@ void CommandController::registerCommands() {
             return alarms_->clearAlarm(id)
                        ? ok("alarm " + std::to_string(id) + " cleared")
                        : failed("no active alarm " + std::to_string(id));
+        });
+    registry_.add(
+        {"alarm.assign", "Assign an active alarm to an operator identity",
+         "alarms.manage", false,
+         {{"id", ParamType::Int, true, 1, 1e12},
+          {"operator", ParamType::String, true}}},
+        [this](const Args& a) {
+            if (!alarms_) return failed("no alarm engine attached");
+            const int id = argInt(a, "id");
+            const std::string who = argStr(a, "operator");
+            return alarms_->assign(id, QString::fromStdString(who))
+                       ? ok("alarm " + std::to_string(id) + " assigned to " + who)
+                       : failed("no active alarm " + std::to_string(id) +
+                                " or invalid operator identity");
         });
 }
 

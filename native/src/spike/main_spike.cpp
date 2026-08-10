@@ -7,11 +7,14 @@
 //
 // Usage:
 //   vms_spike "rtsp://user:pass%40host:port/path" [--seconds N]
+//             [--rtsp-transport auto|tcp|udp|multicast]
 //   (or set VMS_RTSP_URL; --seconds 0 runs until the window/console is closed)
 //
 // Credentials are supplied at run time only and are never stored or committed.
 
 #include <gst/gst.h>
+
+#include "media/GstRtspPolicy.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -27,15 +30,12 @@ struct SpikeState {
     gint64 playingUs = 0;
     bool firstFrameSeen = false;
     bool decodersPrinted = false;
+    vms::media::RtspTransportPolicy rtspPolicy;
 };
 
-// Lower the RTSP jitter buffer and prefer TCP (more reliable through NAT/GRE).
-void OnSourceSetup(GstElement* /*playbin*/, GstElement* source, gpointer /*data*/) {
-    GObjectClass* klass = G_OBJECT_GET_CLASS(source);
-    if (g_object_class_find_property(klass, "latency"))
-        g_object_set(source, "latency", static_cast<guint>(150), nullptr);
-    if (g_object_class_find_property(klass, "protocols"))
-        g_object_set(source, "protocols", 0x4 /* GST_RTSP_LOWER_TRANS_TCP */, nullptr);
+void OnSourceSetup(GstElement* /*playbin*/, GstElement* source, gpointer data) {
+    auto* policy = static_cast<vms::media::RtspTransportPolicy*>(data);
+    if (policy) vms::media::ApplyRtspTransportPolicy(source, *policy);
 }
 
 // Print decoder/relevant element factory names so we can confirm hardware
@@ -132,21 +132,30 @@ int main(int argc, char* argv[]) {
 
     std::string url;
     int seconds = 20;
+    vms::media::RtspTransportPolicy rtspPolicy;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--seconds" && i + 1 < argc) { seconds = std::atoi(argv[++i]); }
+        else if (a == "--rtsp-transport" && i + 1 < argc) {
+            if (!vms::media::ParseRtspTransportMode(argv[++i], rtspPolicy.mode)) {
+                std::cerr << "--rtsp-transport must be auto, tcp, udp, or multicast\n";
+                return 2;
+            }
+        }
         else if (a.rfind("--", 0) != 0)       { url = a; }
     }
     if (url.empty()) {
         if (const char* e = std::getenv("VMS_RTSP_URL")) url = e;
     }
     if (url.empty()) {
-        std::cerr << "Usage: vms_spike \"rtsp://user:pass%40host:port/path\" [--seconds N]\n"
+        std::cerr << "Usage: vms_spike \"rtsp://user:pass%40host:port/path\" [--seconds N] "
+                     "[--rtsp-transport auto|tcp|udp|multicast]\n"
                      "       (or set VMS_RTSP_URL). Encode any '@' in the password as %40.\n";
         return 2;
     }
 
     SpikeState s;
+    s.rtspPolicy = rtspPolicy;
     s.loop = g_main_loop_new(nullptr, FALSE);
 
     // playbin auto-negotiates depay/parse/decode and selects a hardware decoder
@@ -162,13 +171,15 @@ int main(int argc, char* argv[]) {
 
     g_object_set(s.fpssink, "video-sink", d3dsink, "text-overlay", FALSE, nullptr);
     g_object_set(s.pipeline, "uri", url.c_str(), "video-sink", s.fpssink, nullptr);
-    g_signal_connect(s.pipeline, "source-setup", G_CALLBACK(OnSourceSetup), nullptr);
+    g_signal_connect(s.pipeline, "source-setup", G_CALLBACK(OnSourceSetup), &s.rtspPolicy);
 
     GstBus* bus = gst_element_get_bus(s.pipeline);
     gst_bus_add_watch(bus, BusCb, &s);
     gst_object_unref(bus);
 
-    std::cout << "connecting to RTSP source (credentials not shown)...\n";
+    std::cout << "connecting to RTSP source using "
+              << vms::media::RtspTransportModeName(s.rtspPolicy.mode)
+              << " lower transport (credentials not shown)...\n";
     if (gst_element_set_state(s.pipeline, GST_STATE_PLAYING) ==
         GST_STATE_CHANGE_FAILURE) {
         std::cerr << "Failed to set pipeline to PLAYING\n";

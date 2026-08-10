@@ -79,6 +79,25 @@ endif()
 add_test(NAME optimize_selfcheck COMMAND vms_opttest)
 
 # ---------------------------------------------------------------------------
+# P2-14/P3-04 transport foundation -- explicit RTSP lower-transport policy.
+# Pure C++ maps auto/TCP/UDP/multicast to the standardized RTP/RTCP transports;
+# GStreamer consumers apply it through a small property-safe adapter.
+# ---------------------------------------------------------------------------
+add_library(vms_media_policy STATIC src/media/RtspTransportPolicy.cpp)
+target_include_directories(vms_media_policy PUBLIC src)
+if(MSVC)
+    target_compile_options(vms_media_policy PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(vms_rtsp_policy_test src/media/main_rtsp_policy_test.cpp)
+target_link_libraries(vms_rtsp_policy_test PRIVATE vms_media_policy)
+if(WIN32)
+    target_compile_definitions(vms_rtsp_policy_test PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_test(NAME rtsp_transport_policy_selfcheck COMMAND vms_rtsp_policy_test)
+
+# ---------------------------------------------------------------------------
 # Native increment 13 (P2-13) — device health & lifecycle. Pure decision core:
 # honest per-dimension health -> derived state + exception lifecycle. No deps.
 # ---------------------------------------------------------------------------
@@ -178,6 +197,14 @@ if(Qt6_FOUND AND TARGET Qt6::Core)
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
     add_test(NAME onvif_selfcheck COMMAND vms_onviftest)
+    # The test executable dynamically links Qt Core. Do not depend on the
+    # caller's interactive PATH: CTest must be reproducible from a clean shell
+    # and CI runner. A bounded timeout also prevents a future loader/network
+    # regression from wedging the aggregate suite indefinitely.
+    set_tests_properties(onvif_selfcheck PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 15)
 else()
     message(STATUS "Qt6 Core not found; skipping vms_onvif (increment 11).")
 endif()
@@ -234,7 +261,9 @@ if(WIN32)
     # Native increment 6c — the standalone ConnectionBroker (single device-
     # connection identity). Pure C++: no Qt / no GStreamer, links only vms_persist
     # (Store + CredentialRepo + SecretStore), so it is unit-testable in isolation.
-    add_library(vms_broker STATIC src/broker/ConnectionBroker.cpp)
+    add_library(vms_broker STATIC
+        src/broker/ConnectionBroker.cpp
+        src/media/BrokerGridLiveSource.cpp)
     target_include_directories(vms_broker PUBLIC src)
     target_link_libraries(vms_broker PUBLIC vms_persist)
     target_compile_definitions(vms_broker PRIVATE
@@ -348,6 +377,7 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         )
         target_link_directories(vms_workspace PRIVATE "${GSTREAMER_ROOT}/lib")
         target_link_libraries(vms_workspace PRIVATE
+            vms_media_policy
             gstreamer-1.0 gstapp-1.0 gobject-2.0 glib-2.0)
         target_compile_definitions(vms_workspace PRIVATE VMS_WITH_GSTREAMER)
     endif()
@@ -355,7 +385,8 @@ if(Qt6_FOUND AND TARGET Qt6::Quick)
         # dxgi/d3d11/dxguid: the HardwareProbe used by --profile auto.
         target_link_libraries(vms_workspace PRIVATE dxgi d3d11 dxguid)
         # P0-04 inc 5c: persist and restore the workspace layout (embedded SQLite).
-        target_link_libraries(vms_workspace PRIVATE vms_persist)
+        target_link_libraries(vms_workspace PRIVATE vms_persist vms_broker)
+        target_compile_definitions(vms_workspace PRIVATE VMS_WITH_BROKER_MEDIA)
         # inc 7c: the Playback availability model over the recording SegmentIndex
         # (needs vms_persist, so Windows-only alongside it).
         target_sources(vms_workspace PRIVATE src/workspace/PlaybackController.cpp)
@@ -438,7 +469,8 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
         "${GSTREAMER_ROOT}/lib/glib-2.0/include"
     )
     target_link_directories(vms_spike PRIVATE "${GSTREAMER_ROOT}/lib")
-    target_link_libraries(vms_spike PRIVATE gstreamer-1.0 gobject-2.0 glib-2.0)
+    target_link_libraries(vms_spike PRIVATE
+        vms_media_policy gstreamer-1.0 gobject-2.0 glib-2.0)
     if(WIN32)
         target_compile_definitions(vms_spike PRIVATE
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -465,7 +497,7 @@ if(EXISTS "${GSTREAMER_ROOT}/include/gstreamer-1.0/gst/gst.h")
     )
     target_link_directories(vms_grid PRIVATE "${GSTREAMER_ROOT}/lib")
     target_link_libraries(vms_grid PRIVATE
-        vms_governor
+        vms_governor vms_media_policy
         gstreamer-1.0 gobject-2.0 glib-2.0
     )
     if(WIN32)

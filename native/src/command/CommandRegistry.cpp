@@ -313,10 +313,20 @@ CommandResult CommandRegistry::invokeText(
 }
 
 std::string CommandRegistry::catalogJson() const {
+    std::set<std::string> all;
+    for (const Entry& e : entries_) all.insert(e.spec.capability);
+    return catalogJson(all);
+}
+
+std::string CommandRegistry::catalogJson(
+    const std::set<std::string>& capabilities) const {
     std::ostringstream os;
     os << "[";
     bool firstCmd = true;
     for (const Entry& e : entries_) {
+        if (!e.spec.capability.empty() &&
+            capabilities.find(e.spec.capability) == capabilities.end())
+            continue;
         if (!firstCmd) os << ",";
         firstCmd = false;
         os << "{\"id\":\"" << jsonEscape(e.spec.id) << "\","

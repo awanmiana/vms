@@ -8,6 +8,7 @@
 // Scope: ../credential-broker-P1-03-proposal.md.
 
 #include "broker/ConnectionBroker.h"
+#include "media/BrokerGridLiveSource.h"
 #include "persist/CredentialRepo.h"
 #include "persist/Schema.h"
 #include "persist/SecretStore.h"
@@ -20,6 +21,7 @@
 
 using namespace vms::persist;
 using namespace vms::broker;
+using namespace vms::media;
 
 namespace {
 
@@ -143,6 +145,55 @@ int main() {
               "connect with an undecryptable secret is typed Crypto (honest failure)");
         // restore the good secret for the remaining tests
         creds.put("dev-1", "admin:p@ss/w0rd");
+    }
+
+    // ---- production workspace live-source lease boundary ----
+    {
+        BrokerGridLiveSource live(broker, {"cam-1", "cam-2"});
+        check(live.cameraCount() == 2,
+              "live source preserves the explicit tile-to-camera order");
+
+        GridStreamLease main;
+        check(static_cast<bool>(live.acquire(0, vms::Tier::Main, main)) &&
+                  main.valid && main.cameraId == "cam-1" &&
+                  main.uri.find("/Streaming/Channels/101") != std::string::npos,
+              "live source maps Main tier to the broker main stream");
+        check(broker.activeSessions("dev-1") == 1,
+              "live source lease holds exactly one broker pool slot");
+        scrubLeaseUri(main);
+        check(main.valid && main.uri.empty(),
+              "credential-bearing lease URI can be scrubbed before release");
+        live.release(main, StreamOutcome::Success);
+        check(!main.valid && broker.activeSessions("dev-1") == 0,
+              "successful live-source release clears lease and pool slot");
+
+        GridStreamLease sub;
+        check(static_cast<bool>(live.acquire(0, vms::Tier::Sub, sub)) &&
+                  sub.uri.find("/Streaming/Channels/102") != std::string::npos,
+              "live source maps Sub tier to the broker sub stream");
+        live.release(sub, StreamOutcome::Unknown);
+
+        GridStreamLease absent;
+        check(live.acquire(1, vms::Tier::Thumb, absent).status ==
+                  Status::NotFound && !absent.valid,
+              "Thumb maps to Sub and never falls back to an absent Main stream");
+        check(live.acquire(0, vms::Tier::Paused, absent).status ==
+                  Status::Misuse && broker.activeSessions("dev-1") == 0,
+              "Paused tier opens no broker session");
+        check(live.acquire(2, vms::Tier::Main, absent).status ==
+                  Status::NotFound,
+              "tile without an assigned camera fails honestly");
+
+        GridStreamLease failed;
+        check(static_cast<bool>(live.acquire(0, vms::Tier::Main, failed)),
+              "failure-feedback lease acquired");
+        live.release(failed, StreamOutcome::Failure);
+        check(broker.activeSessions("dev-1") == 0,
+              "failed transport still releases its broker pool slot");
+        GridStreamLease recovered;
+        check(static_cast<bool>(live.acquire(0, vms::Tier::Main, recovered)),
+              "one failed transport remains below the breaker threshold");
+        live.release(recovered, StreamOutcome::Success);
     }
 
     // ---- pooling: never exceed maxSessionsPerDevice ----

@@ -22,12 +22,17 @@
 #include "governor/Governor.h"
 
 class VideoItem;
+namespace vms::media {
+class GridLiveSource;
+struct RtspTransportPolicy;
+}
 
 struct GridTileDiagnostics {
     int tileId = -1;
     bool receiving = false;
     double fps = 0.0;
     std::string streamState;  // playing / connecting / stalled / paused
+    std::string reason;       // credential-safe state/unavailability explanation
     std::string codec;
     int width = 0;
     int height = 0;
@@ -47,15 +52,20 @@ public:
     // `tiers` is indexed by tile id (0..cols*rows-1); its size is the tile count.
     GridPipeline(VideoItem* sink, int cols, int rows,
                  std::vector<vms::Tier> tiers, std::string codec);
+    // Real inventory-backed mode. `liveSource` is non-owning and must outlive
+    // the pipeline. Each active branch leases only its governed tier's stream.
+    GridPipeline(VideoItem* sink, int cols, int rows,
+                 std::vector<vms::Tier> tiers,
+                 vms::media::GridLiveSource* liveSource,
+                 const vms::media::RtspTransportPolicy& rtspPolicy);
     ~GridPipeline();
 
     GridPipeline(const GridPipeline&) = delete;
     GridPipeline& operator=(const GridPipeline&) = delete;
 
-    // Encode the per-tier clips, assemble the grid, go PLAYING. Returns false and
-    // sets `error` on any failure (nothing is left running). When `sweepable` is
-    // true, every tier's clip is encoded up front (not just those in the initial
-    // plan) so a later applyPlan() can move any tile to any tier.
+    // Synthetic mode encodes per-tier clips; live mode obtains broker-backed
+    // RTSP leases. Both assemble the grid and go PLAYING. A live branch that
+    // cannot acquire its source is isolated as unavailable/black.
     bool start(bool sweepable, std::string& error);
     void stop();
 

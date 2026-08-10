@@ -96,6 +96,12 @@ public:
     // Source attribution for the durable rows: run() stamps "palette", the
     // HTTP server stamps "api" around its invokes, everything else is "ui".
     void setSource(const QString& source) { source_ = source; }
+    void setAuditContext(const QString& source, const QString& actorId,
+                         const QString& correlationId) {
+        source_ = source;
+        actorId_ = actorId;
+        correlationId_ = correlationId;
+    }
 
 signals:
     void auditChanged();
@@ -119,4 +125,6 @@ private:
     QStringList hints_;
     vms::persist::AuditRepo* auditRepo_ = nullptr;   // inc 28: durable audit
     QString source_ = QStringLiteral("ui");
+    QString actorId_;
+    QString correlationId_;
 };

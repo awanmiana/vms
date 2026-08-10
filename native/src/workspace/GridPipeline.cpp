@@ -3,6 +3,8 @@
 #ifdef VMS_WITH_GSTREAMER
 
 #include "VideoItem.h"
+#include "media/GridLiveSource.h"
+#include "media/GstRtspPolicy.h"
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -138,6 +140,13 @@ struct Branch {
     std::atomic<std::uint64_t> decodedFrames{0};
     std::atomic<std::int64_t> lastFrameNs{0};
     std::string decoder;
+    vms::media::GridStreamLease lease;
+    bool unavailable = false;
+    bool transportFailed = false;
+    std::string unavailableReason;
+    std::string codec;
+    int width = 0;
+    int height = 0;
 };
 
 std::int64_t steadyNowNs() {
@@ -175,6 +184,18 @@ void OnPadAdded(GstElement* dbin, GstPad* pad, gpointer user_data) {
     GstPad* qsink = gst_element_get_static_pad(b->queue, "sink");
     if (gst_pad_link(pad, qsink) == GST_PAD_LINK_OK) {
         b->decoder = FindDecoderName(GST_BIN(dbin));
+        GstCaps* negotiated = gst_pad_get_current_caps(pad);
+        if (negotiated) {
+            const GstStructure* st = gst_caps_get_structure(negotiated, 0);
+            gst_structure_get_int(st, "width", &b->width);
+            gst_structure_get_int(st, "height", &b->height);
+            gst_caps_unref(negotiated);
+        }
+        if (b->decoder.find("h264") != std::string::npos)
+            b->codec = "h264";
+        else if (b->decoder.find("h265") != std::string::npos ||
+                 b->decoder.find("hevc") != std::string::npos)
+            b->codec = "h265";
         b->linked.store(true, std::memory_order_release);
     }
     gst_object_unref(qsink);
@@ -195,6 +216,8 @@ struct GridPipeline::Impl {
     std::vector<Branch*> branches;
     std::string tierFile[4];   // indexed by (int)Tier: 1=thumb 2=sub 3=main
     std::string encoderUsed;
+    vms::media::GridLiveSource* liveSource = nullptr;  // non-owning
+    vms::media::RtspTransportPolicy rtspPolicy;
     std::atomic<std::uint64_t> outputFrames{0};
     std::atomic<std::int64_t> lastOutputFrameNs{0};
     std::uint64_t sampledOutputFrames = 0;
@@ -243,6 +266,27 @@ void resForTier(vms::Tier t, int& w, int& h) {
 
 } // namespace
 
+static bool buildBlackFront(GridPipeline::Impl* d, Branch* b,
+                            const std::string& decoderLabel,
+                            std::string& err) {
+    b->source = gst_element_factory_make("videotestsrc", nullptr);
+    if (!b->source) { err = "videotestsrc create failed"; return false; }
+    g_object_set(b->source, "pattern", 2 /*black*/, "is-live", TRUE, nullptr);
+    gst_bin_add(GST_BIN(d->pipeline), b->source);
+    if (!gst_element_link(b->source, b->queue)) {
+        err = "failed to link black source -> queue";
+        return false;
+    }
+    b->decoder = decoderLabel;
+    b->linked.store(true, std::memory_order_release);
+    return true;
+}
+
+static void OnSourceSetup(GstElement*, GstElement* source, gpointer data) {
+    auto* policy = static_cast<vms::media::RtspTransportPolicy*>(data);
+    if (policy) vms::media::ApplyRtspTransportPolicy(source, *policy);
+}
+
 // Build the decode front for a tier and link it to the branch's queue. Paused
 // tiles get a paced black source and no decoder (never a stale frame); decode
 // tiers loop the pre-encoded clip through decodebin. The queue/upload/compositor
@@ -253,18 +297,44 @@ static bool buildFront(GridPipeline::Impl* d, Branch* b, vms::Tier tier,
     b->linked.store(false, std::memory_order_release);
     b->decodedFrames.store(0, std::memory_order_relaxed);
     b->lastFrameNs.store(0, std::memory_order_relaxed);
+    b->unavailable = false;
+    b->transportFailed = false;
+    b->unavailableReason.clear();
+    b->codec.clear();
+    b->width = 0;
+    b->height = 0;
 
     if (tier == vms::Tier::Paused) {
-        b->source = gst_element_factory_make("videotestsrc", nullptr);
-        if (!b->source) { err = "videotestsrc create failed"; return false; }
-        g_object_set(b->source, "pattern", 2 /*black*/, "is-live", TRUE, nullptr);
-        gst_bin_add(GST_BIN(d->pipeline), b->source);
-        if (!gst_element_link(b->source, b->queue)) {
-            err = "failed to link black source -> queue";
+        return buildBlackFront(d, b, "(paused)", err);
+    }
+
+    if (d->liveSource) {
+        const vms::persist::Error acquired =
+            d->liveSource->acquire(b->index, tier, b->lease);
+        if (!acquired) {
+            b->unavailable = true;
+            b->unavailableReason = acquired.message.empty()
+                                       ? "Live source unavailable"
+                                       : acquired.message;
+            return buildBlackFront(d, b, "(unavailable)", err);
+        }
+
+        b->decodebin = gst_element_factory_make("uridecodebin", nullptr);
+        if (!b->decodebin) {
+            d->liveSource->release(b->lease,
+                                   vms::media::StreamOutcome::Failure);
+            err = "failed to create live URI decode element";
             return false;
         }
-        b->decoder = "(paused)";
-        b->linked.store(true, std::memory_order_release);
+        // GStreamer copies the property. Scrub our credential-bearing copy
+        // immediately; neither diagnostics nor console output can access it.
+        g_object_set(b->decodebin, "uri", b->lease.uri.c_str(), nullptr);
+        vms::media::scrubLeaseUri(b->lease);
+        g_signal_connect(b->decodebin, "source-setup",
+                         G_CALLBACK(OnSourceSetup), &d->rtspPolicy);
+        g_signal_connect(b->decodebin, "pad-added", G_CALLBACK(OnPadAdded), b);
+        gst_bin_add(GST_BIN(d->pipeline), b->decodebin);
+        b->decoder = "(pending)";
         return true;
     }
 
@@ -306,6 +376,15 @@ static void teardownFront(GridPipeline::Impl* d, Branch* b) {
         gst_element_set_state(b->source, GST_STATE_NULL);
         gst_bin_remove(GST_BIN(d->pipeline), b->source);
         b->source = nullptr;
+    }
+    if (d->liveSource && b->lease.valid) {
+        const auto outcome = b->transportFailed
+                                 ? vms::media::StreamOutcome::Failure
+                                 : (b->decodedFrames.load(
+                                        std::memory_order_relaxed) > 0
+                                        ? vms::media::StreamOutcome::Success
+                                        : vms::media::StreamOutcome::Unknown);
+        d->liveSource->release(b->lease, outcome);
     }
     b->linked.store(false, std::memory_order_release);
 }
@@ -449,6 +528,19 @@ GridPipeline::GridPipeline(VideoItem* sink, int cols, int rows,
     d_->codec = std::move(codec);
 }
 
+GridPipeline::GridPipeline(
+    VideoItem* sink, int cols, int rows, std::vector<vms::Tier> tiers,
+    vms::media::GridLiveSource* liveSource,
+    const vms::media::RtspTransportPolicy& rtspPolicy)
+    : d_(new Impl) {
+    d_->sink = sink;
+    d_->cols = cols > 0 ? cols : 1;
+    d_->rows = rows > 0 ? rows : 1;
+    d_->tiers = std::move(tiers);
+    d_->liveSource = liveSource;
+    d_->rtspPolicy = rtspPolicy;
+}
+
 GridPipeline::~GridPipeline() {
     stop();
     delete d_;
@@ -459,15 +551,17 @@ bool GridPipeline::start(bool sweepable, std::string& error) {
     // time, so every tier's clip must exist up front; otherwise just those the
     // initial plan uses.
     std::set<vms::Tier> need;
-    if (sweepable) {
-        need = {vms::Tier::Main, vms::Tier::Sub, vms::Tier::Thumb};
-    } else {
-        for (vms::Tier t : d_->tiers)
-            if (t != vms::Tier::Paused) need.insert(t);
-    }
-    if (need.empty()) {
-        error = "governor paused every tile; no video to decode";
-        return false;
+    if (!d_->liveSource) {
+        if (sweepable) {
+            need = {vms::Tier::Main, vms::Tier::Sub, vms::Tier::Thumb};
+        } else {
+            for (vms::Tier t : d_->tiers)
+                if (t != vms::Tier::Paused) need.insert(t);
+        }
+        if (need.empty()) {
+            error = "governor paused every tile; no video to decode";
+            return false;
+        }
     }
     for (vms::Tier t : need) {
         int w = 0, h = 0;
@@ -704,10 +798,45 @@ bool GridPipeline::pumpBus(std::string& error) {
     GstMessage* msg = gst_bus_pop_filtered(
         d_->bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR));
     if (!msg) return true;
+
+    // A camera/recorder failure is a branch failure, not a wall failure. Do not
+    // surface GStreamer debug text here: it can contain the credentialed URI.
+    for (Branch* b : d_->branches) {
+        if (b->decodebin &&
+            (GST_MESSAGE_SRC(msg) == GST_OBJECT(b->decodebin) ||
+             gst_object_has_as_ancestor(GST_MESSAGE_SRC(msg),
+                                        GST_OBJECT(b->decodebin)))) {
+            b->transportFailed = true;
+            b->unavailable = true;
+            b->unavailableReason = "Live media source failed";
+            // Stop and detach the failed transport before releasing its broker
+            // lease. Keeping rtspsrc alive after returning the pool slot would
+            // under-count real device sessions and can repeatedly post the same
+            // bus error. Replace only this branch with a paced black source.
+            teardownFront(d_, b);
+            std::string isolationError;
+            const bool isolated =
+                buildBlackFront(d_, b, "(unavailable)", isolationError) &&
+                syncFrontWithParent(b, isolationError);
+            gst_message_unref(msg);
+            if (isolated) {
+                error.clear();
+                return true;
+            }
+            error = "failed to isolate live media source";
+            return false;
+        }
+    }
+
     GError* e = nullptr;
     gchar* dbg = nullptr;
     gst_message_parse_error(msg, &e, &dbg);
-    error = e ? e->message : "unknown pipeline error";
+    // Vendor elements can include the complete source URI in an error string.
+    // Inventory-backed URIs may contain userinfo, tokens, or signed query
+    // parameters, so never forward raw GStreamer text for live sources.
+    error = d_->liveSource
+                ? "live media pipeline error"
+                : (e ? e->message : "unknown pipeline error");
     if (e) g_error_free(e);
     g_free(dbg);
     gst_message_unref(msg);
@@ -739,12 +868,28 @@ std::vector<GridTileDiagnostics> GridPipeline::diagnostics() {
         d.tileId = b->index;
         if (b->tier == vms::Tier::Paused) {
             d.streamState = "paused";
+            d.reason = "Decode paused by viewport or capacity policy";
             out.push_back(std::move(d));
             continue;
         }
 
-        resForTier(b->tier, d.width, d.height);
-        d.codec = d_->codec;
+        if (b->unavailable) {
+            d.streamState = "unavailable";
+            d.reason = b->unavailableReason.empty()
+                           ? "Live source unavailable"
+                           : b->unavailableReason;
+            out.push_back(std::move(d));
+            continue;
+        }
+
+        if (d_->liveSource) {
+            d.width = b->width;
+            d.height = b->height;
+            d.codec = b->codec;
+        } else {
+            resForTier(b->tier, d.width, d.height);
+            d.codec = d_->codec;
+        }
         const std::uint64_t frames =
             b->decodedFrames.load(std::memory_order_relaxed);
         // Use branch counts only for state/stall detection. Their wall-clock
@@ -756,12 +901,16 @@ std::vector<GridTileDiagnostics> GridPipeline::diagnostics() {
         d.receiving = last > 0 && nowNs - last <= 2000000000LL &&
                       outputReceiving;
         if (d.receiving) d.fps = outputFps;
-        if (d.receiving)
+        if (d.receiving) {
             d.streamState = "playing";
-        else if (!b->linked.load(std::memory_order_acquire) || frames == 0)
+            d.reason = "Decoded buffers observed";
+        } else if (!b->linked.load(std::memory_order_acquire) || frames == 0) {
             d.streamState = "connecting";
-        else
+            d.reason = "Awaiting the first decoded buffer";
+        } else {
             d.streamState = "stalled";
+            d.reason = "No decoded buffer for two seconds";
+        }
         out.push_back(std::move(d));
     }
     return out;
@@ -790,7 +939,9 @@ std::string GridPipeline::summary() const {
     for (Branch* b : d_->branches)
         if (!b->decoder.empty() && b->decoder != "(paused)")
             decoders.insert(b->decoder);
-    std::string out = "encoded with " + d_->encoderUsed + "; decoders:";
+    std::string out = d_->liveSource ? "live inventory RTSP; decoders:"
+                                     : "encoded with " + d_->encoderUsed +
+                                           "; decoders:";
     if (decoders.empty()) {
         out += " (pending)";
     } else {
@@ -804,6 +955,11 @@ std::string GridPipeline::summary() const {
 
 GridPipeline::GridPipeline(VideoItem*, int, int, std::vector<vms::Tier>,
                            std::string)
+    : d_(nullptr) {}
+GridPipeline::GridPipeline(
+    VideoItem*, int, int, std::vector<vms::Tier>,
+    vms::media::GridLiveSource*,
+    const vms::media::RtspTransportPolicy&)
     : d_(nullptr) {}
 GridPipeline::~GridPipeline() {}
 bool GridPipeline::start(bool, std::string& error) {

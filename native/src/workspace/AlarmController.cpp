@@ -57,6 +57,13 @@ bool AlarmController::clearAlarm(double alarmId) {
     return ok;
 }
 
+bool AlarmController::assign(double alarmId, const QString& operatorId) {
+    const bool ok = engine_.assign(static_cast<std::int64_t>(alarmId),
+                                   operatorId.toStdString(), nowSec());
+    if (ok) rebuild();
+    return ok;
+}
+
 void AlarmController::setDeviceMaintenance(const QString& deviceId, bool on) {
     engine_.setDeviceMaintenance(deviceId.toStdString(), on);
     rebuild();
@@ -78,6 +85,14 @@ void AlarmController::rebuild() {
                  QDateTime::fromSecsSinceEpoch(a.firstSec)
                      .toUTC().toString(QStringLiteral("HH:mm:ss")));
         m.insert(QStringLiteral("suppressed"), a.suppressed);
+        m.insert(QStringLiteral("assignedTo"),
+                 QString::fromStdString(a.assignedTo));
+        m.insert(QStringLiteral("acknowledgeBy"),
+                 static_cast<double>(a.acknowledgeBySec));
+        m.insert(QStringLiteral("resolveBy"),
+                 static_cast<double>(a.resolveBySec));
+        m.insert(QStringLiteral("acknowledgeBreached"), a.acknowledgeBreached);
+        m.insert(QStringLiteral("resolveBreached"), a.resolveBreached);
         model_.push_back(m);
     }
     emit changed();

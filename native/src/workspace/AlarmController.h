@@ -43,6 +43,7 @@ public:
     Q_INVOKABLE bool acknowledge(double alarmId);
     Q_INVOKABLE bool escalate(double alarmId);
     Q_INVOKABLE bool clearAlarm(double alarmId);
+    Q_INVOKABLE bool assign(double alarmId, const QString& operatorId);
 
     // Maintenance suppression follows the Devices tab's maintenance toggle.
     Q_INVOKABLE void setDeviceMaintenance(const QString& deviceId, bool on);
